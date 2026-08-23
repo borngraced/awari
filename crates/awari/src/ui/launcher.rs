@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::app::Daemon;
-use crate::config::Config;
 use crate::desktop::DesktopApp;
 use crate::files::FileHit;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -56,18 +55,17 @@ pub struct LauncherView {
     pub query: String,
     pub selected: usize,
     pub rows: Vec<LauncherRow>,
-    #[allow(dead_code)]
-    pub cfg: Config,
+    pub theme: Theme,
 }
 
 impl LauncherView {
-    pub fn closed(cfg: Config) -> Self {
+    pub fn closed(theme: Theme) -> Self {
         Self {
             open: false,
             query: String::new(),
             selected: 0,
             rows: Vec::new(),
-            cfg,
+            theme,
         }
     }
 }
@@ -83,10 +81,10 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    pub fn new(shell: WeakEntity<Daemon>, cfg: Config, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: WeakEntity<Daemon>, theme: Theme, cx: &mut Context<Self>) -> Self {
         Self {
             shell,
-            view: LauncherView::closed(cfg),
+            view: LauncherView::closed(theme),
             focus: cx.focus_handle(),
             hovered: None,
             open_started: None,
@@ -117,7 +115,7 @@ fn post(this: &Launcher, cx: &mut App, cmd: LauncherCmd) {
     });
 }
 
-pub fn layer_opts(_cfg: Config) -> gpui::layer_shell::LayerShellOptions {
+pub fn layer_opts() -> gpui::layer_shell::LayerShellOptions {
     use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
     LayerShellOptions {
         namespace: LAUNCHER_NAMESPACE.into(),
@@ -130,12 +128,6 @@ pub fn layer_opts(_cfg: Config) -> gpui::layer_shell::LayerShellOptions {
     }
 }
 
-/// Rank windows, apps, and files into one capped list.
-///
-/// Sections keep a fixed order — windows, apps, files — except path-shaped
-/// queries flip files to the front. Within a section, `matchq` scores rank
-/// rows (substring is the floor); the empty query shows windows, then apps
-/// ordered by recency, and never dumps files.
 pub fn filter_rows(
     query: &str,
     apps: &[DesktopApp],
@@ -304,7 +296,7 @@ impl Render for Launcher {
             post(self, cx, LauncherCmd::OpenToRender { ms });
         }
 
-        let t = self.view.cfg.theme;
+        let t = self.view.theme;
         let win_w = f32::from(window.bounds().size.width);
         let x = ((win_w - LAUNCHER_W) / 2.0).max(8.0);
 
@@ -321,7 +313,6 @@ impl Render for Launcher {
         }
         let mut last_kind_windows: Option<Option<bool>> = None;
         for (i, row) in self.view.rows.iter().enumerate() {
-            // Group header when the row kind changes (windows first, then apps).
             let kind_windows = match row.kind {
                 RowKind::Window { .. } => Some(true),
                 RowKind::App { .. } => Some(false),
@@ -656,7 +647,7 @@ mod tests {
 
     #[test]
     fn launcher_exclusive_zone_is_zero() {
-        let opts = layer_opts(crate::config::Config::default());
+        let opts = layer_opts();
         assert_eq!(f32::from(opts.exclusive_zone.unwrap()), 0.0);
         assert_eq!(opts.namespace, LAUNCHER_NAMESPACE);
     }

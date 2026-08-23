@@ -21,7 +21,6 @@ pub struct SourcesConfig {
     pub windows: bool,
     pub apps: bool,
     pub files: bool,
-    pub commands: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +52,6 @@ impl Default for SourcesConfig {
             windows: true,
             apps: true,
             files: true,
-            commands: true,
         }
     }
 }
@@ -71,7 +69,6 @@ impl Default for Config {
 
 impl FilesConfig {
     /// Empty `roots` → existing XDG user dirs. `/` is dropped.
-    #[allow(dead_code)]
     pub fn resolved_roots(&self) -> Vec<PathBuf> {
         let listed: Vec<PathBuf> = self
             .roots
@@ -236,7 +233,6 @@ fn parse_sources_body(body: &str, s: &mut SourcesConfig) {
             "windows" => s.windows = is_true(val),
             "apps" => s.apps = is_true(val),
             "files" => s.files = is_true(val),
-            "commands" => s.commands = is_true(val),
             _ => {
                 i += 1;
                 continue;
@@ -251,7 +247,7 @@ fn is_true(val: &str) -> bool {
 }
 
 fn looks_like_key(s: &str) -> bool {
-    matches!(s, "windows" | "apps" | "files" | "commands" | "reduced" | "accent")
+    matches!(s, "windows" | "apps" | "files" | "reduced" | "accent")
 }
 
 fn expand_root(raw: &str) -> Option<PathBuf> {
@@ -338,8 +334,7 @@ mod tests {
 
     #[test]
     fn sources_can_disable_chips() {
-        let c = parse("sources { commands false files true windows false }");
-        assert!(!c.sources.commands);
+        let c = parse("sources { files true windows false }");
         assert!(c.sources.files);
         assert!(!c.sources.windows);
         assert!(c.sources.apps);

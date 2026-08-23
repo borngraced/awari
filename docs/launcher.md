@@ -58,9 +58,9 @@ One field. No tabs, no provider plugins, no prefix language beyond what the quer
 
 Empty query: windows on this output, then recent apps — an in-memory activation list keyed by display name (most recent first, then alphabetical). No dump of `$HOME`.
 
-Non-empty: rank across the active chip's sources (All = windows + apps + files + commands). Substring is the floor for the small sets (windows, apps, commands), ranked by our hand-rolled subsequence scorer (`matchq`: word-boundary and contiguity bonuses) so prefix beats scattered. Files go through FFF's matcher so `firfox` and transposed path fragments still hit. Cap the visible list. Kind is a quiet glyph on mixed lists.
+Non-empty: rank across windows, apps, and files. Substring is the floor for windows/apps (`matchq`). Files go through FFF. Cap the visible list.
 
-Section order is fixed — windows, apps, files, commands — except path-shaped queries flip files to the front. Headers are labels, never selection slots.
+Section order is fixed — windows, apps, files — except path-shaped queries flip files to the front. Headers are labels, never selection slots.
 
 If the query is path-shaped (`~`, `/`, `.`, or contains `/`), files win the ranking and FFF constraints (`*.pdf`, `!node_modules/`) are allowed. `../` is a path, not a search operator.
 
@@ -90,7 +90,7 @@ KDL, `~/.config/awari/config.kdl`. **No** `exec`, scripts, or shell interpolatio
 
 **Files.** `files { roots "~/Documents" "~/code" }`. Empty list = XDG user dirs that exist. `/` is dropped. `~` expands. Listing `$HOME` is allowed and is how you opt into home-wide FFF; the RSS budget still applies after the index settles.
 
-**Sources.** `sources { windows true apps true files true commands true }` — hide a backend without recompiling.
+**Sources.** `sources { windows true apps true files true }` — hide a backend without recompiling. Commands are not a v1 key.
 
 **Motion.** `reduced`, `duration-ms` as before.
 

@@ -62,7 +62,12 @@ impl Daemon {
         cfg: Config,
     ) -> Self {
         let inbox = NiriInbox::start();
-        let (files_tx, files_rx) = crate::files::Files::spawn(cfg.files.resolved_roots());
+        let roots = if cfg.sources.files {
+            cfg.files.resolved_roots()
+        } else {
+            Vec::new()
+        };
+        let (files_tx, files_rx) = crate::files::Files::spawn(roots);
         let daemon = Self {
             niri,
             state: EventStreamState::default(),
@@ -208,7 +213,7 @@ impl Daemon {
             query: self.launcher_query.clone(),
             selected: self.launcher_selected,
             rows,
-            cfg: self.cfg.clone(),
+            theme: self.cfg.theme,
         };
         cx.defer(move |cx| {
             let _ = h.update(cx, |l, _, cx| {
@@ -223,7 +228,7 @@ impl Daemon {
             return;
         }
         let shell = cx.entity().downgrade();
-        let cfg = self.cfg.clone();
+        let theme = self.cfg.theme;
         let bounds = Bounds {
             origin: point(px(0.), px(0.)),
             size: size(px(1920.), px(launcher::LAUNCHER_H)),
@@ -234,10 +239,10 @@ impl Daemon {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 app_id: Some("awari".into()),
                 window_background: WindowBackgroundAppearance::Transparent,
-                kind: WindowKind::LayerShell(launcher::layer_opts(cfg.clone())),
+                kind: WindowKind::LayerShell(launcher::layer_opts()),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Launcher::new(shell, cfg, cx)),
+            |_, cx| cx.new(|cx| Launcher::new(shell, theme, cx)),
         ) {
             Ok(handle) => self.launcher = Some(handle),
             Err(e) => tracing::warn!(%e, "launcher overlay failed to open"),
@@ -266,6 +271,7 @@ impl Daemon {
             self.launcher_query.clear();
             self.launcher_selected = 0;
             self.file_hits.clear();
+            self.files_seq = self.files_tx.invalidate();
             let started = Instant::now();
             self.ensure_launcher(cx);
             if let Some(h) = &self.launcher {
@@ -282,10 +288,10 @@ impl Daemon {
         let Some(h) = self.launcher.take() else {
             return;
         };
-        let cfg = self.cfg.clone();
+        let theme = self.cfg.theme;
         cx.defer(move |cx| {
             let _ = h.update(cx, |l, window, _| {
-                l.apply_view(LauncherView::closed(cfg));
+                l.apply_view(LauncherView::closed(theme));
                 window.set_input_region(Some(&[]));
                 window.remove_window();
             });
@@ -294,6 +300,7 @@ impl Daemon {
 
     fn launcher_key(&mut self, key: &str, ch: Option<&str>, cx: &mut Context<Self>) {
         let key = key.to_ascii_lowercase();
+        let before = self.launcher_query.clone();
         match key.as_str() {
             "escape" | "esc" => {
                 self.dismiss_launcher(cx);
@@ -305,15 +312,22 @@ impl Daemon {
             }
             "up" | "arrowup" => {
                 self.launcher_selected = self.launcher_selected.saturating_sub(1);
+                self.sync_launcher(cx);
+                return;
             }
             "down" | "arrowdown" => {
                 self.launcher_selected = self.launcher_selected.saturating_add(1);
+                self.sync_launcher(cx);
+                return;
             }
             "backspace" | "delete" => {
                 self.launcher_query.pop();
                 self.launcher_selected = 0;
             }
-            "shift" | "control" | "ctrl" | "alt" | "super" | "meta" | "tab" => {}
+            "shift" | "control" | "ctrl" | "alt" | "super" | "meta" | "tab" => {
+                self.sync_launcher(cx);
+                return;
+            }
             _ => {
                 if let Some(c) = ch {
                     if c.chars().any(|ch| !ch.is_control()) {
@@ -323,12 +337,19 @@ impl Daemon {
                 }
             }
         }
+        if self.launcher_query != before {
+            self.refresh_file_hits();
+        }
+        self.sync_launcher(cx);
+    }
+
+    fn refresh_file_hits(&mut self) {
+        self.file_hits.clear();
         if self.cfg.sources.files && !self.launcher_query.trim().is_empty() {
             self.files_seq = self.files_tx.query(&self.launcher_query);
         } else {
-            self.file_hits.clear();
+            self.files_seq = self.files_tx.invalidate();
         }
-        self.sync_launcher(cx);
     }
 
     fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
