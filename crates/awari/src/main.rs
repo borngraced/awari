@@ -50,6 +50,7 @@ fn main() {
     tracing::info!(ns = SurfaceRole::Launcher.namespace(), "gpui launcher daemon");
 
     application().run(move |cx| {
+        gpui_base::init(cx);
         app::Daemon::start(cx, niri.clone(), stats.clone(), cfg);
     });
 }

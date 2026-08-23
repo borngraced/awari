@@ -33,6 +33,7 @@ pub struct Daemon {
     launcher_open: bool,
     launcher_query: String,
     launcher_selected: usize,
+    launcher_category: launcher::Category,
     apps: Vec<DesktopApp>,
     cfg: Config,
     stats: Arc<Mutex<Stats>>,
@@ -77,6 +78,7 @@ impl Daemon {
             launcher_open: false,
             launcher_query: String::new(),
             launcher_selected: 0,
+            launcher_category: launcher::Category::All,
             apps: crate::desktop::scan_applications(),
             cfg,
             stats,
@@ -197,6 +199,7 @@ impl Daemon {
             &windows,
             files,
             &self.recents,
+            self.launcher_category,
         )
     }
 
@@ -214,6 +217,7 @@ impl Daemon {
             selected: self.launcher_selected,
             rows,
             theme: self.cfg.theme,
+            category: self.launcher_category,
         };
         cx.defer(move |cx| {
             let _ = h.update(cx, |l, _, cx| {
@@ -242,7 +246,7 @@ impl Daemon {
                 kind: WindowKind::LayerShell(launcher::layer_opts()),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Launcher::new(shell, theme, cx)),
+            |window, cx| cx.new(|cx| Launcher::new(shell, theme, window, cx)),
         ) {
             Ok(handle) => self.launcher = Some(handle),
             Err(e) => tracing::warn!(%e, "launcher overlay failed to open"),
@@ -256,7 +260,28 @@ impl Daemon {
                 self.launcher_selected = index;
                 self.activate_launcher_row(cx);
             }
+            LauncherCmd::Select { index } => {
+                if self.launcher_selected != index {
+                    self.launcher_selected = index;
+                    self.sync_launcher(cx);
+                }
+            }
+            LauncherCmd::SetCategory { category } => {
+                if self.launcher_category != category {
+                    self.launcher_category = category;
+                    self.launcher_selected = 0;
+                    self.sync_launcher(cx);
+                }
+            }
             LauncherCmd::Key { key, ch } => self.launcher_key(&key, ch.as_deref(), cx),
+            LauncherCmd::SetQuery { query } => {
+                if self.launcher_query != query {
+                    self.launcher_query = query;
+                    self.launcher_selected = 0;
+                    self.refresh_file_hits();
+                    self.sync_launcher(cx);
+                }
+            }
             LauncherCmd::OpenToRender { ms } => {
                 let mut s = self.stats.lock().expect("stats");
                 s.launcher_open_to_first_commit_ms = Some(ms);
@@ -270,12 +295,16 @@ impl Daemon {
             self.launcher_open = true;
             self.launcher_query.clear();
             self.launcher_selected = 0;
+            self.launcher_category = launcher::Category::All;
             self.file_hits.clear();
             self.files_seq = self.files_tx.invalidate();
             let started = Instant::now();
             self.ensure_launcher(cx);
             if let Some(h) = &self.launcher {
-                let _ = h.update(cx, |l, _, _| l.arm_open_timer(started));
+                let _ = h.update(cx, |l, window, _| {
+                    l.arm_open_timer(started);
+                    window.set_visible(true);
+                });
             }
             self.sync_launcher(cx);
         } else {
@@ -285,7 +314,8 @@ impl Daemon {
 
     fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
         self.launcher_open = false;
-        let Some(h) = self.launcher.take() else {
+        // Resident overlay: the window stays alive for the whole session.
+        let Some(h) = self.launcher.clone() else {
             return;
         };
         let theme = self.cfg.theme;
@@ -293,54 +323,29 @@ impl Daemon {
             let _ = h.update(cx, |l, window, _| {
                 l.apply_view(LauncherView::closed(theme));
                 window.set_input_region(Some(&[]));
-                window.remove_window();
+                // Unmap instead of destroy. Exclusive keyboard is released
+                // because the surface stops being mapped; reopen costs one
+                // frame instead of a full window + renderer teardown.
+                window.set_visible(false);
             });
         });
     }
 
-    fn launcher_key(&mut self, key: &str, ch: Option<&str>, cx: &mut Context<Self>) {
+    fn launcher_key(&mut self, key: &str, _ch: Option<&str>, cx: &mut Context<Self>) {
         let key = key.to_ascii_lowercase();
-        let before = self.launcher_query.clone();
         match key.as_str() {
-            "escape" | "esc" => {
-                self.dismiss_launcher(cx);
-                return;
-            }
-            "enter" | "return" => {
-                self.activate_launcher_row(cx);
-                return;
-            }
+            "escape" | "esc" => self.dismiss_launcher(cx),
+            "enter" | "return" => self.activate_launcher_row(cx),
             "up" | "arrowup" => {
                 self.launcher_selected = self.launcher_selected.saturating_sub(1);
                 self.sync_launcher(cx);
-                return;
             }
             "down" | "arrowdown" => {
                 self.launcher_selected = self.launcher_selected.saturating_add(1);
                 self.sync_launcher(cx);
-                return;
             }
-            "backspace" | "delete" => {
-                self.launcher_query.pop();
-                self.launcher_selected = 0;
-            }
-            "shift" | "control" | "ctrl" | "alt" | "super" | "meta" | "tab" => {
-                self.sync_launcher(cx);
-                return;
-            }
-            _ => {
-                if let Some(c) = ch {
-                    if c.chars().any(|ch| !ch.is_control()) {
-                        self.launcher_query.push_str(c);
-                        self.launcher_selected = 0;
-                    }
-                }
-            }
+            _ => {}
         }
-        if self.launcher_query != before {
-            self.refresh_file_hits();
-        }
-        self.sync_launcher(cx);
     }
 
     fn refresh_file_hits(&mut self) {

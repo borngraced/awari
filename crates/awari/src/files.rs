@@ -12,7 +12,9 @@ use fff_search::{
     SharedFilePicker, SharedFrecency,
 };
 
-const PER_ROOT_ROWS: usize = 8;
+/// Hits asked of each FFF picker. High enough to browse; the overlay
+/// virtualizes, so this is a search-cost cap, not a paint cap.
+const PER_ROOT_ROWS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileHit {
@@ -132,7 +134,8 @@ fn search_all(
         .iter()
         .map(|shared| search_one(shared, parser, raw))
         .collect();
-    merge_round_robin(&merged, PER_ROOT_ROWS.saturating_mul(2))
+    let cap = PER_ROOT_ROWS.saturating_mul(pickers.len().max(1));
+    merge_round_robin(&merged, cap)
 }
 
 fn merge_round_robin(merged: &[Vec<FileHit>], cap: usize) -> Vec<FileHit> {
@@ -241,5 +244,12 @@ mod tests {
         let out = merge_round_robin(&merged, 4);
         let names: Vec<_> = out.iter().map(|h| h.path.to_str().unwrap()).collect();
         assert_eq!(names, ["a1", "b1", "a2", "a3"]);
+    }
+
+    #[test]
+    fn merge_without_small_cap_keeps_every_root_hit() {
+        let merged = vec![hits(&["a1", "a2"]), hits(&["b1", "b2", "b3"])];
+        let out = merge_round_robin(&merged, 200);
+        assert_eq!(out.len(), 5);
     }
 }

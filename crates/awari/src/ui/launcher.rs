@@ -1,10 +1,13 @@
-//! Overlay command palette. Full-output scrim; Escape / click outside / Mod+D close.
+//! Overlay finder: search, chips, list/grid, preview. Mock layout.
 
 use gpui::{
-    div, img, px, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, ObjectFit, ParentElement, Render, Styled, StyledImage,
-    StatefulInteractiveElement, WeakEntity, Window,
+    div, img, px, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable,
+    FontWeight, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Render,
+    ScrollStrategy, Styled, StyledImage, Subscription, UniformListScrollHandle, WeakEntity,
+    Window, uniform_list,
 };
+use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -15,22 +18,47 @@ use crate::surfaces::LAUNCHER_NAMESPACE;
 use crate::ui::icon::Icon;
 use crate::ui::theme::Theme;
 
-pub const LAUNCHER_W: f32 = 520.0;
-/// Window covers the output so clicks outside the palette dismiss it.
+pub const LAUNCHER_W: f32 = 740.0;
 pub const LAUNCHER_H: f32 = 1080.0;
-const PANEL_TOP: f32 = 96.0;
+const PANEL_H: f32 = 560.0;
 const ROW_CAP: usize = 10;
-/// Max file rows taken from the fff results.
 const FILE_ROWS: usize = 8;
+const GRID_COLS: usize = 4;
+const ICON_LIST: f32 = 26.0;
+const ICON_GRID: f32 = 42.0;
 
-/// Commands the overlay may enqueue. Handlers never update Daemon/Launcher
-/// synchronously and never destroy this window themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum Category {
+    All,
+    Apps,
+    Files,
+    Commands,
+}
+
+impl Category {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Apps => "Apps",
+            Self::Files => "Files",
+            Self::Commands => "Commands",
+        }
+    }
+
+    fn all() -> [Category; 4] {
+        [Self::All, Self::Apps, Self::Files, Self::Commands]
+    }
+}
+
 #[derive(Clone)]
 pub enum LauncherCmd {
     Dismiss,
     Key { key: String, ch: Option<String> },
+    SetQuery { query: String },
     Activate { index: usize },
-    /// IPC-open → first rendered frame, in whole milliseconds.
+    Select { index: usize },
+    SetCategory { category: Category },
     OpenToRender { ms: u64 },
 }
 
@@ -38,7 +66,6 @@ pub enum LauncherCmd {
 pub struct LauncherRow {
     pub kind: RowKind,
     pub label: String,
-    /// Icon hint: a `.desktop` `Icon=` value for apps, an app_id for windows.
     pub icon: Option<String>,
 }
 
@@ -56,6 +83,7 @@ pub struct LauncherView {
     pub selected: usize,
     pub rows: Vec<LauncherRow>,
     pub theme: Theme,
+    pub category: Category,
 }
 
 impl LauncherView {
@@ -66,6 +94,7 @@ impl LauncherView {
             selected: 0,
             rows: Vec::new(),
             theme,
+            category: Category::All,
         }
     }
 }
@@ -73,25 +102,49 @@ impl LauncherView {
 pub struct Launcher {
     pub shell: WeakEntity<Daemon>,
     view: LauncherView,
-    focus: FocusHandle,
-    /// Row under the pointer, for hover-revealed kind glyphs.
-    hovered: Option<usize>,
-    /// Set when the daemon opens the overlay; consumed on first render.
+    input: Entity<InputState>,
+    scroll: UniformListScrollHandle,
+    scrolled_to: Option<usize>,
     open_started: Option<Instant>,
+    _input_sub: Subscription,
 }
 
 impl Launcher {
-    pub fn new(shell: WeakEntity<Daemon>, theme: Theme, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        shell: WeakEntity<Daemon>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder("search apps, files, and commands")
+                .context_menu(false);
+            state.set_editor_style(editor_style(theme));
+            state
+        });
+        let input_ev = input.clone();
+        let _input_sub = cx.subscribe(&input, move |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let query = input_ev.read(cx).value().to_string();
+                post(this, cx, LauncherCmd::SetQuery { query });
+            }
+        });
         Self {
             shell,
             view: LauncherView::closed(theme),
-            focus: cx.focus_handle(),
-            hovered: None,
+            input,
+            scroll: UniformListScrollHandle::new(),
+            scrolled_to: None,
             open_started: None,
+            _input_sub,
         }
     }
 
     pub fn apply_view(&mut self, view: LauncherView) {
+        if self.view.query != view.query || self.view.category != view.category {
+            self.scrolled_to = None;
+        }
         self.view = view;
     }
 
@@ -101,8 +154,20 @@ impl Launcher {
 }
 
 impl Focusable for Launcher {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+}
+
+fn editor_style(t: Theme) -> InputEditorStyle {
+    InputEditorStyle {
+        foreground: t.fg().into(),
+        muted_foreground: t.faint().into(),
+        background: t.panel().into(),
+        border: t.ghost().into(),
+        selection: t.select().into(),
+        caret: t.accent().into(),
+        ..Default::default()
     }
 }
 
@@ -134,69 +199,101 @@ pub fn filter_rows(
     windows: &[(u64, String, Option<String>)],
     files: &[FileHit],
     recents: &[String],
+    category: Category,
 ) -> Vec<LauncherRow> {
+    if category == Category::Commands {
+        return Vec::new();
+    }
     let q = query.trim().to_lowercase();
     let empty = q.is_empty();
+    let apps_only = category == Category::Apps;
+    let files_only = category == Category::Files;
+    let ranked_cap = if apps_only || files_only {
+        None
+    } else {
+        Some(ROW_CAP)
+    };
 
-    // Windows: fuzzy-scored titles.
-    let mut win_rows: Vec<(i64, LauncherRow)> = windows
-        .iter()
-        .filter_map(|(id, title, app_id)| {
-            let s = if empty {
-                1
-            } else {
-                crate::matchq::score(title, &q)
-                    .max(app_id.as_deref().and_then(|a| crate::matchq::score(a, &q)))?
-            };
-            Some((s, LauncherRow {
-                kind: RowKind::Window { id: *id },
-                label: title.clone(),
-                icon: app_id.clone(),
-            }))
-        })
-        .collect();
+    let mut win_rows: Vec<(i64, LauncherRow)> = if files_only || apps_only {
+        Vec::new()
+    } else {
+        windows
+            .iter()
+            .filter_map(|(id, title, app_id)| {
+                let s = if empty {
+                    1
+                } else {
+                    crate::matchq::score(title, &q)
+                        .max(app_id.as_deref().and_then(|a| crate::matchq::score(a, &q)))?
+                };
+                Some((
+                    s,
+                    LauncherRow {
+                        kind: RowKind::Window { id: *id },
+                        label: title.clone(),
+                        icon: app_id.clone(),
+                    },
+                ))
+            })
+            .collect()
+    };
     if !empty {
         win_rows.sort_by(|a, b| b.0.cmp(&a.0));
     }
 
-    // Dedup: a running window replaces its app row when identities collide.
     let visible_app_ids: Vec<String> = win_rows
         .iter()
         .filter_map(|(_, r)| r.icon.as_deref().map(|s| s.to_lowercase()))
         .collect();
 
-    let mut app_rows: Vec<(i64, LauncherRow)> = apps
-        .iter()
-        .filter_map(|app| {
-            let ident_hits_window = |probe: Option<&str>| {
-                probe
-                    .map(|p| visible_app_ids.iter().any(|v| v == p.to_lowercase().as_str()))
-                    .unwrap_or(false)
-            };
-            if ident_hits_window(Some(&app.name)) || ident_hits_window(app.app_id.as_deref()) {
-                return None;
-            }
-            let s = if empty {
-                1
-            } else {
-                let by_name = crate::matchq::score(&app.name, &q);
-                let by_id = app.app_id.as_deref().and_then(|a| crate::matchq::score(a, &q));
-                match (by_name, by_id) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                }?
-            };
-            Some((s, LauncherRow {
-                kind: RowKind::App {
-                    exec: app.exec.clone(),
-                },
-                label: app.name.clone(),
-                icon: app.icon.clone(),
-            }))
-        })
-        .collect();
+    let mut app_rows: Vec<(i64, LauncherRow)> = if files_only {
+        Vec::new()
+    } else {
+        apps.iter()
+            .filter_map(|app| {
+                if !apps_only {
+                    let ident_hits_window = |probe: Option<&str>| {
+                        probe
+                            .map(|p| {
+                                visible_app_ids
+                                    .iter()
+                                    .any(|v| v == p.to_lowercase().as_str())
+                            })
+                            .unwrap_or(false)
+                    };
+                    if ident_hits_window(Some(&app.name))
+                        || ident_hits_window(app.app_id.as_deref())
+                    {
+                        return None;
+                    }
+                }
+                let s = if empty {
+                    1
+                } else {
+                    let by_name = crate::matchq::score(&app.name, &q);
+                    let by_id = app
+                        .app_id
+                        .as_deref()
+                        .and_then(|a| crate::matchq::score(a, &q));
+                    match (by_name, by_id) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    }?
+                };
+                Some((
+                    s,
+                    LauncherRow {
+                        kind: RowKind::App {
+                            exec: app.exec.clone(),
+                        },
+                        label: app.name.clone(),
+                        icon: app.icon.clone(),
+                    },
+                ))
+            })
+            .collect()
+    };
     if empty {
-        // Most recently activated first, then alphabetical.
         app_rows.sort_by(|a, b| {
             let ra = recents.iter().position(|n| *n == a.1.label);
             let rb = recents.iter().position(|n| *n == b.1.label);
@@ -213,7 +310,9 @@ pub fn filter_rows(
             .iter()
             .take(take)
             .map(|hit| LauncherRow {
-                kind: RowKind::File { path: hit.path.clone() },
+                kind: RowKind::File {
+                    path: hit.path.clone(),
+                },
                 label: hit
                     .path
                     .file_name()
@@ -224,25 +323,39 @@ pub fn filter_rows(
             .collect::<Vec<_>>()
     };
 
-    let mut out: Vec<LauncherRow> = Vec::with_capacity(ROW_CAP);
-    fn push_all(out: &mut Vec<LauncherRow>, rows: impl Iterator<Item = LauncherRow>) {
+    let mut out: Vec<LauncherRow> = Vec::new();
+    let push = |out: &mut Vec<LauncherRow>, rows: Vec<LauncherRow>| {
         for r in rows {
-            if out.len() >= ROW_CAP {
+            if ranked_cap.is_some_and(|c| out.len() >= c) {
                 return;
             }
             out.push(r);
         }
+    };
+
+    if files_only {
+        if !empty {
+            push(&mut out, file_rows(files.len()));
+        }
+        return out;
+    }
+    if apps_only {
+        push(
+            &mut out,
+            app_rows.into_iter().map(|(_, r)| r).collect(),
+        );
+        return out;
     }
 
     if crate::files::is_path_shaped(&q) {
-        push_all(&mut out, file_rows(FILE_ROWS).into_iter());
-        push_all(&mut out, win_rows.into_iter().map(|(_, r)| r));
-        push_all(&mut out, app_rows.into_iter().map(|(_, r)| r));
+        push(&mut out, file_rows(FILE_ROWS));
+        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
+        push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
     } else {
-        push_all(&mut out, win_rows.into_iter().map(|(_, r)| r));
-        push_all(&mut out, app_rows.into_iter().map(|(_, r)| r));
+        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
+        push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
         if !empty {
-            push_all(&mut out, file_rows(FILE_ROWS).into_iter());
+            push(&mut out, file_rows(FILE_ROWS));
         }
     }
     out
@@ -265,20 +378,203 @@ fn icon_letter(app_id: Option<&str>) -> String {
         .unwrap_or_else(|| "#".into())
 }
 
-const ROW_H: f32 = 38.0;
-const ICON_TILE: f32 = 22.0;
-
-/// Small keycap chip used in the search row and footer hints.
 fn keycap(t: Theme, label: &'static str) -> gpui::Div {
     div()
-        .px_1p5()
-        .py_0p5()
+        .px(px(5.))
+        .py(px(1.))
         .rounded(px(4.))
-        .border_1()
-        .border_color(t.border())
+        .bg(t.surface())
         .text_color(t.muted())
-        .text_xs()
+        .text_size(px(10.))
         .child(label)
+}
+
+fn icon_slot(row: &LauncherRow, selected: bool, t: Theme, size: f32, radius: f32) -> gpui::Div {
+    let tile = div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius))
+        .bg(if selected {
+            t.hover()
+        } else {
+            t.surface()
+        });
+    match &row.kind {
+        RowKind::File { .. } => tile.child(Icon::File.element_px(
+            if selected { t.fg() } else { t.muted() },
+            size * 0.58,
+        )),
+        _ => match crate::icons::resolve(row.icon.as_deref().unwrap_or("")) {
+            Some(path) => tile.overflow_hidden().child(
+                img(path)
+                    .size(px(size))
+                    .object_fit(ObjectFit::Contain)
+                    .flex_none(),
+            ),
+            None => tile
+                .text_color(if selected { t.fg() } else { t.muted() })
+                .text_xs()
+                .child(icon_letter(Some(&row.label))),
+        },
+    }
+}
+
+fn highlighted_name(label: &str, query: &str, selected: bool, t: Theme, size: f32) -> gpui::Div {
+    let base = if selected { t.fg() } else { t.muted() };
+    let q: Vec<char> = query.trim().to_lowercase().chars().collect();
+    if q.is_empty() {
+        return div()
+            .text_size(px(size))
+            .text_color(base)
+            .truncate()
+            .child(label.to_string());
+    }
+    let mut row = div().flex().flex_row().min_w_0().overflow_hidden();
+    let mut qi = 0usize;
+    for c in label.chars() {
+        let hit = qi < q.len() && c.to_lowercase().eq(q[qi].to_lowercase());
+        if hit {
+            qi += 1;
+        }
+        let mut span = div().text_size(px(size)).child(c.to_string());
+        if hit {
+            span = span.text_color(t.accent()).font_weight(FontWeight::MEDIUM);
+        } else {
+            span = span.text_color(base);
+        }
+        row = row.child(span);
+    }
+    row
+}
+
+impl Launcher {
+    fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    fn keep_selected_visible(&mut self, grid: bool) {
+        let sel = self.view.selected;
+        if self.scrolled_to == Some(sel) {
+            return;
+        }
+        self.scrolled_to = Some(sel);
+        let ix = if grid {
+            sel / GRID_COLS
+        } else {
+            sel
+        };
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+    }
+
+    fn tile(&self, i: usize, tile_w: f32, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.view.theme;
+        let Some(row) = self.view.rows.get(i) else {
+            return div()
+                .id(("launch-tile-empty", i))
+                .w(px(tile_w))
+                .flex_none()
+                .into_any_element();
+        };
+        let selected = i == self.view.selected;
+        div()
+            .id(("launch-tile", i))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .w(px(tile_w))
+            .overflow_hidden()
+            .py(px(14.))
+            .px(px(6.))
+            .rounded(px(10.))
+            .bg(if selected { t.select() } else { t.ghost() })
+            .hover(|s| s.bg(t.hover()))
+            .cursor_pointer()
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                post(this, cx, LauncherCmd::Select { index: i });
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    post(this, cx, LauncherCmd::Activate { index: i });
+                }),
+            )
+            .child(icon_slot(row, selected, t, ICON_GRID, 11.0))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(11.))
+                    .text_color(if selected { t.fg() } else { t.muted() })
+                    .text_center()
+                    .truncate()
+                    .child(row.label.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn list_row(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.view.theme;
+        let q = &self.view.query;
+        let Some(row) = self.view.rows.get(i) else {
+            return div().id(("launch-row-empty", i)).into_any_element();
+        };
+        let selected = i == self.view.selected;
+        div()
+            .id(("launch-row", i))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .px(px(10.))
+            .py(px(9.))
+            .rounded(px(9.))
+            .bg(if selected { t.select() } else { t.ghost() })
+            .hover(|s| s.bg(t.hover()))
+            .cursor_pointer()
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                post(this, cx, LauncherCmd::Select { index: i });
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    post(this, cx, LauncherCmd::Activate { index: i });
+                }),
+            )
+            .child(icon_slot(row, selected, t, ICON_LIST, 7.0))
+            .child(
+                highlighted_name(&row.label, q, selected, t, 14.0)
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden(),
+            )
+            .into_any_element()
+    }
+}
+
+fn preview_bits(row: &LauncherRow) -> (String, String, String) {
+    match &row.kind {
+        RowKind::Window { .. } => (
+            row.label.clone(),
+            row.icon.clone().unwrap_or_else(|| "Window".into()),
+            "Focus this window.".into(),
+        ),
+        RowKind::App { .. } => (
+            row.label.clone(),
+            "Application".into(),
+            "Launch this application.".into(),
+        ),
+        RowKind::File { path } => (
+            row.label.clone(),
+            path.display().to_string(),
+            String::new(),
+        ),
+    }
 }
 
 impl Render for Launcher {
@@ -288,9 +584,11 @@ impl Render for Launcher {
             return div().id("launcher-root").w_full().h_full();
         }
         window.set_input_region(None);
-        self.focus.focus(window, cx);
+        self.focus_search(window, cx);
+        self.input.update(cx, |state, _| {
+            state.set_editor_style(editor_style(self.view.theme));
+        });
 
-        // IPC-open → first frame. Consume the timer once; report via daemon.
         if let Some(t0) = self.open_started.take() {
             let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
             post(self, cx, LauncherCmd::OpenToRender { ms });
@@ -298,174 +596,192 @@ impl Render for Launcher {
 
         let t = self.view.theme;
         let win_w = f32::from(window.bounds().size.width);
-        let x = ((win_w - LAUNCHER_W) / 2.0).max(8.0);
+        let panel_w = LAUNCHER_W.min(win_w * 0.92).max(280.0);
+        let q_empty = self.view.query.trim().is_empty();
+        let cat = self.view.category;
+        let browsing_apps = cat == Category::Apps && q_empty;
+        let show_preview = cat != Category::Apps;
+        let results_w = if show_preview {
+            panel_w * 0.58
+        } else {
+            panel_w
+        };
+        // results pad 8+8, grid pad 4+4, three 4px gaps
+        let tile_w = ((results_w - 16.0 - 8.0 - 12.0) / 4.0).max(48.0);
+        self.keep_selected_visible(browsing_apps);
 
-        let mut list = div().flex().flex_col();
+        let mut results = div()
+            .id("launch-results")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .p(px(8.));
+        results = if show_preview {
+            results.w(px(results_w))
+        } else {
+            results.w_full()
+        };
         if self.view.rows.is_empty() {
-            list = list.child(
+            results = results.child(
                 div()
                     .px(px(12.))
-                    .py(px(10.))
-                    .text_color(t.muted())
-                    .text_sm()
+                    .py(px(24.))
+                    .text_size(px(13.))
+                    .text_color(t.faint())
                     .child("no matches"),
             );
+        } else if browsing_apps {
+            let n = self.view.rows.len().div_ceil(GRID_COLS);
+            results = results.child(
+                uniform_list(
+                    "launch-grid",
+                    n,
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        range
+                            .map(|row_i| {
+                                let mut row = div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(4.))
+                                    .p(px(4.))
+                                    .w_full();
+                                for col in 0..GRID_COLS {
+                                    let i = row_i * GRID_COLS + col;
+                                    row = row.child(this.tile(i, tile_w, cx));
+                                }
+                                row
+                            })
+                            .collect()
+                    }),
+                )
+                .track_scroll(&self.scroll)
+                .flex_1()
+                .h_full(),
+            );
+        } else {
+            let n = self.view.rows.len();
+            results = results.child(
+                uniform_list(
+                    "launch-list",
+                    n,
+                    cx.processor(|this, range: Range<usize>, _, cx| {
+                        range.map(|i| this.list_row(i, cx)).collect()
+                    }),
+                )
+                .track_scroll(&self.scroll)
+                .flex_1()
+                .h_full(),
+            );
         }
-        let mut last_kind_windows: Option<Option<bool>> = None;
-        for (i, row) in self.view.rows.iter().enumerate() {
-            let kind_windows = match row.kind {
-                RowKind::Window { .. } => Some(true),
-                RowKind::App { .. } => Some(false),
-                RowKind::File { .. } => None,
-            };
-            if last_kind_windows != Some(kind_windows) {
-                let label = match kind_windows {
-                    Some(true) => "WINDOWS",
-                    Some(false) => "APPLICATIONS",
-                    None => "FILES",
-                };
-                list = list.child(
+
+        let preview = if let Some(row) = self.view.rows.get(self.view.selected) {
+            let (title, path, body) = preview_bits(row);
+            let mut pane = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .p(px(20.))
+                .border_l_1()
+                .border_color(t.border())
+                .child(
                     div()
-                        .px(px(12.))
-                        .pt(px(6.))
-                        .pb(px(2.))
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.fg())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
                         .text_color(t.faint())
-                        .text_xs()
-                        .child(label),
+                        .child(path),
                 );
-                last_kind_windows = Some(kind_windows);
+            if !body.is_empty() {
+                pane = pane.child(
+                    div()
+                        .mt_2()
+                        .text_size(px(12.))
+                        .text_color(t.muted())
+                        .child(body),
+                );
             }
+            pane
+        } else {
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .p(px(20.))
+                .border_l_1()
+                .border_color(t.border())
+                .text_size(px(12.))
+                .text_color(t.faint())
+                .child("nothing to preview")
+        };
 
-            let selected = i == self.view.selected;
-            let hovered = self.hovered == Some(i);
-            let letter = icon_letter(Some(&row.label));
-
-            // Icon: resolved freedesktop icon, letter tile as fallback.
-            // Files get a plain file glyph instead of a letter tile.
-            let icon_slot = match &row.kind {
-                RowKind::File { .. } => div()
-                    .size(px(ICON_TILE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .rounded(px(5.))
-                    .text_color(if selected { t.accent() } else { t.muted() })
-                    .child(Icon::File.element(if selected {
-                        t.accent()
-                    } else {
-                        t.muted()
-                    })),
-                _ => match crate::icons::resolve(row.icon.as_deref().unwrap_or("")) {
-                Some(path) => div()
-                    .size(px(ICON_TILE))
-                    .flex_none()
-                    .overflow_hidden()
-                    .rounded(px(5.))
-                    .child(
-                        img(path)
-                            .size(px(ICON_TILE))
-                            .object_fit(ObjectFit::Contain)
-                            .flex_none(),
-                    ),
-                None => div()
-                    .size(px(ICON_TILE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .rounded(px(5.))
-                    .bg(t.surface())
-                    .text_color(if selected {
-                        t.accent()
-                    } else {
-                        t.muted()
-                    })
-                    .text_xs()
-                    .child(letter),
-            }
-            };
-
-            // Kind glyph on the right, revealed by hover or selection.
-            let kind_icon = match row.kind {
-                RowKind::Window { .. } => Icon::AppWindow,
-                RowKind::App { .. } => Icon::LayoutGrid,
-                RowKind::File { .. } => Icon::File,
-            };
-
-            list = list.child(
+        let mut chips = div()
+            .flex()
+            .flex_none()
+            .gap(px(22.))
+            .px(px(20.))
+            .pb(px(14.));
+        for c in Category::all() {
+            let active = cat == c;
+            let cc = c;
+            chips = chips.child(
                 div()
-                    .id(("launch-row", i))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .h(px(ROW_H))
-                    .px(px(10.))
-                    .rounded_md()
-                    .border_l_2()
-                    .border_color(if selected {
-                        t.accent()
-                    } else {
-                        t.ghost()
-                    })
-                    .bg(if selected {
-                        t.select()
-                    } else {
-                        t.panel()
-                    })
-                    .hover(|s| s.bg(t.hover()))
-                    .on_hover(cx.listener(move |this, is_in: &bool, _, cx| {
-                        this.hovered = if *is_in { Some(i) } else { None };
-                        cx.notify();
-                    }))
+                    .id(("chip", c as u64))
+                    .text_size(px(11.))
+                    .pb(px(6.))
+                    .cursor_pointer()
+                    .text_color(if active { t.fg() } else { t.faint() })
+                    .border_b(px(2.))
+                    .border_color(if active { t.accent() } else { t.ghost() })
+                    .hover(|s| s.text_color(t.muted()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            post(this, cx, LauncherCmd::Activate { index: i });
+                            post(this, cx, LauncherCmd::SetCategory { category: cc });
                         }),
                     )
-                    .child(icon_slot)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.fg())
-                            .text_sm()
-                            .child(row.label.clone()),
-                    )
-                    .child(
-                        kind_icon
-                            .element(if selected || hovered {
-                                t.accent()
-                            } else {
-                                t.ghost()
-                            })
-                            .mr_1(),
-                    ),
+                    .child(c.label().to_uppercase()),
             );
         }
 
-        let q_empty = self.view.query.is_empty();
-        let placeholder = "type to filter";
-
+        let search_focus = self.input.read(cx).focus_handle(cx);
         div()
             .id("launcher-root")
-            .track_focus(&self.focus)
+            .track_focus(&search_focus)
             .relative()
+            .flex()
+            .items_center()
+            .justify_center()
             .w_full()
             .h_full()
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                cx.stop_propagation();
-                post(
-                    this,
-                    cx,
-                    LauncherCmd::Key {
-                        key: ev.keystroke.key.clone(),
-                        ch: ev.keystroke.key_char.clone(),
-                    },
-                );
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                let key = ev.keystroke.key.to_ascii_lowercase();
+                if matches!(
+                    key.as_str(),
+                    "escape" | "esc" | "enter" | "return" | "up" | "arrowup" | "down" | "arrowdown"
+                ) {
+                    cx.stop_propagation();
+                    post(
+                        this,
+                        cx,
+                        LauncherCmd::Key {
+                            key: ev.keystroke.key.clone(),
+                            ch: ev.keystroke.key_char.clone(),
+                        },
+                    );
+                }
             }))
             .child(
                 div()
@@ -483,10 +799,10 @@ impl Render for Launcher {
             .child(
                 div()
                     .id("launcher-panel")
-                    .absolute()
-                    .left(px(x))
-                    .top(px(PANEL_TOP))
-                    .w(px(LAUNCHER_W))
+                    .w(px(panel_w))
+                    .h(px(PANEL_H))
+                    .max_w_full()
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -501,65 +817,81 @@ impl Render for Launcher {
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
                     .child(
-                        // Search field.
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
-                            .gap_2()
-                            .px_3()
-                            .h(px(44.))
-                            .bg(t.surface())
-                            .border_b_1()
-                            .border_color(t.border())
-                            .child(Icon::Search.element(t.faint()))
-                            .child(if q_empty {
-                                div()
-                                    .text_color(t.faint())
-                                    .text_sm()
-                                    .child(placeholder)
-                            } else {
-                                div().text_color(t.fg()).text_sm().child(
-                                    self.view.query.clone(),
-                                )
-                            })
+                            .gap(px(12.))
+                            .px(px(20.))
+                            .pt(px(18.))
+                            .pb(px(14.))
+                            .child(Icon::Search.element_px(t.faint(), 20.0))
                             .child(
                                 div()
-                                    .w(px(2.))
-                                    .h(px(15.))
-                                    .flex_none()
-                                    .rounded(px(1.))
-                                    .bg(t.accent()),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(18.))
+                                    .text_color(t.fg())
+                                    .child(Input::new(&self.input)),
                             )
-                            .child(div().flex_1())
-                            .child(keycap(t, "esc").on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    post(this, cx, LauncherCmd::Dismiss);
-                                }),
-                            )),
                     )
-                    .child(div().px(px(4.)).py(px(4.)).child(list))
+                    .child(chips)
+                    .child({
+                        let mut body = div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .border_t_1()
+                            .border_color(t.border())
+                            .child(results);
+                        if show_preview {
+                            body = body.child(preview);
+                        }
+                        body
+                    })
                     .child(
                         div()
                             .flex()
+                            .flex_none()
+                            .justify_end()
                             .items_center()
-                            .gap_1p5()
-                            .px_3()
-                            .h(px(30.))
-                            .bg(t.surface())
+                            .gap(px(18.))
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .px(px(20.))
+                            .py(px(9.))
                             .border_t_1()
                             .border_color(t.border())
+                            .text_size(px(11.))
                             .text_color(t.faint())
-                            .text_xs()
-                            .child(keycap(t, "↑"))
-                            .child(keycap(t, "↓"))
-                            .child("browse")
-                            .child(div().mx_0p5())
-                            .child(keycap(t, "↵"))
-                            .child("open")
-                            .child(div().flex_1())
-                            .child(keycap(t, "esc"))
-                            .child("close"),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(keycap(t, "↑"))
+                                    .child(keycap(t, "↓"))
+                                    .child("navigate"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(keycap(t, "↵"))
+                                    .child("open"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(keycap(t, "esc"))
+                                    .child("close"),
+                            ),
                     ),
             )
     }
@@ -578,71 +910,106 @@ mod tests {
         }
     }
 
+    fn rows(
+        q: &str,
+        apps: &[DesktopApp],
+        windows: &[(u64, String, Option<String>)],
+        files: &[FileHit],
+        recents: &[String],
+    ) -> Vec<LauncherRow> {
+        filter_rows(q, apps, windows, files, recents, Category::All)
+    }
+
     #[test]
     fn filter_matches_name_case_insensitive() {
         let apps = vec![app("Firefox", None)];
-        let rows = filter_rows("fire", &apps, &[(1, "Terminal".into(), None)], &[], &[]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "Firefox");
+        let out = rows("fire", &apps, &[(1, "Terminal".into(), None)], &[], &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "Firefox");
     }
 
     #[test]
     fn fuzzy_typo_still_matches() {
         let apps = vec![app("Firefox", None)];
-        let rows = filter_rows("firfox", &apps, &[], &[], &[]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "Firefox");
+        let out = rows("firfox", &apps, &[], &[], &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "Firefox");
     }
 
     #[test]
     fn running_window_suppresses_app_row() {
         let apps = vec![app("Firefox", Some("firefox"))];
-        // Window whose app_id equals the app identity → no duplicate App row.
-        let rows = filter_rows(
+        let out = rows(
             "",
             &apps,
             &[(7, "Mozilla Firefox".into(), Some("firefox".into()))],
             &[],
             &[],
         );
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(rows[0].kind, RowKind::Window { .. }));
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].kind, RowKind::Window { .. }));
     }
 
     #[test]
     fn empty_query_orders_apps_by_recency() {
         let apps = vec![app("Alpha", None), app("Beta", None), app("Gamma", None)];
-        let rows = filter_rows("", &apps, &[], &[], &["Gamma".into()]);
-        assert_eq!(rows[0].label, "Gamma");
+        let out = rows("", &apps, &[], &[], &["Gamma".into()]);
+        assert_eq!(out[0].label, "Gamma");
     }
 
     #[test]
     fn path_shaped_query_puts_files_first() {
-        let files = vec![FileHit { path: "/tmp/notes.md".into() }];
-        let rows = filter_rows(
+        let files = vec![FileHit {
+            path: "/tmp/notes.md".into(),
+        }];
+        let out = rows(
             "~/not",
             &[app("Notes", None)],
             &[(1, "Editor".into(), None)],
             &files,
             &[],
         );
-        assert!(matches!(rows[0].kind, RowKind::File { .. }));
+        assert!(matches!(out[0].kind, RowKind::File { .. }));
     }
 
     #[test]
     fn empty_query_never_dumps_files() {
-        let files = vec![FileHit { path: "/tmp/x".into() }];
-        let rows = filter_rows("", &[app("Zed", None)], &[], &files, &[]);
-        assert!(rows.iter().all(|r| !matches!(r.kind, RowKind::File { .. })));
+        let files = vec![FileHit {
+            path: "/tmp/x".into(),
+        }];
+        let out = rows("", &[app("Zed", None)], &[], &files, &[]);
+        assert!(out.iter().all(|r| !matches!(r.kind, RowKind::File { .. })));
+    }
+
+    #[test]
+    fn apps_chip_empty_is_uncapped() {
+        let apps: Vec<DesktopApp> = (0..30).map(|i| app(&format!("App{i:02}"), None)).collect();
+        let out = filter_rows("", &apps, &[], &[], &[], Category::Apps);
+        assert_eq!(out.len(), 30);
+    }
+
+    #[test]
+    fn files_chip_returns_every_hit() {
+        let files: Vec<FileHit> = (0..40)
+            .map(|i| FileHit {
+                path: format!("/tmp/f{i}").into(),
+            })
+            .collect();
+        let out = filter_rows("f", &[], &[], &files, &[], Category::Files);
+        assert_eq!(out.len(), 40);
+    }
+
+    #[test]
+    fn commands_chip_is_empty() {
+        let out = filter_rows("x", &[app("X", None)], &[], &[], &[], Category::Commands);
+        assert!(out.is_empty());
     }
 
     #[test]
     fn row_cap_holds() {
-        let apps: Vec<DesktopApp> = (0..30)
-            .map(|i| app(&format!("App{i:02}"), None))
-            .collect();
-        let rows = filter_rows("app", &apps, &[], &[], &[]);
-        assert_eq!(rows.len(), ROW_CAP);
+        let apps: Vec<DesktopApp> = (0..30).map(|i| app(&format!("App{i:02}"), None)).collect();
+        let out = rows("app", &apps, &[], &[], &[]);
+        assert_eq!(out.len(), ROW_CAP);
     }
 
     #[test]

@@ -16,9 +16,9 @@ A long-lived process that owns one Wayland overlay. Closed, the overlay is unmap
 
 This is the only surface. There is no exclusive zone, no HUD, no filmstrip, no OSD, no notification daemon, no tray, no peek. Those were shell. They are out.
 
-GPUI is the right toolkit for this and was the wrong toolkit for a 32px sleeping bar. The frame clock may paint while the overlay is mapped. It must not paint while the overlay is unmapped. Unmap is how Exclusive is released and how idle is won. Opacity-0 mapped scrims are a last resort if remap misses the next frame; measure both, keep one.
+GPUI is the right toolkit for this and was the wrong toolkit for a 32px sleeping bar. The frame clock may paint while the overlay is mapped. It must not paint while the overlay is unmapped. Unmap is how Exclusive is released and how idle is won.
 
-Mechanically, gpui has no hide/unmap — closed means the window is destroyed, open rebuilds it. `Stats.launcher_open_to_first_commit_ms` (see `awari dump-stats`) records IPC-open → first render; if its p99 misses the vsync gate, switching to an opacity-0 mapped surface with runtime keyboard release is the only sanctioned change.
+Mechanically: upstream gpui has no hide/unmap, so we carry one — `patches/gpui-set-visible.patch` (run `scripts/setup-gpui.sh`; see Cargo.toml `[patch]`) adds `Window::set_visible(bool)` for layer-shell surfaces. Closed = role destroyed + null buffer committed: unmapped, keyboard released, renderer alive. Open = role recreated from stored options; first pixel costs a frame, not a teardown. `Stats.launcher_open_to_first_commit_ms` (`awari dump-stats`) keeps the vsync gate honest; if its p99 ever regresses past the gate, the opacity-0 mapped surface with runtime keyboard release remains the documented fallback.
 
 ## Process
 
@@ -58,7 +58,7 @@ One field. No tabs, no provider plugins, no prefix language beyond what the quer
 
 Empty query: windows on this output, then recent apps — an in-memory activation list keyed by display name (most recent first, then alphabetical). No dump of `$HOME`.
 
-Non-empty: rank across windows, apps, and files. Substring is the floor for windows/apps (`matchq`). Files go through FFF. Cap the visible list.
+Non-empty: rank across windows, apps, and files. Substring is the floor for windows/apps (`matchq`). Files go through FFF. **All** keeps a short ranked cap. The **Apps** and **Files** chips show every match and virtualize the scroll.
 
 Section order is fixed — windows, apps, files — except path-shaped queries flip files to the front. Headers are labels, never selection slots.
 

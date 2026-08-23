@@ -19,6 +19,33 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 
+# Build GPUI from the local patched tree: `scripts/setup-gpui.sh` seeds zed
+# at our pinned rev into .third_party/zed and applies
+# patches/gpui-set-visible.patch, which adds Window::set_visible(bool) for
+# layer-shell surfaces (unmap without renderer teardown — how the launcher
+# hides while keeping reopen to a single frame). Upstream has no equivalent
+# yet; see gpui-ce PR #87. The block below is managed by the script.
+# BEGIN-GPUI-PATCH (managed by scripts/setup-gpui.sh)
+[patch."https://github.com/zed-industries/zed"]
+gpui = { version = "=0.2.2", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_platform = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_linux = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_wgpu = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_macros = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_apple = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_macos = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_web = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_windows = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+collections = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_shared_string = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui_util = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+sum_tree = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+
 [profile.release]
 lto = true
-codegen-units = 1
+codegen-units = 8

@@ -2,6 +2,7 @@
 
 use gpui::{px, svg, Rgba, Styled};
 
+#[allow(dead_code)]
 pub const ICON_PX: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,10 +32,15 @@ impl Icon {
         }
     }
 
+    #[allow(dead_code)]
     pub fn element(self, color: Rgba) -> gpui::Svg {
+        self.element_px(color, ICON_PX)
+    }
+
+    pub fn element_px(self, color: Rgba, size: f32) -> gpui::Svg {
         svg()
             .data(self.bytes())
-            .size(px(ICON_PX))
+            .size(px(size))
             .flex_none()
             .text_color(color)
     }
@@ -46,7 +52,7 @@ mod tests {
 
     #[test]
     fn launcher_icons_are_embedded() {
-        for icon in [Icon::Search, Icon::AppWindow, Icon::LayoutGrid] {
+        for icon in [Icon::Search, Icon::AppWindow, Icon::LayoutGrid, Icon::File] {
             let bytes = icon.bytes();
             assert!(bytes.starts_with(b"<svg"), "{}", icon.path());
         }

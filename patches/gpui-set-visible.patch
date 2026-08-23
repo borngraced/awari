@@ -1,0 +1,158 @@
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index ab4b500..1a6277d 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -846,6 +846,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn zoom(&self);
+     fn toggle_fullscreen(&self);
+     fn is_fullscreen(&self) -> bool;
++    /// Show or hide the window without tearing it down.
++    ///
++    /// No-op by default. Implemented for Wayland layer-shell surfaces:
++    /// hiding unmaps the surface (the compositor releases keyboard focus),
++    /// showing remaps it, and the renderer stays alive either way.
++    fn set_visible(&self, _visible: bool) {}
+     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+         None
+     }
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index 50d3d91..984d84c 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2029,6 +2029,15 @@ impl Window {
+         self.removed = true;
+     }
+ 
++    /// Show or hide this window without destroying it.
++    ///
++    /// No-op except for Wayland layer-shell surfaces, where `false` unmaps
++    /// the surface (releasing compositor keyboard focus) and `true` maps it
++    /// again. The renderer and surface stay alive either way.
++    pub fn set_visible(&self, visible: bool) {
++        self.platform_window.set_visible(visible);
++    }
++
+     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
+     pub fn focused(&self, cx: &App) -> Option<FocusHandle> {
+         self.focus
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+index eb84b7f..b970c00 100644
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -38,7 +38,7 @@ use gpui::{
+     PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
+     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+     WindowControls, WindowDecorations, WindowKind, WindowParams,
+-    layer_shell::{Anchor, LayerShellNotSupportedError},
++    layer_shell::{Anchor, LayerShellNotSupportedError, LayerShellOptions},
+     popup::PopupOptions,
+     px, size,
+ };
+@@ -190,6 +190,8 @@ impl WaylandSurfaceState {
+             }
+ 
+             return Ok(WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState {
++                options: options.clone(),
++                hidden: false,
+                 layer_surface,
+                 anchor: options.anchor,
+             }));
+@@ -300,6 +302,8 @@ pub struct WaylandXdgSurfaceState {
+ }
+ 
+ pub struct WaylandLayerSurfaceState {
++    options: LayerShellOptions,
++    hidden: bool,
+     layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+     anchor: Anchor,
+ }
+@@ -1829,6 +1833,76 @@ impl PlatformWindow for WaylandWindow {
+         }
+     }
+ 
++    fn set_visible(&self, visible: bool) {
++        let mut state = self.borrow_mut();
++        let WaylandSurfaceState::LayerShell(layer_state) = &mut state.surface_state else {
++            return;
++        };
++        if layer_state.hidden == !visible {
++            return;
++        }
++
++        if !visible {
++            // Destroy the role and detach the last buffer: the compositor
++            // treats the surface as unmapped, which releases exclusive
++            // keyboard focus without tearing down the renderer.
++            layer_state.layer_surface.destroy();
++            layer_state.hidden = true;
++            state.surface.attach(None, 0, 0);
++            state.surface.commit();
++            return;
++        }
++
++        let options = layer_state.options.clone();
++        let size = state.bounds.size;
++        let surface = state.surface.clone();
++        let globals = state.globals.clone();
++        drop(state);
++
++        let Some(layer_shell) = globals.layer_shell.as_ref() else {
++            return;
++        };
++
++        let new_layer_surface = layer_shell.get_layer_surface(
++            &surface,
++            None,
++            super::layer_shell::wayland_layer(options.layer),
++            options.namespace.clone(),
++            &globals.qh,
++            surface.id(),
++        );
++
++        new_layer_surface.set_size(f32::from(size.width) as u32, f32::from(size.height) as u32);
++        new_layer_surface.set_anchor(super::layer_shell::wayland_anchor(options.anchor));
++        new_layer_surface.set_keyboard_interactivity(
++            super::layer_shell::wayland_keyboard_interactivity(options.keyboard_interactivity),
++        );
++
++        if let Some(margin) = options.margin {
++            new_layer_surface.set_margin(
++                f32::from(margin.0) as i32,
++                f32::from(margin.1) as i32,
++                f32::from(margin.2) as i32,
++                f32::from(margin.3) as i32,
++            )
++        }
++
++        if let Some(exclusive_zone) = options.exclusive_zone {
++            new_layer_surface.set_exclusive_zone(f32::from(exclusive_zone) as i32);
++        }
++
++        if let Some(exclusive_edge) = options.exclusive_edge {
++            WaylandSurfaceState::apply_exclusive_edge(
++                &new_layer_surface, options.anchor, exclusive_edge);
++        }
++
++        let mut state = self.borrow_mut();
++        if let WaylandSurfaceState::LayerShell(layer_state) = &mut state.surface_state {
++            layer_state.layer_surface = new_layer_surface;
++            layer_state.hidden = false;
++        }
++    }
++
+     fn zoom(&self) {
+         let state = self.borrow();
+         if let Some(toplevel) = state.surface_state.toplevel() {
+@@ -1899,6 +1973,12 @@ impl PlatformWindow for WaylandWindow {
+     }
+ 
+     fn draw(&self, scene: &Scene) {
++        {
++            let state = self.borrow();
++            if matches!(&state.surface_state, WaylandSurfaceState::LayerShell(ls) if ls.hidden) {
++                return;
++            }
++        }
+         let mut state = self.borrow_mut();
+ 
+         if state.renderer.device_lost() {
