@@ -34,6 +34,9 @@ pub struct Daemon {
     launcher_query: String,
     launcher_selected: usize,
     launcher_category: launcher::Category,
+    /// Bumped on every open/close; deferred window updates from a previous
+    /// generation are dropped so a stale hide cannot clobber a fresh open.
+    launcher_gen: u64,
     apps: Vec<DesktopApp>,
     cfg: Config,
     stats: Arc<Mutex<Stats>>,
@@ -79,6 +82,7 @@ impl Daemon {
             launcher_query: String::new(),
             launcher_selected: 0,
             launcher_category: launcher::Category::All,
+            launcher_gen: 0,
             apps: crate::desktop::scan_applications(),
             cfg,
             stats,
@@ -219,7 +223,15 @@ impl Daemon {
             theme: self.cfg.theme,
             category: self.launcher_category,
         };
+        let generation = self.launcher_gen;
+        let shell = cx.entity().downgrade();
         cx.defer(move |cx| {
+            // A stale view (from before a toggle) must not overwrite the
+            // current one.
+            let current = shell.upgrade().map(|d| d.read(cx).launcher_gen);
+            if current != Some(generation) {
+                return;
+            }
             let _ = h.update(cx, |l, _, cx| {
                 l.apply_view(view);
                 cx.notify();
@@ -291,6 +303,10 @@ impl Daemon {
     }
 
     fn set_launcher_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        // Bumped on every transition; deferred window work from a previous
+        // generation is dropped so a stale hide cannot clobber a fresh open
+        // (destroy-on-close masked this by killing the handle instead).
+        self.launcher_gen += 1;
         if open {
             self.launcher_open = true;
             self.launcher_query.clear();
@@ -319,13 +335,16 @@ impl Daemon {
             return;
         };
         let theme = self.cfg.theme;
+        let generation = self.launcher_gen;
+        let shell = cx.entity().downgrade();
         cx.defer(move |cx| {
+            // Drop stale closes: a newer open must not be hidden by us.
+            let current = shell.upgrade().map(|d| d.read(cx).launcher_gen);
+            if current != Some(generation) {
+                return;
+            }
             let _ = h.update(cx, |l, window, _| {
                 l.apply_view(LauncherView::closed(theme));
-                window.set_input_region(Some(&[]));
-                // Unmap instead of destroy. Exclusive keyboard is released
-                // because the surface stops being mapped; reopen costs one
-                // frame instead of a full window + renderer teardown.
                 window.set_visible(false);
             });
         });

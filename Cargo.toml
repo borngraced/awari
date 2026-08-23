@@ -27,19 +27,25 @@ tracing = "0.1"
 # yet; see gpui-ce PR #87. The block below is managed by the script.
 # BEGIN-GPUI-PATCH (managed by scripts/setup-gpui.sh)
 [patch."https://github.com/zed-industries/zed"]
-gpui = { version = "=0.2.2", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_platform = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_linux = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_wgpu = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_macros = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_apple = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_macos = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_web = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_windows = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-collections = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_shared_string = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-gpui_util = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
-sum_tree = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "7102fb7e56fa5653f59d1c79ef1c0772eb5882f4" }
+gpui = { version = "=0.2.2", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_platform = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_linux = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_wgpu = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_macros = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_apple = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_macos = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_web = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_windows = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+collections = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_shared_string = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+gpui_util = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+sum_tree = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "04b9a2c5ba35e13838e6dd50470a961b14849acf" }
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
+# END-GPUI-PATCH
 # END-GPUI-PATCH
 # END-GPUI-PATCH
 # END-GPUI-PATCH

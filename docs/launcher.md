@@ -18,7 +18,7 @@ This is the only surface. There is no exclusive zone, no HUD, no filmstrip, no O
 
 GPUI is the right toolkit for this and was the wrong toolkit for a 32px sleeping bar. The frame clock may paint while the overlay is mapped. It must not paint while the overlay is unmapped. Unmap is how Exclusive is released and how idle is won.
 
-Mechanically: upstream gpui has no hide/unmap, so we carry one — `patches/gpui-set-visible.patch` (run `scripts/setup-gpui.sh`; see Cargo.toml `[patch]`) adds `Window::set_visible(bool)` for layer-shell surfaces. Closed = role destroyed + null buffer committed: unmapped, keyboard released, renderer alive. Open = role recreated from stored options; first pixel costs a frame, not a teardown. `Stats.launcher_open_to_first_commit_ms` (`awari dump-stats`) keeps the vsync gate honest; if its p99 ever regresses past the gate, the opacity-0 mapped surface with runtime keyboard release remains the documented fallback.
+Mechanically: upstream gpui has no hide/unmap, so we carry one — `patches/gpui-set-visible.patch` (run `scripts/setup-gpui.sh`; see Cargo.toml `[patch]`) adds `Window::set_visible(bool)` for layer-shell surfaces. Closed = null-buffer commit: unmapped, keyboard released, renderer alive, frame loop parked. Open = re-assert geometry + empty commit to provoke a fresh configure, present only after ack (niri clears pending geometry on unmap; presenting before the new configure is a fatal protocol error). Measured on the first resident build: reopen **1–9 ms** vs 652 ms cold. `Stats.launcher_open_to_first_commit_ms` (`awari dump-stats`) keeps the gate honest; the opacity-0 fallback stays documented but is not needed.
 
 ## Process
 
