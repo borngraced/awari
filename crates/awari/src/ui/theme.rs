@@ -46,7 +46,7 @@ impl Default for Theme {
             accent: Color::rgb(0x8b_7b_f0),
             accent_dim: Color::rgba(0x8b_7b_f0_24),
             bg: Color::rgb(0x0b_0b_0c),
-            panel: Color::rgb(0x14_14_16),
+            panel: Color::rgb(0x14_14_16_u32),
             raise: Color::rgba(0xff_ff_ff_0b),
             border: Color::rgba(0xff_ff_ff_12),
             text: Color::rgb(0xec_ea_f0),

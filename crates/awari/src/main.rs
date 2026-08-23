@@ -5,8 +5,10 @@ mod app;
 mod argv;
 mod config;
 mod desktop;
+mod files;
 mod icons;
 mod lock;
+mod matchq;
 mod surfaces;
 mod ui;
 

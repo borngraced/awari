@@ -9,6 +9,7 @@ pub enum Icon {
     Search,
     AppWindow,
     LayoutGrid,
+    File,
 }
 
 impl Icon {
@@ -17,6 +18,7 @@ impl Icon {
             Self::Search => "icons/search.svg",
             Self::AppWindow => "icons/app_window.svg",
             Self::LayoutGrid => "icons/layout_grid.svg",
+            Self::File => "icons/file.svg",
         }
     }
 
@@ -25,6 +27,7 @@ impl Icon {
             Self::Search => include_bytes!("../../assets/icons/search.svg"),
             Self::AppWindow => include_bytes!("../../assets/icons/app_window.svg"),
             Self::LayoutGrid => include_bytes!("../../assets/icons/layout_grid.svg"),
+            Self::File => include_bytes!("../../assets/icons/file.svg"),
         }
     }
 

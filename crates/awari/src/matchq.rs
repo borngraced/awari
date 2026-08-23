@@ -10,9 +10,9 @@ pub fn score(haystack: &str, needle: &str) -> Option<i64> {
     let needle = needle.trim();
     if needle.is_empty() {
         return Some(0);
-    }
-    let hay: Vec<char> = haystack.to_lowercase().chars().collect();
-    let mut ned = needle.chars().peekable();
+    }    let hay: Vec<char> = haystack.to_lowercase().chars().collect();
+    let ned_str = needle.trim().to_lowercase();
+    let mut ned = ned_str.chars().peekable();
 
     let mut total = 0i64;
     let mut prev_hit: Option<usize> = None;

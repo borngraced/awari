@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
+use std::sync::mpsc::Receiver;
 
 use gpui::{
     point, px, size, App, AppContext, Bounds, Context, Entity, Global, QuitMode,
@@ -13,6 +15,7 @@ use awari_ipc::ClientRequest;
 
 use crate::config::Config;
 use crate::desktop::DesktopApp;
+use crate::files::FileHit;
 use crate::lock::Stats;
 use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 
@@ -24,14 +27,20 @@ pub struct Daemon {
     niri: Option<Arc<NiriHandle>>,
     state: EventStreamState,
     output_name: String,
+    /// Workspace id from the last focused `WorkspaceActivated`.
+    focused_ws: Option<u64>,
     launcher: Option<WindowHandle<Launcher>>,
     launcher_open: bool,
     launcher_query: String,
     launcher_selected: usize,
     apps: Vec<DesktopApp>,
     cfg: Config,
-    #[allow(dead_code)]
     stats: Arc<Mutex<Stats>>,
+    /// Desktop names by last activation, most recent first.
+    recents: Vec<String>,
+    files_tx: crate::files::Files,
+    files_seq: u64,
+    file_hits: Vec<FileHit>,
 }
 
 impl Daemon {
@@ -53,10 +62,12 @@ impl Daemon {
         cfg: Config,
     ) -> Self {
         let inbox = NiriInbox::start();
+        let (files_tx, files_rx) = crate::files::Files::spawn(cfg.files.resolved_roots());
         let daemon = Self {
             niri,
             state: EventStreamState::default(),
             output_name: String::new(),
+            focused_ws: None,
             launcher: None,
             launcher_open: false,
             launcher_query: String::new(),
@@ -64,9 +75,14 @@ impl Daemon {
             apps: crate::desktop::scan_applications(),
             cfg,
             stats,
+            recents: Vec::new(),
+            files_tx,
+            files_seq: 0,
+            file_hits: Vec::new(),
         };
         spawn_niri_pump(cx, inbox);
         spawn_ipc(cx);
+        spawn_files_pump(cx, files_rx);
         daemon
     }
 
@@ -74,6 +90,14 @@ impl Daemon {
         for msg in msgs {
             match msg {
                 NiriMsg::Event(ev) => {
+                    if let niri_ipc::Event::WorkspaceActivated { id, focused: true } = &ev {
+                        self.focused_ws = Some(*id);
+                        if let Some(w) = self.state.workspaces.workspaces.values().find(|w| w.id == *id)
+                            && let Some(o) = w.output.clone()
+                        {
+                            self.output_name = o;
+                        }
+                    }
                     let _ = self.state.apply(ev);
                 }
                 NiriMsg::Outputs(outs) => {
@@ -114,17 +138,20 @@ impl Daemon {
     }
 
     fn launcher_windows(&self) -> Vec<(u64, String, Option<String>)> {
-        let ws_id = self
-            .state
-            .workspaces
-            .workspaces
-            .values()
-            .find(|w| {
-                w.is_active
-                    && (self.output_name.is_empty()
-                        || w.output.as_deref() == Some(self.output_name.as_str()))
-            })
-            .map(|w| w.id);
+        let ws_id = match self.focused_ws {
+            Some(id) => Some(id),
+            None => self
+                .state
+                .workspaces
+                .workspaces
+                .values()
+                .find(|w| {
+                    w.is_active
+                        && (self.output_name.is_empty()
+                            || w.output.as_deref() == Some(self.output_name.as_str()))
+                })
+                .map(|w| w.id),
+        };
         self.state
             .windows
             .windows
@@ -154,7 +181,18 @@ impl Daemon {
         } else {
             Vec::new()
         };
-        launcher::filter_rows(&self.launcher_query, apps, &windows)
+        let files = if self.cfg.sources.files {
+            self.file_hits.as_slice()
+        } else {
+            &[]
+        };
+        launcher::filter_rows(
+            &self.launcher_query,
+            apps,
+            &windows,
+            files,
+            &self.recents,
+        )
     }
 
     fn sync_launcher(&mut self, cx: &mut Context<Self>) {
@@ -214,6 +252,11 @@ impl Daemon {
                 self.activate_launcher_row(cx);
             }
             LauncherCmd::Key { key, ch } => self.launcher_key(&key, ch.as_deref(), cx),
+            LauncherCmd::OpenToRender { ms } => {
+                let mut s = self.stats.lock().expect("stats");
+                s.launcher_open_to_first_commit_ms = Some(ms);
+                tracing::info!(ms, "launcher open → first render");
+            }
         }
     }
 
@@ -222,7 +265,12 @@ impl Daemon {
             self.launcher_open = true;
             self.launcher_query.clear();
             self.launcher_selected = 0;
+            self.file_hits.clear();
+            let started = Instant::now();
             self.ensure_launcher(cx);
+            if let Some(h) = &self.launcher {
+                let _ = h.update(cx, |l, _, _| l.arm_open_timer(started));
+            }
             self.sync_launcher(cx);
         } else {
             self.dismiss_launcher(cx);
@@ -275,6 +323,11 @@ impl Daemon {
                 }
             }
         }
+        if self.cfg.sources.files && !self.launcher_query.trim().is_empty() {
+            self.files_seq = self.files_tx.query(&self.launcher_query);
+        } else {
+            self.file_hits.clear();
+        }
         self.sync_launcher(cx);
     }
 
@@ -284,7 +337,20 @@ impl Daemon {
             return;
         };
         let kind = row.kind.clone();
+        if let launcher::RowKind::App { .. } = &kind {
+            let name = row.label.clone();
+            self.recents.retain(|n| *n != name);
+            self.recents.insert(0, name);
+            self.recents.truncate(20);
+        }
         self.dismiss_launcher(cx);
+        match kind {
+            launcher::RowKind::File { path } => {
+                crate::files::activate(&path);
+                return;
+            }
+            _ => {}
+        }
         let niri = self.niri.clone();
         cx.defer(move |_cx| {
             let Some(niri) = niri else {
@@ -297,6 +363,7 @@ impl Daemon {
                 launcher::RowKind::Window { id } => {
                     let _ = niri.apply(CompositorCommand::FocusWindow { id });
                 }
+                launcher::RowKind::File { .. } => unreachable!("handled above"),
             }
         });
     }
@@ -358,6 +425,36 @@ fn spawn_ipc(cx: &mut Context<Daemon>) {
         while let Some(req) = rx.next().await {
             let _ = this.update(cx, |d, cx| {
                 d.apply_ipc(req, cx);
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+fn spawn_files_pump(cx: &mut Context<Daemon>, rx: Receiver<(u64, Vec<FileHit>)>) {
+    let (tx, mut fut_rx) = futures::channel::mpsc::unbounded();
+    thread::Builder::new()
+        .name("awari-files-pump".into())
+        .spawn(move || {
+            for (seq, hits) in rx {
+                if tx.unbounded_send((seq, hits)).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok();
+    cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        while let Some((seq, hits)) = fut_rx.next().await {
+            let _ = this.update(cx, |d, cx| {
+                // Drop answers that no longer match the newest query.
+                if seq == d.files_seq {
+                    d.file_hits = hits;
+                    if d.launcher_open {
+                        d.sync_launcher(cx);
+                    }
+                }
                 cx.notify();
             });
         }
