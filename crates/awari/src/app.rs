@@ -1,0 +1,366 @@
+//! Overlay launcher daemon. No bar. Process stays alive with no windows.
+
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use gpui::{
+    point, px, size, App, AppContext, Bounds, Context, Entity, Global, QuitMode,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+};
+use niri_ipc::state::{EventStreamState, EventStreamStatePart};
+use awari_compositor::{Compositor, CompositorCommand, NiriHandle, NiriInbox, NiriMsg};
+use awari_ipc::ClientRequest;
+
+use crate::config::Config;
+use crate::desktop::DesktopApp;
+use crate::lock::Stats;
+use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
+
+/// Holds the daemon entity so GPUI does not drop it with no windows open.
+struct Keep(#[allow(dead_code)] Entity<Daemon>);
+impl Global for Keep {}
+
+pub struct Daemon {
+    niri: Option<Arc<NiriHandle>>,
+    state: EventStreamState,
+    output_name: String,
+    launcher: Option<WindowHandle<Launcher>>,
+    launcher_open: bool,
+    launcher_query: String,
+    launcher_selected: usize,
+    apps: Vec<DesktopApp>,
+    cfg: Config,
+    #[allow(dead_code)]
+    stats: Arc<Mutex<Stats>>,
+}
+
+impl Daemon {
+    pub fn start(
+        cx: &mut App,
+        niri: Option<Arc<NiriHandle>>,
+        stats: Arc<Mutex<Stats>>,
+        cfg: Config,
+    ) {
+        cx.set_quit_mode(QuitMode::Explicit);
+        let daemon = cx.new(|cx| Self::new(cx, niri, stats, cfg));
+        cx.set_global(Keep(daemon));
+    }
+
+    fn new(
+        cx: &mut Context<Self>,
+        niri: Option<Arc<NiriHandle>>,
+        stats: Arc<Mutex<Stats>>,
+        cfg: Config,
+    ) -> Self {
+        let inbox = NiriInbox::start();
+        let daemon = Self {
+            niri,
+            state: EventStreamState::default(),
+            output_name: String::new(),
+            launcher: None,
+            launcher_open: false,
+            launcher_query: String::new(),
+            launcher_selected: 0,
+            apps: crate::desktop::scan_applications(),
+            cfg,
+            stats,
+        };
+        spawn_niri_pump(cx, inbox);
+        spawn_ipc(cx);
+        daemon
+    }
+
+    fn apply_niri(&mut self, msgs: Vec<NiriMsg>) {
+        for msg in msgs {
+            match msg {
+                NiriMsg::Event(ev) => {
+                    let _ = self.state.apply(ev);
+                }
+                NiriMsg::Outputs(outs) => {
+                    if self.output_name.is_empty() {
+                        if let Some(name) = self
+                            .state
+                            .workspaces
+                            .workspaces
+                            .values()
+                            .find(|w| w.is_active)
+                            .and_then(|w| w.output.clone())
+                        {
+                            self.output_name = name;
+                        } else if let Some((name, _)) = outs.iter().find(|(_, o)| o.logical.is_some())
+                        {
+                            self.output_name = name.clone();
+                        }
+                    }
+                }
+                NiriMsg::Degraded(e) => tracing::warn!(%e, "niri degraded"),
+                NiriMsg::Version(v) => {
+                    tracing::info!(niri = %v, pin = awari_compositor::NIRI_IPC_PIN);
+                }
+            }
+        }
+        if self.output_name.is_empty() {
+            if let Some(name) = self
+                .state
+                .workspaces
+                .workspaces
+                .values()
+                .find(|w| w.is_active)
+                .and_then(|w| w.output.clone())
+            {
+                self.output_name = name;
+            }
+        }
+    }
+
+    fn launcher_windows(&self) -> Vec<(u64, String, Option<String>)> {
+        let ws_id = self
+            .state
+            .workspaces
+            .workspaces
+            .values()
+            .find(|w| {
+                w.is_active
+                    && (self.output_name.is_empty()
+                        || w.output.as_deref() == Some(self.output_name.as_str()))
+            })
+            .map(|w| w.id);
+        self.state
+            .windows
+            .windows
+            .values()
+            .filter(|w| ws_id.is_some() && w.workspace_id == ws_id)
+            .map(|w| {
+                (
+                    w.id,
+                    w.title
+                        .clone()
+                        .or_else(|| w.app_id.clone())
+                        .unwrap_or_else(|| format!("#{}", w.id)),
+                    w.app_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn filtered_rows(&self) -> Vec<launcher::LauncherRow> {
+        let apps = if self.cfg.sources.apps {
+            self.apps.as_slice()
+        } else {
+            &[]
+        };
+        let windows = if self.cfg.sources.windows {
+            self.launcher_windows()
+        } else {
+            Vec::new()
+        };
+        launcher::filter_rows(&self.launcher_query, apps, &windows)
+    }
+
+    fn sync_launcher(&mut self, cx: &mut Context<Self>) {
+        let Some(h) = self.launcher else {
+            return;
+        };
+        let rows = self.filtered_rows();
+        if self.launcher_selected >= rows.len() {
+            self.launcher_selected = rows.len().saturating_sub(1);
+        }
+        let view = LauncherView {
+            open: self.launcher_open,
+            query: self.launcher_query.clone(),
+            selected: self.launcher_selected,
+            rows,
+            cfg: self.cfg.clone(),
+        };
+        cx.defer(move |cx| {
+            let _ = h.update(cx, |l, _, cx| {
+                l.apply_view(view);
+                cx.notify();
+            });
+        });
+    }
+
+    fn ensure_launcher(&mut self, cx: &mut Context<Self>) {
+        if self.launcher.is_some() {
+            return;
+        }
+        let shell = cx.entity().downgrade();
+        let cfg = self.cfg.clone();
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(1920.), px(launcher::LAUNCHER_H)),
+        };
+        match cx.open_window(
+            WindowOptions {
+                titlebar: None,
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some("awari".into()),
+                window_background: WindowBackgroundAppearance::Transparent,
+                kind: WindowKind::LayerShell(launcher::layer_opts(cfg.clone())),
+                ..Default::default()
+            },
+            |_, cx| cx.new(|cx| Launcher::new(shell, cfg, cx)),
+        ) {
+            Ok(handle) => self.launcher = Some(handle),
+            Err(e) => tracing::warn!(%e, "launcher overlay failed to open"),
+        }
+    }
+
+    pub(crate) fn apply_launcher_cmd(&mut self, cmd: LauncherCmd, cx: &mut Context<Self>) {
+        match cmd {
+            LauncherCmd::Dismiss => self.dismiss_launcher(cx),
+            LauncherCmd::Activate { index } => {
+                self.launcher_selected = index;
+                self.activate_launcher_row(cx);
+            }
+            LauncherCmd::Key { key, ch } => self.launcher_key(&key, ch.as_deref(), cx),
+        }
+    }
+
+    fn set_launcher_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.launcher_open = true;
+            self.launcher_query.clear();
+            self.launcher_selected = 0;
+            self.ensure_launcher(cx);
+            self.sync_launcher(cx);
+        } else {
+            self.dismiss_launcher(cx);
+        }
+    }
+
+    fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
+        self.launcher_open = false;
+        let Some(h) = self.launcher.take() else {
+            return;
+        };
+        let cfg = self.cfg.clone();
+        cx.defer(move |cx| {
+            let _ = h.update(cx, |l, window, _| {
+                l.apply_view(LauncherView::closed(cfg));
+                window.set_input_region(Some(&[]));
+                window.remove_window();
+            });
+        });
+    }
+
+    fn launcher_key(&mut self, key: &str, ch: Option<&str>, cx: &mut Context<Self>) {
+        let key = key.to_ascii_lowercase();
+        match key.as_str() {
+            "escape" | "esc" => {
+                self.dismiss_launcher(cx);
+                return;
+            }
+            "enter" | "return" => {
+                self.activate_launcher_row(cx);
+                return;
+            }
+            "up" | "arrowup" => {
+                self.launcher_selected = self.launcher_selected.saturating_sub(1);
+            }
+            "down" | "arrowdown" => {
+                self.launcher_selected = self.launcher_selected.saturating_add(1);
+            }
+            "backspace" | "delete" => {
+                self.launcher_query.pop();
+                self.launcher_selected = 0;
+            }
+            "shift" | "control" | "ctrl" | "alt" | "super" | "meta" | "tab" => {}
+            _ => {
+                if let Some(c) = ch {
+                    if c.chars().any(|ch| !ch.is_control()) {
+                        self.launcher_query.push_str(c);
+                        self.launcher_selected = 0;
+                    }
+                }
+            }
+        }
+        self.sync_launcher(cx);
+    }
+
+    fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
+        let rows = self.filtered_rows();
+        let Some(row) = rows.get(self.launcher_selected) else {
+            return;
+        };
+        let kind = row.kind.clone();
+        self.dismiss_launcher(cx);
+        let niri = self.niri.clone();
+        cx.defer(move |_cx| {
+            let Some(niri) = niri else {
+                return;
+            };
+            match kind {
+                launcher::RowKind::App { exec } => {
+                    let _ = niri.apply(CompositorCommand::Spawn { command: exec });
+                }
+                launcher::RowKind::Window { id } => {
+                    let _ = niri.apply(CompositorCommand::FocusWindow { id });
+                }
+            }
+        });
+    }
+
+    fn apply_ipc(&mut self, req: ClientRequest, cx: &mut Context<Self>) {
+        match req {
+            ClientRequest::ToggleLauncher => {
+                self.set_launcher_open(!self.launcher_open, cx);
+            }
+            ClientRequest::OpenLauncher => self.set_launcher_open(true, cx),
+            ClientRequest::CloseLauncher => self.set_launcher_open(false, cx),
+            _ => {}
+        }
+    }
+}
+
+fn spawn_niri_pump(cx: &mut Context<Daemon>, inbox: Arc<NiriInbox>) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let wake = inbox.take_wake();
+    thread::Builder::new()
+        .name("awari-niri-pump".into())
+        .spawn(move || {
+            let Some(wake) = wake else { return };
+            while wake.recv().is_ok() {
+                let _ = tx.unbounded_send(inbox.drain());
+            }
+        })
+        .ok();
+    cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        while let Some(msgs) = rx.next().await {
+            let _ = this.update(cx, |d, cx| {
+                d.apply_niri(msgs);
+                if d.launcher_open {
+                    d.sync_launcher(cx);
+                }
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+fn spawn_ipc(cx: &mut Context<Daemon>) {
+    let Some(std_rx) = crate::lock::take_ipc_rx() else {
+        return;
+    };
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    thread::Builder::new()
+        .name("awari-ipc-pump".into())
+        .spawn(move || {
+            while let Ok(req) = std_rx.recv() {
+                let _ = tx.unbounded_send(req);
+            }
+        })
+        .ok();
+    cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        while let Some(req) = rx.next().await {
+            let _ = this.update(cx, |d, cx| {
+                d.apply_ipc(req, cx);
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}

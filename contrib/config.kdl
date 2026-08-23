@@ -1,0 +1,35 @@
+// ~/.config/awari/config.kdl
+// Unknown keys are ignored. No exec / no shell.
+
+// Concept palette. Every token is optional; omit to keep the default.
+theme {
+    accent "#8b7bf0"
+    accent-dim "#8b7bf024"
+    bg "#0b0b0c"
+    panel "#141416"
+    raise "#ffffff0b"
+    border "#ffffff12"
+    text "#eceaf0"
+    text-dim "#8b8994"
+    text-faint "#57555f"
+    scrim "#0b0b0cb3"
+}
+
+// Empty `roots` = existing XDG user dirs (Desktop, Documents, …).
+// `/` is ignored. `~` expands. Full $HOME is a budget choice you opt into.
+files {
+    // roots "~/Documents" "~/Downloads" "~/code"
+}
+
+// Hide a chip/source. Files still require fff-search wiring to show rows.
+sources {
+    windows true
+    apps true
+    files true
+    commands true
+}
+
+motion {
+    reduced false
+    duration-ms 140
+}

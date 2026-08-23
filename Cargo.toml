@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/awari",
+    "crates/awari-compositor",
+    "crates/awari-ipc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/borngraced/reelshell"
+
+[workspace.dependencies]
+niri-ipc = "=26.4.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1

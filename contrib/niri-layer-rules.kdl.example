@@ -1,0 +1,14 @@
+// Optional. Overlay launcher; blur is compositor-side.
+layer-rule {
+    match namespace="^awari:"
+    geometry-corner-radius 8
+    background-effect {
+        xray true
+        blur true
+    }
+}
+
+spawn-at-startup "awari"
+binds {
+    Mod+D { spawn "awari" "toggle-launcher"; }
+}

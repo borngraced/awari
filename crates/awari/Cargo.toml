@@ -1,0 +1,25 @@
+[package]
+name = "awari"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "awari"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["wayland"] }
+niri-ipc.workspace = true
+awari-compositor = { path = "../awari-compositor" }
+awari-ipc = { path = "../awari-ipc" }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror.workspace = true
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+fff-search = "0.10.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
