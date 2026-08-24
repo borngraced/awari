@@ -84,6 +84,7 @@ impl Theme {
     pub fn faint(&self) -> Rgba {
         self.text_faint.to_rgba()
     }
+    #[allow(dead_code)]
     pub fn scrim(&self) -> Rgba {
         self.scrim.to_rgba()
     }

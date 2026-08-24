@@ -2,6 +2,7 @@
 //! configured root. One thread owns all pickers; the daemon sends queries,
 //! results come back tagged with a sequence number so stale answers drop.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -33,6 +34,39 @@ pub struct FileHit {
 pub fn is_path_shaped(query: &str) -> bool {
     let q = query.trim();
     q.starts_with('~') || q.starts_with('.') || q.contains('/')
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// If `raw` is a path-shaped query whose leading directory exists on disk,
+/// return that directory so results can be pulled directly from it (e.g.
+/// `~/dev/` → `~/dev`). Returns `None` otherwise.
+fn path_query_dir(raw: &str) -> Option<PathBuf> {
+    if !is_path_shaped(raw) {
+        return None;
+    }
+    let trimmed = raw.trim();
+    let expanded = if let Some(rest) = trimmed.strip_prefix('~') {
+        let home = home_dir()?;
+        if rest.is_empty() || rest.starts_with('/') {
+            home.join(rest.trim_start_matches('/'))
+        } else {
+            home.join(rest)
+        }
+    } else {
+        PathBuf::from(trimmed)
+    };
+    let dir = if expanded.to_string_lossy().ends_with('/') {
+        expanded
+    } else {
+        match expanded.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => expanded,
+        }
+    };
+    dir.is_dir().then_some(dir)
 }
 
 pub struct Files {
@@ -115,12 +149,13 @@ fn picker_loop(
     tracing::info!(roots = pickers.len(), "file index started");
 
     let parser = QueryParser::default();
+    let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
     while let Ok(first) = qrx.recv() {
         let (seq, raw) = coalesce(&qrx, first);
         if raw.trim().is_empty() {
             continue;
         }
-        let hits = search_all(&pickers, &parser, &raw, &opts);
+        let hits = search_all(&pickers, &mut transient, &parser, &raw, &opts);
         if rtx.send((seq, hits)).is_err() {
             return;
         }
@@ -201,6 +236,7 @@ fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> (u64, String
 
 fn search_all(
     pickers: &[SharedFilePicker],
+    transient: &mut HashMap<PathBuf, SharedFilePicker>,
     parser: &QueryParser<fff_search::FileSearchConfig>,
     raw: &str,
     opts: &FilesOptions,
@@ -211,11 +247,48 @@ fn search_all(
     } else {
         raw.to_string()
     };
-    let merged: Vec<Vec<FileHit>> = pickers
+    let mut merged: Vec<Vec<FileHit>> = pickers
         .iter()
         .map(|shared| search_one(shared, parser, &fff_query, &regex, opts.index_lockfiles))
         .collect();
-    let cap = PER_ROOT_ROWS.saturating_mul(pickers.len().max(1));
+    // When the query points at a real directory (e.g. `~/dev/`), search it
+    // directly so path navigation reaches places outside the configured roots.
+    // Only the trailing filename segment is fuzzy-matched, not the dir prefix.
+    if let Some(dir) = path_query_dir(raw) {
+        let shared = transient.entry(dir.clone()).or_insert_with(|| {
+            let shared = SharedFilePicker::default();
+            let frecency = SharedFrecency::default();
+            let _ = FilePicker::new_with_shared_state(
+                shared.clone(),
+                frecency,
+                FilePickerOptions {
+                    base_path: dir.display().to_string(),
+                    mode: FFFMode::Neovim,
+                    watch: false,
+                    enable_home_dir_scanning: false,
+                    enable_fs_root_scanning: false,
+                    enable_mmap_cache: false,
+                    enable_content_indexing: false,
+                    follow_symlinks: false,
+                    cache_budget: None,
+                },
+            );
+            shared
+        });
+        let term = if raw.trim_end().ends_with('/') {
+            String::new()
+        } else {
+            raw.rsplit('/').next().unwrap_or("").to_string()
+        };
+        let (t_pat, t_re) = resolve_regex(&term, opts.regex);
+        let t_fff = if t_re.is_some() {
+            regex_hint(&t_pat)
+        } else {
+            term
+        };
+        merged.push(search_one(shared, parser, &t_fff, &t_re, opts.index_lockfiles));
+    }
+    let cap = PER_ROOT_ROWS.saturating_mul(merged.len().max(1));
     merge_round_robin(&merged, cap)
 }
 
@@ -376,5 +449,29 @@ mod tests {
     fn regex_hint_strips_metacharacters() {
         assert_eq!(regex_hint(r"\.rs$"), ".rs");
         assert_eq!(regex_hint(r"src/.*\.rs"), "src/..rs");
+    }
+
+    #[test]
+    fn path_query_dir_resolves_existing_directory() {
+        let base = std::env::temp_dir().join(format!("awari_pathq_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let q = format!("{}/", base.display());
+        let got = path_query_dir(&q);
+        let _ = std::fs::remove_dir_all(&base);
+        let got = got.expect("existing directory with trailing slash should resolve");
+        assert_eq!(
+            got.as_os_str()
+                .to_string_lossy()
+                .trim_end_matches('/')
+                .to_string(),
+            base.to_string_lossy().to_string(),
+            "resolved dir should match the queried directory"
+        );
+    }
+
+    #[test]
+    fn path_query_dir_ignores_missing_and_plain() {
+        assert!(path_query_dir("firefox").is_none());
+        assert!(path_query_dir("/nonexistent_awari_xyz_123/").is_none());
     }
 }

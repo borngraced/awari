@@ -455,15 +455,17 @@ pub fn filter_rows(
     }
 
     if crate::files::is_path_shaped(&q) {
+        // Explicit path navigation: files first, then apps, then windows.
         push(&mut out, file_rows(FILE_ROWS));
-        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
         push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
-    } else {
         push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
+    } else {
+        // Apps are the primary action: rank above files and windows.
         push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
         if !empty {
             push(&mut out, file_rows(FILE_ROWS));
         }
+        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
     }
     out
 }

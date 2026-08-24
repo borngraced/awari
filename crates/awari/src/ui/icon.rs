@@ -15,6 +15,7 @@ pub enum Icon {
 }
 
 impl Icon {
+    #[allow(dead_code)]
     pub fn path(self) -> &'static str {
         match self {
             Self::Search => "icons/search.svg",
