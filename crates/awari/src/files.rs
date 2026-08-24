@@ -214,10 +214,16 @@ fn picker_loop(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        // Debounce: let a typing burst land, then answer only the newest
-        // queued query (coalesce drains everything that arrived).
-        thread::sleep(QUERY_DEBOUNCE);
-        let (seq, raw) = coalesce(&qrx, first);
+        // Coalesce drains everything that arrived since `first`. If more than
+        // one query is in flight it's a typing burst, so debounce once and
+        // then take the newest query; a lone query needs no artificial wait.
+        let (latest, n) = coalesce(&qrx, first);
+        let (seq, raw) = if n > 1 {
+            thread::sleep(QUERY_DEBOUNCE);
+            coalesce(&qrx, latest).0
+        } else {
+            latest
+        };
         if raw.trim().is_empty() {
             continue;
         }
@@ -289,13 +295,17 @@ fn is_lockfile(path: &Path) -> bool {
     )
 }
 
-fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> (u64, String) {
+fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> ((u64, String), usize) {
     let mut latest = first;
+    let mut count = 1;
     loop {
         match qrx.try_recv() {
-            Ok(next) => latest = next,
-            Err(TryRecvError::Empty) => return latest,
-            Err(TryRecvError::Disconnected) => return latest,
+            Ok(next) => {
+                latest = next;
+                count += 1;
+            }
+            Err(TryRecvError::Empty) => return (latest, count),
+            Err(TryRecvError::Disconnected) => return (latest, count),
         }
     }
 }

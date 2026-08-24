@@ -59,8 +59,16 @@ pub struct Daemon {
     file_hits: Vec<FileHit>,
     /// Cached window list, rebuilt only when niri reports a change (not on
     /// every keystroke), so `filtered_rows` can borrow it without re-cloning
-    /// every title/app_id per character typed.
-    windows_list: Vec<(u64, String, Option<String>)>,
+    /// every title/app_id per character typed. The last element is the
+    /// lowercased app_id, precomputed so matching allocates nothing.
+    windows_list: Vec<(u64, String, Option<String>, Option<String>)>,
+    /// Bumped whenever the app or window list changes, so cached launcher
+    /// rows can be invalidated without re-filtering on every highlight move.
+    source_gen: u64,
+    /// Last computed rows, reused across highlight moves (Select / arrows)
+    /// and other non-query changes to avoid re-scoring on every keystroke.
+    last_rows: Option<Vec<launcher::LauncherRow>>,
+    last_rows_key: Option<(String, launcher::Category, u64, u64)>,
 }
 
 impl Daemon {
@@ -125,6 +133,9 @@ impl Daemon {
             files_seq: 0,
             file_hits: Vec::new(),
             windows_list: Vec::new(),
+            source_gen: 0,
+            last_rows: None,
+            last_rows_key: None,
         };
         spawn_niri_pump(cx, inbox);
         spawn_ipc(cx);
@@ -149,7 +160,6 @@ impl Daemon {
         for msg in msgs {
             match msg {
                 NiriMsg::Event(ev) => {
-                    windows_changed = true;
                     if let niri_ipc::Event::WorkspaceActivated { id, focused: true } = &ev {
                         self.focused_ws = Some(*id);
                         if let Some(w) = self.state.workspaces.workspaces.values().find(|w| w.id == *id)
@@ -157,6 +167,19 @@ impl Daemon {
                         {
                             self.output_name = o;
                         }
+                    }
+                    // Only rebuild the window list for events that actually
+                    // change membership/order of the rows (open/close/move),
+                    // not focus/urgency churn.
+                    if matches!(
+                        ev,
+                        niri_ipc::Event::WindowsChanged { .. }
+                            | niri_ipc::Event::WindowOpenedOrChanged { .. }
+                            | niri_ipc::Event::WindowClosed { .. }
+                            | niri_ipc::Event::WorkspaceActivated { .. }
+                            | niri_ipc::Event::WorkspacesChanged { .. }
+                    ) {
+                        windows_changed = true;
                     }
                     let _ = self.state.apply(ev);
                 }
@@ -210,9 +233,10 @@ impl Daemon {
     /// keystroke inside `filtered_rows`.
     fn refresh_windows(&mut self) {
         self.windows_list = self.launcher_windows();
+        self.source_gen += 1;
     }
 
-    fn launcher_windows(&self) -> Vec<(u64, String, Option<String>)> {
+    fn launcher_windows(&self) -> Vec<(u64, String, Option<String>, Option<String>)> {
         let ws_id = match self.focused_ws {
             Some(id) => Some(id),
             None => self
@@ -240,6 +264,7 @@ impl Daemon {
                         .or_else(|| w.app_id.clone())
                         .unwrap_or_else(|| format!("#{}", w.id)),
                     w.app_id.clone(),
+                    w.app_id.as_deref().map(|s| s.to_lowercase()),
                 )
             })
             .collect()
@@ -251,7 +276,7 @@ impl Daemon {
         } else {
             &[]
         };
-        let empty_windows: &[(u64, String, Option<String>)] = &[];
+        let empty_windows: &[(u64, String, Option<String>, Option<String>)] = &[];
         let windows = if self.cfg.sources.windows {
             self.windows_list.as_slice()
         } else {
@@ -277,7 +302,22 @@ impl Daemon {
         let Some(h) = self.launcher else {
             return;
         };
-        let rows = self.filtered_rows();
+        // Reuse the last rows when nothing that affects ranking changed, so a
+        // highlight move (Select / arrow) doesn't re-score every app/window.
+        let key = (
+            self.launcher_query.clone(),
+            self.launcher_category,
+            self.files_seq,
+            self.source_gen,
+        );
+        let rows = if self.last_rows_key.as_ref() == Some(&key) {
+            self.last_rows.clone().unwrap()
+        } else {
+            let rows = self.filtered_rows();
+            self.last_rows = Some(rows.clone());
+            self.last_rows_key = Some(key);
+            rows
+        };
         if self.launcher_selected >= rows.len() {
             self.launcher_selected = rows.len().saturating_sub(1);
         }
@@ -793,6 +833,7 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
         while let Some(apps) = fut_rx.next().await {
             let _ = this.update(cx, |d, cx| {
                 d.apps = apps;
+                d.source_gen += 1;
                 if d.launcher_open {
                     d.sync_launcher(cx);
                 }

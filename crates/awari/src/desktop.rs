@@ -9,6 +9,10 @@ pub struct DesktopApp {
     pub app_id: Option<String>,
     /// Raw `Icon=` value from the entry: an absolute path or a themed name.
     pub icon: Option<String>,
+    /// Lowercased `name`, precomputed so app/window matching never allocates.
+    pub name_lc: String,
+    /// Lowercased `StartupWMClass`/`app_id`, precomputed.
+    pub app_id_lc: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,11 +182,15 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
             return None;
         }
     }
+    let name_lc = name.to_lowercase();
+    let app_id_lc = app_id.as_deref().map(|s| s.to_lowercase());
     Some(DesktopApp {
         name,
         exec: argv,
         app_id,
         icon,
+        name_lc,
+        app_id_lc,
     })
 }
 

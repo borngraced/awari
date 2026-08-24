@@ -423,7 +423,7 @@ fn push_capped(
 pub fn filter_rows(
     query: &str,
     apps: &[DesktopApp],
-    windows: &[(u64, String, Option<String>)],
+    windows: &[(u64, String, Option<String>, Option<String>)],
     files: &[FileHit],
     recents: &[String],
     app_usage: &HashMap<String, u64>,
@@ -464,7 +464,7 @@ pub fn filter_rows(
         windows
             .iter()
             .enumerate()
-            .filter_map(|(ix, (_, title, app_id))| {
+            .filter_map(|(ix, (_, title, app_id, _))| {
                 let s = if empty {
                     1
                 } else {
@@ -479,9 +479,9 @@ pub fn filter_rows(
         win_scored.sort_by(|a, b| b.0.cmp(&a.0));
     }
 
-    let visible_app_ids: Vec<String> = win_scored
+    let visible_app_ids: Vec<&str> = win_scored
         .iter()
-        .filter_map(|&(_, ix)| windows[ix].2.as_deref().map(|s| s.to_lowercase()))
+        .filter_map(|&(_, ix)| windows[ix].3.as_deref())
         .collect();
 
     let mut app_scored: Vec<(i64, &DesktopApp)> = if files_only {
@@ -490,17 +490,11 @@ pub fn filter_rows(
         apps.iter()
             .filter_map(|app| {
                 if !apps_only {
-                    let ident_hits_window = |probe: Option<&str>| {
-                        probe
-                            .map(|p| {
-                                visible_app_ids
-                                    .iter()
-                                    .any(|v| v == p.to_lowercase().as_str())
-                            })
-                            .unwrap_or(false)
+                    let ident_hits_window = |probe: &str| {
+                        visible_app_ids.iter().any(|v| *v == probe)
                     };
-                    if ident_hits_window(Some(&app.name))
-                        || ident_hits_window(app.app_id.as_deref())
+                    if ident_hits_window(&app.name_lc)
+                        || ident_hits_window(app.app_id_lc.as_deref().unwrap_or(""))
                     {
                         return None;
                     }
@@ -527,9 +521,16 @@ pub fn filter_rows(
             .collect()
     };
     if empty {
+        // Precompute recent positions once instead of scanning `recents`
+        // per comparator call.
+        let recent_pos: HashMap<&str, usize> = recents
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str(), i))
+            .collect();
         app_scored.sort_by(|a, b| {
-            let ra = recents.iter().position(|n| *n == a.1.name);
-            let rb = recents.iter().position(|n| *n == b.1.name);
+            let ra = recent_pos.get(a.1.name.as_str()).copied();
+            let rb = recent_pos.get(b.1.name.as_str()).copied();
             let r = ra
                 .unwrap_or(usize::MAX)
                 .cmp(&rb.unwrap_or(usize::MAX));
@@ -546,7 +547,7 @@ pub fn filter_rows(
     }
 
     let win_row = |ix: usize| -> LauncherRow {
-        let (id, title, app_id) = &windows[ix];
+        let (id, title, app_id, _) = &windows[ix];
         LauncherRow {
             kind: RowKind::Window { id: *id },
             label: title.clone(),
@@ -1344,13 +1345,15 @@ mod tests {
             exec: vec![name.to_lowercase()],
             app_id: app_id.map(Into::into),
             icon: None,
+            name_lc: name.to_lowercase(),
+            app_id_lc: app_id.map(|s| s.to_lowercase()),
         }
     }
 
     fn rows(
         q: &str,
         apps: &[DesktopApp],
-        windows: &[(u64, String, Option<String>)],
+        windows: &[(u64, String, Option<String>, Option<String>)],
         files: &[FileHit],
         recents: &[String],
     ) -> Vec<LauncherRow> {
@@ -1360,7 +1363,7 @@ mod tests {
     #[test]
     fn filter_matches_name_case_insensitive() {
         let apps = vec![app("Firefox", None)];
-        let out = rows("fire", &apps, &[(1, "Terminal".into(), None)], &[], &[]);
+        let out = rows("fire", &apps, &[(1, "Terminal".into(), None, None)], &[], &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].label, "Firefox");
     }
@@ -1379,7 +1382,7 @@ mod tests {
         let out = rows(
             "",
             &apps,
-            &[(7, "Mozilla Firefox".into(), Some("firefox".into()))],
+            &[(7, "Mozilla Firefox".into(), Some("firefox".into()), Some("firefox".into()))],
             &[],
             &[],
         );
@@ -1402,7 +1405,7 @@ mod tests {
         let out = rows(
             "~/not",
             &[app("Notes", None)],
-            &[(1, "Editor".into(), None)],
+            &[(1, "Editor".into(), None, None)],
             &files,
             &[],
         );
