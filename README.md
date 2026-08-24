@@ -28,13 +28,29 @@ process when closed and a bounded one while open.
 
 ## Usage
 
-Super opens it. Typing narrows the list and keeps the top row selected; Enter
-activates it and closes. Escape or a click on the background dismisses. Up and
-down move the selection.
+Bind a key in your compositor to `awari toggle-launcher` (for example
+Super+Space), then press it to open the overlay. Typing filters the list and the
+top match stays selected. `Enter` activates the selected result and closes;
+`Escape` or a click on the background dismisses without selecting. `Up` and
+`Down` move the selection.
 
-When a query looks like a path (starts with ~, /, or ., or contains /), files
-rank first and fff constraints like `*.pdf` and `!node_modules/` apply. `../` is
-a path, not an operator.
+`Tab` completes the query: it ghosts in the selected match, or fills the box
+with the selected row's full value. `Shift`+`Up`/`Down` recalls previous
+queries.
+
+`Alt`+`Enter` opens a per-row action menu. The items depend on the result:
+Open, Show in Folder, Copy Path, Run in Terminal, and Run.
+
+Query modes:
+- A path-shaped query (starting with `~`, `/`, or `.`, or containing `/`)
+  browses the filesystem, files first, then apps and windows. Constraints like
+  `*.pdf` and `!node_modules/` apply, and `../` moves up a directory.
+- `o:<path>` opens a path and lists its real entries as you type.
+- `r:<regex>` filters files by regular expression.
+- `> <command>` runs the rest as a shell command in a terminal.
+- An arithmetic query shows its result; `Enter` copies it.
+
+Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
 ## How it stays fast
 
