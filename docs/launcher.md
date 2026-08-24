@@ -5,7 +5,7 @@
 | **Status** | Canonical. Supersedes `docs/architecture.md` (map shell). |
 | **Date** | 2026-08-23 |
 | **Name** | **Àwárí** (Yoruba *àwárí*: a finding). Binary and crate: `awari`. |
-| **Compositor** | niri only (`niri-ipc = "=26.4.0"`) |
+| **Compositor** | Wayland-only (niri, hyprland, mutter, sway detected at runtime); `niri-ipc` backend when niri is the compositor |
 | **License** | GPL-3.0-or-later (the `niri-ipc` crate makes the binary a GPL derivative) |
 
 The 3-second demo is: Super, type, the right window or app or file, first pixel on the next vsync. If the demo is a bar, a map, or a sliding desktop, the product is wrong.

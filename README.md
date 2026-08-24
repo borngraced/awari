@@ -1,21 +1,18 @@
 # Àwárí
 
-**Àwárí** is a niri overlay launcher. Super filters windows, apps, and files. There is no bar and no map.
+**Àwárí** is a Wayland overlay launcher. Super filters windows, apps, and files. There is no bar and no map.
 
-The 3-second demo is: Super, type, the right row, next vsync. Canonical spec: [`docs/launcher.md`](docs/launcher.md). The old map-shell writeup (then called Reelshell) is [`docs/architecture.md`](docs/architecture.md) (historical).
+The 3-second demo is: Super, type, the right row, next vsync. Canonical spec: [`docs/launcher.md`](docs/launcher.md).
 
-Yoruba **àwárí**: a finding, a discovery. You type `awari` — Cargo, systemd, and niri binds are ASCII.
+Yoruba **àwárí**: a finding, a discovery. You type `awari` — Cargo, systemd, and niri binds are ASCII (only when niri is the compositor; otherwise any Wayland compositor).
 
 ## Docs
 
 | Doc | Contents |
 |---|---|
 | [`docs/launcher.md`](docs/launcher.md) | Canonical product spec |
-| [`docs/architecture.md`](docs/architecture.md) | Historical map-shell design |
-| [`docs/map.md`](docs/map.md) | Historical map / filmstrip |
-| [`docs/surfaces.md`](docs/surfaces.md) | Layer-shell notes (launcher overlay still applies) |
-| [`docs/compositor.md`](docs/compositor.md) | niri sockets (spawn / focus / window list) |
-| [`docs/performance.md`](docs/performance.md) | Historical budgets; launcher IPC/vsync still apply |
+
+Budgets, stack, and status notes live in the launcher spec.
 
 ## Budgets
 
@@ -23,9 +20,9 @@ Closed daemon must sleep (`pidstat` **>1%** for 10s fails). RSS well under 100MB
 
 ## Stack
 
-Rust + GPUI layer-shell overlay. `niri-ipc = "=26.4.0"`. Entire workspace GPL-3.0-or-later. systemd `--user`, single instance. Files via in-process `fff-search`, not an MCP/CLI spawn.
+Rust + GPUI layer-shell overlay. Entire workspace GPL-3.0-or-later. systemd `--user`, single instance. Files via in-process `fff-search`, not an MCP/CLI spawn.
 
-Linking `niri-ipc` makes the binary a GPL derivative. Plugins are out.
+Linking `niri-ipc` makes the binary a GPL derivative when niri is the compositor. Plugins are out.
 
 `awari ping` talks to a running daemon. Stale `$XDG_RUNTIME_DIR/awari/ipc.sock`: Ping then unlink on `ECONNREFUSED`. Looping unit: `systemctl --user reset-failed`.
 
@@ -35,7 +32,7 @@ Launcher daemon + overlay. Bar, map, filmstrip, and HUD services are gone.
 
 ### Build
 
-Linux + niri only.
+Linux + any Wayland compositor (niri, hyprland, mutter, sway detected at runtime).
 
 ```
 # Debian: libwayland-dev libxkbcommon-dev libegl-dev pkg-config
@@ -45,7 +42,7 @@ cargo run -p awari
 awari ping
 ```
 
-`contrib/awari.service`. niri: `spawn-at-startup "awari"` and `Mod+D { spawn "awari" "toggle-launcher"; }`.
+`contrib/awari.service`. When niri is the compositor: `spawn-at-startup "awari"` and `Mod+D { spawn "awari" "toggle-launcher"; }`.
 
 ---
 

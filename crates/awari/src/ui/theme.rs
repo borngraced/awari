@@ -46,9 +46,9 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// Shipped default: Gruvbox (dark).
+    /// Shipped default: Catppuccin Mocha.
     fn default() -> Self {
-        Self::gruvbox()
+        Self::catppuccin()
     }
 }
 
@@ -147,11 +147,68 @@ impl Theme {
         }
     }
 
+    /// Catppuccin Mocha — clean, warm-modern dark.
+    pub fn catppuccin() -> Self {
+        Self {
+            accent: Color::rgb(0xcb_a6_f7),
+            accent_dim: Color::rgba(0xcb_a6_f7_33),
+            bg: Color::rgb(0x11_11_1b),
+            panel: Color::rgb(0x1e_1e_2e),
+            raise: Color::rgb(0x31_32_44),
+            border: Color::rgb(0x45_47_5a),
+            text: Color::rgb(0xcd_d6_f4),
+            text_dim: Color::rgb(0xa6_ad_c8),
+            text_faint: Color::rgb(0x93_99_b2),
+            scrim: Color::rgba(0x08_08_0c_e6),
+            font: None,
+            font_size: None,
+        }
+    }
+
+    /// Tokyo Night — deep blue, calm.
+    pub fn tokyo_night() -> Self {
+        Self {
+            accent: Color::rgb(0x7a_a2_f7),
+            accent_dim: Color::rgba(0x7a_a2_f7_33),
+            bg: Color::rgb(0x1a_1b_26),
+            panel: Color::rgb(0x24_28_3b),
+            raise: Color::rgb(0x2f_33_4d),
+            border: Color::rgb(0x41_48_68),
+            text: Color::rgb(0xc0_ca_f5),
+            text_dim: Color::rgb(0xa9_b1_d6),
+            text_faint: Color::rgb(0x56_5f_89),
+            scrim: Color::rgba(0x1a_1b_26_b3),
+            font: None,
+            font_size: None,
+        }
+    }
+
+    /// Nord — muted arctic blue-grey.
+    pub fn nord() -> Self {
+        Self {
+            accent: Color::rgb(0x88_c0_d0),
+            accent_dim: Color::rgba(0x88_c0_d0_33),
+            bg: Color::rgb(0x2e_34_40),
+            panel: Color::rgb(0x3b_42_52),
+            raise: Color::rgb(0x43_4c_5e),
+            border: Color::rgb(0x4c_56_6a),
+            text: Color::rgb(0xec_ef_f4),
+            text_dim: Color::rgb(0xd8_de_e9),
+            text_faint: Color::rgb(0x81_a1_c1),
+            scrim: Color::rgba(0x2e_34_40_b3),
+            font: None,
+            font_size: None,
+        }
+    }
+
     /// Look up a built-in named preset (case-insensitive). Unknown names return `None`.
     pub fn preset(name: &str) -> Option<Theme> {
         match name.to_ascii_lowercase().as_str() {
             "gruvbox" => Some(Self::gruvbox()),
             "gruvbox-light" | "gruvbox_light" => Some(Self::gruvbox_light()),
+            "catppuccin" | "catppuccin-mocha" | "mocha" => Some(Self::catppuccin()),
+            "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
+            "nord" => Some(Self::nord()),
             "classic" | "default" => Some(Self::classic()),
             _ => None,
         }
@@ -185,5 +242,19 @@ mod tests {
         assert_eq!(parse_hex("8b7bf024"), Some(Color::rgba(0x8b7bf024)));
         assert_eq!(parse_hex("#fff"), Some(Color::rgb(0xffffff)));
         assert!(parse_hex("red").is_none());
+    }
+
+    #[test]
+    fn presets_resolve_and_default_is_catppuccin() {
+        assert_eq!(Theme::default(), Theme::catppuccin());
+        assert!(Theme::preset("catppuccin").is_some());
+        assert!(Theme::preset("tokyo-night").is_some());
+        assert!(Theme::preset("nord").is_some());
+        assert!(Theme::preset("gruvbox").is_some());
+        assert!(Theme::preset("classic").is_some());
+        assert!(Theme::preset("nope").is_none());
+        // Distinct palettes shouldn't accidentally collide.
+        assert_ne!(Theme::catppuccin().panel, Theme::tokyo_night().panel);
+        assert_ne!(Theme::tokyo_night().panel, Theme::nord().panel);
     }
 }

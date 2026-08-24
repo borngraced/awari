@@ -11,6 +11,7 @@ pub enum Icon {
     AppWindow,
     LayoutGrid,
     File,
+    Command,
 }
 
 impl Icon {
@@ -20,6 +21,7 @@ impl Icon {
             Self::AppWindow => "icons/app_window.svg",
             Self::LayoutGrid => "icons/layout_grid.svg",
             Self::File => "icons/file.svg",
+            Self::Command => "icons/command.svg",
         }
     }
 
@@ -29,6 +31,7 @@ impl Icon {
             Self::AppWindow => include_bytes!("../../assets/icons/app_window.svg"),
             Self::LayoutGrid => include_bytes!("../../assets/icons/layout_grid.svg"),
             Self::File => include_bytes!("../../assets/icons/file.svg"),
+            Self::Command => include_bytes!("../../assets/icons/command.svg"),
         }
     }
 
