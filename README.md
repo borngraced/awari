@@ -46,12 +46,21 @@ a path, not an operator.
 
 ## Features
 
-- One list covering windows (focus), apps (XDG `.desktop`), and files.
+- One unified list for **windows** (focus), **apps** (XDG `.desktop`), and **files**. Apps are always indexed; the files and windows sources can each be toggled off.
 - Empty query shows recent apps first, then open windows (no file dump).
-- Dynamic path search: `~/dev/awari/src/` lists its contents as you type.
-- Regex file filter with the `r:` prefix.
+- Fuzzy matching across apps and windows, with frecency-ranked files.
+- Query prefixes:
+  - `>` runs the rest as a shell command in a terminal.
+  - `o:<path>` opens a path with the default handler. It lists the real entries as you type and accepts `~` or paths relative to `$HOME`.
+  - `r:<regex>` filters files by regular expression.
+- Path-shaped queries (starting with `~`, `/`, or `.`, or containing `/`) enter directory navigation; constraints like `*.pdf` and `!node_modules/` apply.
+- Calculator: a query that is arithmetic shows the result inline, and Enter copies it.
+- `Tab` autocompletes with the selected result's full value. `Shift`+`Up`/`Down` recalls previous queries.
+- `Alt`+`Enter` opens a per-row action menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
+- Clickable category chips: All, Apps, Files, Commands, Windows.
+- Theming is KDL with hex color tokens (no CSS, no remote fetches). There are nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`). Font and size are configurable too.
 - Lockfiles like `Cargo.lock` and `package-lock.json` are skipped by default.
-- Theme is KDL with hex color tokens. No CSS, no remote fetches.
+- Monitor-aware placement: the overlay opens on the focused output.
 
 ## Memory
 
