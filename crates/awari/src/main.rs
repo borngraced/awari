@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "linux"))]
-compile_error!("awari is Linux-only (Wayland / niri)");
+compile_error!("awari is Linux-only (Wayland)");
 
 mod app;
 mod argv;
@@ -15,7 +15,7 @@ mod ui;
 use std::sync::{Arc, Mutex};
 
 use gpui_platform::application;
-use awari_compositor::NiriHandle;
+use awari_compositor::connect;
 
 use crate::lock::Stats;
 use crate::surfaces::SurfaceRole;
@@ -41,9 +41,11 @@ fn main() {
     let stats = Arc::new(Mutex::new(Stats::default()));
     lock::spawn_accept(server.listener, stats.clone());
 
-    let niri = NiriHandle::connect_commands().ok().map(Arc::new);
-    if niri.is_none() {
-        tracing::warn!("niri command socket unavailable; apps still launch, windows empty");
+    let (compositor, inbox) = connect();
+    if compositor.windows().is_empty() {
+        tracing::warn!(
+            "compositor did not advertise wlr-foreign-toplevel; window switching disabled (apps/files/commands still work)"
+        );
     }
 
     let cfg = config::load();
@@ -51,6 +53,6 @@ fn main() {
 
     application().run(move |cx| {
         gpui_base::init(cx);
-        app::Daemon::start(cx, niri.clone(), stats.clone(), cfg);
+        app::Daemon::start(cx, Some(compositor), inbox, stats.clone(), cfg);
     });
 }

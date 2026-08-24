@@ -14,7 +14,6 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/borngraced/reelshell"
 
 [workspace.dependencies]
-niri-ipc = "=26.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

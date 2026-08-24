@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="crates/awari/assets/awari-icon.svg" width="120" alt="Àwárí logo">
+</p>
+
 # Àwárí
 
 Àwárí is a launcher for Wayland. Hit Super, type, and you get a ranked list of

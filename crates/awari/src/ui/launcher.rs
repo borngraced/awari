@@ -2,12 +2,15 @@
 
 use gpui::{
     div, img, px, AnyElement, AnimationExt, App, Context, FocusHandle,
-    Focusable, FontWeight, Rgba, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
-    StyledText, HighlightStyle,
+    Focusable, FontWeight, Image, ImageFormat, Rgba, InteractiveElement, IntoElement, MouseButton,
+    ObjectFit, ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled,
+    StyledImage, StyledText, HighlightStyle,
     UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui::prelude::*;
+
+/// Embedded awari brand mark (see assets/awari-icon.svg).
+const AWARI_LOGO: &[u8] = include_bytes!("../../assets/awari-icon.svg");
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -342,12 +345,16 @@ impl Launcher {
             .rounded(px(1.))
             .bg(t.accent())
             .when(!self.caret_on, |el| el.opacity(0.0));
+        let logo = img(Arc::new(Image::from_bytes(ImageFormat::Svg, AWARI_LOGO.to_vec())))
+            .size(px(20.))
+            .flex_none();
         if q.is_empty() {
             return div()
                 .flex()
                 .flex_nowrap()
                 .items_center()
                 .flex_none()
+                .child(logo)
                 .child(caret)
                 .child(
                     div()
@@ -362,6 +369,7 @@ impl Launcher {
             .flex_nowrap()
             .items_center()
             .flex_none()
+            .child(logo)
             .child(div().child(prefix.to_string()))
             .child(caret)
             .child(div().child(suffix.to_string()))
@@ -427,6 +435,7 @@ pub fn filter_rows(
     files: &[FileHit],
     recents: &[String],
     app_usage: &HashMap<String, u64>,
+    app_icons: &HashMap<String, String>,
     category: Category,
 ) -> Vec<LauncherRow> {
     let q = query.trim();
@@ -548,10 +557,15 @@ pub fn filter_rows(
 
     let win_row = |ix: usize| -> LauncherRow {
         let (id, title, app_id, _) = &windows[ix];
+        let resolved_icon = app_id.as_deref().and_then(|raw| {
+            let lc = raw.to_lowercase();
+            let name = app_icons.get(&lc).map(|s| s.as_str()).unwrap_or(raw);
+            crate::icons::resolve(name)
+        });
         LauncherRow {
             kind: RowKind::Window { id: *id },
             label: title.clone(),
-            resolved_icon: app_id.as_deref().and_then(crate::icons::resolve),
+            resolved_icon,
         }
     };
     let app_row = |app: &DesktopApp| -> LauncherRow {
@@ -1357,7 +1371,16 @@ mod tests {
         files: &[FileHit],
         recents: &[String],
     ) -> Vec<LauncherRow> {
-        filter_rows(q, apps, windows, files, recents, &Default::default(), Category::All)
+        filter_rows(
+            q,
+            apps,
+            windows,
+            files,
+            recents,
+            &Default::default(),
+            &Default::default(),
+            Category::All,
+        )
     }
 
     #[test]
@@ -1424,7 +1447,16 @@ mod tests {
     #[test]
     fn apps_chip_empty_is_uncapped() {
         let apps: Vec<DesktopApp> = (0..30).map(|i| app(&format!("App{i:02}"), None)).collect();
-        let out = filter_rows("", &apps, &[], &[], &[], &Default::default(), Category::Apps);
+        let out = filter_rows(
+            "",
+            &apps,
+            &[],
+            &[],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            Category::Apps,
+        );
         assert_eq!(out.len(), 30);
     }
 
@@ -1435,13 +1467,31 @@ mod tests {
                 path: format!("/tmp/f{i}").into(),
             })
             .collect();
-        let out = filter_rows("f", &[], &[], &files, &[], &Default::default(), Category::Files);
+        let out = filter_rows(
+            "f",
+            &[],
+            &[],
+            &files,
+            &[],
+            &Default::default(),
+            &Default::default(),
+            Category::Files,
+        );
         assert_eq!(out.len(), 40);
     }
 
     #[test]
     fn commands_chip_is_empty() {
-        let out = filter_rows("x", &[app("X", None)], &[], &[], &[], &Default::default(), Category::Commands);
+        let out = filter_rows(
+            "x",
+            &[app("X", None)],
+            &[],
+            &[],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            Category::Commands,
+        );
         assert!(out.is_empty());
     }
 

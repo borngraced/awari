@@ -11,8 +11,9 @@ use gpui::{
     point, px, size, App, AppContext, Bounds, ClipboardItem, Context, Entity, Global, QuitMode,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
-use niri_ipc::state::{EventStreamState, EventStreamStatePart};
-use awari_compositor::{Compositor, CompositorCommand, NiriHandle, NiriInbox, NiriMsg};
+use awari_compositor::{
+    Compositor, CompositorCommand, CompositorInbox, CompositorMsg,
+};
 use awari_ipc::ClientRequest;
 
 use crate::config::Config;
@@ -26,11 +27,9 @@ struct Keep(#[allow(dead_code)] Entity<Daemon>);
 impl Global for Keep {}
 
 pub struct Daemon {
-    niri: Option<Arc<NiriHandle>>,
-    state: EventStreamState,
-    output_name: String,
-    /// Workspace id from the last focused `WorkspaceActivated`.
-    focused_ws: Option<u64>,
+    /// Compositor backend (wlr-foreign-toplevel). `None` when the compositor
+    /// doesn't advertise foreign-toplevel; apps/files/commands still work.
+    compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
     launcher_open: bool,
     launcher_query: String,
@@ -40,6 +39,11 @@ pub struct Daemon {
     /// generation are dropped so a stale hide cannot clobber a fresh open.
     launcher_gen: u64,
     apps: Vec<DesktopApp>,
+    /// Lowercased `app_id` (StartupWMClass) → the real `Icon=` name from the
+    /// matching `.desktop` entry, built at scan time. Consulted when resolving
+    /// window-row icons so foreign-toplevel windows reuse the app's themed icon
+    /// instead of falling back to a letter tile.
+    app_icons: HashMap<String, String>,
     cfg: Config,
     stats: Arc<Mutex<Stats>>,
     /// Desktop names by last activation, most recent first.
@@ -74,12 +78,13 @@ pub struct Daemon {
 impl Daemon {
     pub fn start(
         cx: &mut App,
-        niri: Option<Arc<NiriHandle>>,
+        compositor: Option<Arc<dyn Compositor>>,
+        inbox: Arc<CompositorInbox>,
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
-        let daemon = cx.new(|cx| Self::new(cx, niri, stats, cfg));
+        let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, stats, cfg));
         // Prewarm: build the overlay now (wgpu device, shaders, fonts) so
         // the first Super press costs a frame instead of full stack init.
         // The null-buffer hide is queued before any configure roundtrip
@@ -92,11 +97,11 @@ impl Daemon {
 
     fn new(
         cx: &mut Context<Self>,
-        niri: Option<Arc<NiriHandle>>,
+        compositor: Option<Arc<dyn Compositor>>,
+        inbox: Arc<CompositorInbox>,
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
     ) -> Self {
-        let inbox = NiriInbox::start();
         let roots = if cfg.sources.files {
             cfg.files.resolved_roots()
         } else {
@@ -111,10 +116,7 @@ impl Daemon {
         );
         let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
         let mut daemon = Self {
-            niri,
-            state: EventStreamState::default(),
-            output_name: String::new(),
-            focused_ws: None,
+            compositor,
             launcher: None,
             launcher_open: false,
             launcher_query: String::new(),
@@ -122,6 +124,7 @@ impl Daemon {
             launcher_category: launcher::Category::All,
             launcher_gen: 0,
             apps: Vec::new(),
+            app_icons: HashMap::new(),
             cfg,
             stats,
             recents: Vec::new(),
@@ -137,7 +140,7 @@ impl Daemon {
             last_rows: None,
             last_rows_key: None,
         };
-        spawn_niri_pump(cx, inbox);
+        spawn_compositor_pump(cx, inbox);
         spawn_ipc(cx);
         spawn_files_pump(cx, files_rx);
         spawn_apps_pump(cx, apps_rx);
@@ -154,120 +157,51 @@ impl Daemon {
         daemon
     }
 
-    fn apply_niri(&mut self, msgs: Vec<NiriMsg>) -> bool {
+    fn apply_compositor(&mut self, msgs: Vec<CompositorMsg>) -> bool {
         let changed = !msgs.is_empty();
         let mut windows_changed = false;
         for msg in msgs {
             match msg {
-                NiriMsg::Event(ev) => {
-                    if let niri_ipc::Event::WorkspaceActivated { id, focused: true } = &ev {
-                        self.focused_ws = Some(*id);
-                        if let Some(w) = self.state.workspaces.workspaces.values().find(|w| w.id == *id)
-                            && let Some(o) = w.output.clone()
-                        {
-                            self.output_name = o;
-                        }
-                    }
-                    // Only rebuild the window list for events that actually
-                    // change membership/order of the rows (open/close/move),
-                    // not focus/urgency churn.
-                    if matches!(
-                        ev,
-                        niri_ipc::Event::WindowsChanged { .. }
-                            | niri_ipc::Event::WindowOpenedOrChanged { .. }
-                            | niri_ipc::Event::WindowClosed { .. }
-                            | niri_ipc::Event::WorkspaceActivated { .. }
-                            | niri_ipc::Event::WorkspacesChanged { .. }
-                    ) {
-                        windows_changed = true;
-                    }
-                    let _ = self.state.apply(ev);
-                }
-                NiriMsg::Outputs(outs) => {
-                    if self.output_name.is_empty() {
-                        if let Some(name) = self
-                            .state
-                            .workspaces
-                            .workspaces
-                            .values()
-                            .find(|w| w.is_active)
-                            .and_then(|w| w.output.clone())
-                        {
-                            self.output_name = name;
-                        } else if let Some((name, _)) = outs.iter().find(|(_, o)| o.logical.is_some())
-                        {
-                            self.output_name = name.clone();
-                        }
-                    }
-                }
-                NiriMsg::Degraded(e) => tracing::warn!(%e, "niri degraded"),
-                NiriMsg::Version(v) => {
-                    tracing::info!(niri = %v, pin = awari_compositor::NIRI_IPC_PIN);
-                }
+                CompositorMsg::Changed => windows_changed = true,
+                CompositorMsg::Degraded(e) => tracing::warn!(%e, "compositor degraded"),
             }
         }
-        if self.output_name.is_empty() {
-            if let Some(name) = self
-                .state
-                .workspaces
-                .workspaces
-                .values()
-                .find(|w| w.is_active)
-                .and_then(|w| w.output.clone())
-            {
-                self.output_name = name;
-            }
-        }
-        // Only rebuild the window list when windows/workspaces actually
-        // changed; Outputs/Degraded/Version batches don't touch it. The
-        // `is_empty` guard still populates it on the first batch (which may be
-        // Outputs-only with no Event yet).
+        // Only rebuild the window list when the backend reports a change (or on
+        // the first batch, when it's still empty).
         if windows_changed || self.windows_list.is_empty() {
             self.refresh_windows();
         }
         changed
     }
 
-    /// Rebuild the cached window list from the current niri state. Cheap enough
-    /// to run on every niri batch, and far cheaper than rebuilding it on every
+    /// Rebuild the cached window list from the compositor backend. Cheap enough
+    /// to run on a change batch, and far cheaper than rebuilding it on every
     /// keystroke inside `filtered_rows`.
     fn refresh_windows(&mut self) {
-        self.windows_list = self.launcher_windows();
-        self.source_gen += 1;
+        let new = self.launcher_windows();
+        if new != self.windows_list {
+            self.windows_list = new;
+            self.source_gen += 1;
+        }
     }
 
     fn launcher_windows(&self) -> Vec<(u64, String, Option<String>, Option<String>)> {
-        let ws_id = match self.focused_ws {
-            Some(id) => Some(id),
-            None => self
-                .state
-                .workspaces
-                .workspaces
-                .values()
-                .find(|w| {
-                    w.is_active
-                        && (self.output_name.is_empty()
-                            || w.output.as_deref() == Some(self.output_name.as_str()))
+        match &self.compositor {
+            Some(c) => c
+                .windows()
+                .into_iter()
+                .map(|t| {
+                    let app_id_lc = t.app_id.as_deref().map(|s| s.to_lowercase());
+                    (
+                        t.id,
+                        t.title.unwrap_or_else(|| format!("#{}", t.id)),
+                        t.app_id,
+                        app_id_lc,
+                    )
                 })
-                .map(|w| w.id),
-        };
-        self.state
-            .windows
-            .windows
-            .values()
-            .filter(|w| ws_id.is_some() && w.workspace_id == ws_id)
-            .map(|w| {
-                (
-                    w.id,
-                    w.title
-                        .clone()
-                        .or_else(|| w.app_id.clone())
-                        .unwrap_or_else(|| format!("#{}", w.id)),
-                    w.app_id.clone(),
-                    w.app_id.as_deref().map(|s| s.to_lowercase()),
-                )
-            })
-            .collect()
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     fn filtered_rows(&self) -> Vec<launcher::LauncherRow> {
@@ -294,6 +228,7 @@ impl Daemon {
             files,
             &self.recents,
             &self.app_usage,
+            &self.app_icons,
             self.launcher_category,
         )
     }
@@ -690,17 +625,21 @@ impl Daemon {
             }
             _ => {}
         }
-        let niri = self.niri.clone();
+        let compositor = self.compositor.clone();
         cx.defer(move |_cx| {
-            let Some(niri) = niri else {
+            let Some(compositor) = compositor else {
                 return;
             };
             match kind {
                 launcher::RowKind::App { exec, .. } => {
-                    let _ = niri.apply(CompositorCommand::Spawn { command: exec });
+                    if let Err(e) = compositor.apply(CompositorCommand::Spawn { command: exec }) {
+                        tracing::warn!(%e, "failed to launch app");
+                    }
                 }
                 launcher::RowKind::Window { id } => {
-                    let _ = niri.apply(CompositorCommand::FocusWindow { id });
+                    if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
+                        tracing::warn!(%e, "failed to focus window");
+                    }
                 }
                 launcher::RowKind::File { .. } => unreachable!("handled above"),
                 launcher::RowKind::Command { .. } => {}
@@ -732,11 +671,11 @@ impl Daemon {
     }
 }
 
-fn spawn_niri_pump(cx: &mut Context<Daemon>, inbox: Arc<NiriInbox>) {
+fn spawn_compositor_pump(cx: &mut Context<Daemon>, inbox: Arc<CompositorInbox>) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     let wake = inbox.take_wake();
     thread::Builder::new()
-        .name("awari-niri-pump".into())
+        .name("awari-compositor-pump".into())
         .spawn(move || {
             let Some(wake) = wake else { return };
             while wake.recv().is_ok() {
@@ -748,7 +687,7 @@ fn spawn_niri_pump(cx: &mut Context<Daemon>, inbox: Arc<NiriInbox>) {
         use futures::StreamExt;
         while let Some(msgs) = rx.next().await {
             let _ = this.update(cx, |d, cx| {
-                let changed = d.apply_niri(msgs);
+                let changed = d.apply_compositor(msgs);
                 if changed && d.launcher_open {
                     d.sync_launcher(cx);
                     cx.notify();
@@ -832,6 +771,15 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
         use futures::StreamExt;
         while let Some(apps) = fut_rx.next().await {
             let _ = this.update(cx, |d, cx| {
+                d.app_icons = apps
+                    .iter()
+                    .filter_map(|a| {
+                        a.app_id_lc
+                            .as_ref()
+                            .zip(a.icon.as_ref())
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                    })
+                    .collect();
                 d.apps = apps;
                 d.source_gen += 1;
                 if d.launcher_open {

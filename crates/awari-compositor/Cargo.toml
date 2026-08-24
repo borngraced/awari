@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-niri-ipc.workspace = true
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 thiserror.workspace = true
 tracing.workspace = true
