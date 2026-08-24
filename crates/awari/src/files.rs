@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread;
 
+use regex::Regex;
+
 use fff_search::{
     FilePicker, FilePickerOptions, FFFMode, FuzzySearchOptions, PaginationArgs, QueryParser,
     SharedFilePicker, SharedFrecency,
@@ -15,6 +17,12 @@ use fff_search::{
 /// Hits asked of each FFF picker. High enough to browse; the overlay
 /// virtualizes, so this is a search-cost cap, not a paint cap.
 const PER_ROOT_ROWS: usize = 200;
+
+/// Behavior flags for the file source.
+pub struct FilesOptions {
+    pub index_lockfiles: bool,
+    pub regex: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileHit {
@@ -34,13 +42,13 @@ pub struct Files {
 
 impl Files {
     /// One worker indexes every root; empty roots disable the source.
-    pub fn spawn(roots: Vec<PathBuf>) -> (Self, Receiver<(u64, Vec<FileHit>)>) {
+    pub fn spawn(roots: Vec<PathBuf>, opts: FilesOptions) -> (Self, Receiver<(u64, Vec<FileHit>)>) {
         let (qtx, qrx) = std::sync::mpsc::channel::<(u64, String)>();
         let (rtx, rrx) = std::sync::mpsc::channel();
         if !roots.is_empty() {
             thread::Builder::new()
                 .name("awari-files".into())
-                .spawn(move || picker_loop(roots, qrx, rtx))
+                .spawn(move || picker_loop(roots, qrx, rtx, opts))
                 .expect("files thread");
         }
         (Self { tx: qtx, seq: 0 }, rrx)
@@ -73,7 +81,12 @@ fn is_home_root(root: &Path) -> bool {
     }
 }
 
-fn picker_loop(roots: Vec<PathBuf>, qrx: Receiver<(u64, String)>, rtx: Sender<(u64, Vec<FileHit>)>) {
+fn picker_loop(
+    roots: Vec<PathBuf>,
+    qrx: Receiver<(u64, String)>,
+    rtx: Sender<(u64, Vec<FileHit>)>,
+    opts: FilesOptions,
+) {
     let mut pickers: Vec<SharedFilePicker> = Vec::new();
     for root in &roots {
         let shared = SharedFilePicker::default();
@@ -107,11 +120,72 @@ fn picker_loop(roots: Vec<PathBuf>, qrx: Receiver<(u64, String)>, rtx: Sender<(u
         if raw.trim().is_empty() {
             continue;
         }
-        let hits = search_all(&pickers, &parser, &raw);
+        let hits = search_all(&pickers, &parser, &raw, &opts);
         if rtx.send((seq, hits)).is_err() {
             return;
         }
     }
+}
+
+/// Resolve whether `raw` is a regex query and compile it. The `r:` prefix
+/// forces regex mode per-query; otherwise only the `files.regex` config does.
+fn resolve_regex(raw: &str, global_regex: bool) -> (String, Option<Regex>) {
+    let (pattern, want) = if let Some(p) = raw.strip_prefix("r:") {
+        (p.to_string(), true)
+    } else if global_regex {
+        (raw.to_string(), true)
+    } else {
+        (raw.to_string(), false)
+    };
+    if !want {
+        return (pattern, None);
+    }
+    match Regex::new(&pattern) {
+        Ok(re) => (pattern, Some(re)),
+        Err(e) => {
+            tracing::debug!(%e, "regex compile failed; ignoring regex filter");
+            (pattern, None)
+        }
+    }
+}
+
+/// A fuzzy-friendly hint derived from a regex pattern (strips metacharacters)
+/// so FFF still returns candidate paths for the regex to refine.
+fn regex_hint(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| {
+            c.is_alphanumeric() || *c == '/' || *c == '.' || *c == ' ' || *c == '-' || *c == '_'
+        })
+        .collect()
+}
+
+/// Lock files that are usually noise in launcher file search.
+fn is_lockfile(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if name.ends_with(".lock") {
+        return true;
+    }
+    matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "pnpm-lock.yml"
+            | "npm-shrinkwrap.json"
+            | "Gemfile.lock"
+            | "poetry.lock"
+            | "composer.lock"
+            | "mix.lock"
+            | "flake.lock"
+            | "Pipfile.lock"
+            | "deno.lock"
+            | "bun.lockb"
+            | "go.sum"
+            | "go.mod"
+    )
 }
 
 fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> (u64, String) {
@@ -129,10 +203,17 @@ fn search_all(
     pickers: &[SharedFilePicker],
     parser: &QueryParser<fff_search::FileSearchConfig>,
     raw: &str,
+    opts: &FilesOptions,
 ) -> Vec<FileHit> {
+    let (pattern, regex) = resolve_regex(raw, opts.regex);
+    let fff_query = if regex.is_some() {
+        regex_hint(&pattern)
+    } else {
+        raw.to_string()
+    };
     let merged: Vec<Vec<FileHit>> = pickers
         .iter()
-        .map(|shared| search_one(shared, parser, raw))
+        .map(|shared| search_one(shared, parser, &fff_query, &regex, opts.index_lockfiles))
         .collect();
     let cap = PER_ROOT_ROWS.saturating_mul(pickers.len().max(1));
     merge_round_robin(&merged, cap)
@@ -166,7 +247,9 @@ fn merge_round_robin(merged: &[Vec<FileHit>], cap: usize) -> Vec<FileHit> {
 fn search_one(
     shared: &SharedFilePicker,
     parser: &QueryParser<fff_search::FileSearchConfig>,
-    raw: &str,
+    fff_query: &str,
+    regex: &Option<Regex>,
+    index_lockfiles: bool,
 ) -> Vec<FileHit> {
     let Ok(guard) = shared.read() else {
         return Vec::new();
@@ -174,7 +257,7 @@ fn search_one(
     let Some(p) = guard.as_ref() else {
         return Vec::new();
     };
-    let query = parser.parse(raw);
+    let query = parser.parse(fff_query);
     let results = p.fuzzy_search(
         &query,
         None,
@@ -192,6 +275,17 @@ fn search_one(
         .iter()
         .map(|item| FileHit {
             path: item.absolute_path(p, &base),
+        })
+        .filter(|h| {
+            if !index_lockfiles && is_lockfile(&h.path) {
+                return false;
+            }
+            if let Some(re) = regex
+                && !re.is_match(&h.path.to_string_lossy())
+            {
+                return false;
+            }
+            true
         })
         .collect()
 }
@@ -251,5 +345,36 @@ mod tests {
         let merged = vec![hits(&["a1", "a2"]), hits(&["b1", "b2", "b3"])];
         let out = merge_round_robin(&merged, 200);
         assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn lockfiles_detected_by_name() {
+        assert!(is_lockfile(Path::new("/p/Cargo.lock")));
+        assert!(is_lockfile(Path::new("/p/nested/foo.lock")));
+        assert!(is_lockfile(Path::new("/p/package-lock.json")));
+        assert!(is_lockfile(Path::new("/p/yarn.lock")));
+        assert!(!is_lockfile(Path::new("/p/main.rs")));
+        assert!(!is_lockfile(Path::new("/p/Cargo.toml")));
+        assert!(!is_lockfile(Path::new("/p/flake.nix")));
+    }
+
+    #[test]
+    fn regex_resolution() {
+        // `r:` prefix forces regex and strips the prefix.
+        let (pat, re) = resolve_regex("r:foo", false);
+        assert_eq!(pat, "foo");
+        assert!(re.is_some());
+        // No prefix and global off → plain fuzzy (no regex).
+        assert!(resolve_regex("foo", false).1.is_none());
+        // Global on → regex even without prefix.
+        assert!(resolve_regex("foo", true).1.is_some());
+        // Invalid pattern → falls back to no regex rather than panicking.
+        assert!(resolve_regex("r:[", false).1.is_none());
+    }
+
+    #[test]
+    fn regex_hint_strips_metacharacters() {
+        assert_eq!(regex_hint(r"\.rs$"), ".rs");
+        assert_eq!(regex_hint(r"src/.*\.rs"), "src/..rs");
     }
 }

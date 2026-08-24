@@ -78,7 +78,13 @@ impl Daemon {
         } else {
             Vec::new()
         };
-        let (files_tx, files_rx) = crate::files::Files::spawn(roots);
+        let (files_tx, files_rx) = crate::files::Files::spawn(
+            roots,
+            crate::files::FilesOptions {
+                index_lockfiles: cfg.files.index_lockfiles,
+                regex: cfg.files.regex,
+            },
+        );
         let daemon = Self {
             niri,
             state: EventStreamState::default(),

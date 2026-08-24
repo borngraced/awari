@@ -14,6 +14,12 @@ pub struct MotionConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilesConfig {
     pub roots: Vec<PathBuf>,
+    /// Index lock files (Cargo.lock, package-lock.json, *.lock, …).
+    /// Default `false` → lock files are hidden from results.
+    pub index_lockfiles: bool,
+    /// Treat file queries as regex. Default `false`. The `r:` query prefix
+    /// forces regex per-query regardless of this setting.
+    pub regex: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +48,11 @@ impl Default for MotionConfig {
 
 impl Default for FilesConfig {
     fn default() -> Self {
-        Self { roots: Vec::new() }
+        Self {
+            roots: Vec::new(),
+            index_lockfiles: false,
+            regex: false,
+        }
     }
 }
 
@@ -243,6 +253,23 @@ fn parse_files_body(body: &str, f: &mut FilesConfig) {
             }
             continue;
         }
+        if i + 1 < tokens.len() {
+            let key = tokens[i];
+            let val = tokens[i + 1].trim_matches('"');
+            match key {
+                "index_lockfiles" | "index-lockfiles" => {
+                    f.index_lockfiles = is_true(val);
+                    i += 2;
+                    continue;
+                }
+                "regex" => {
+                    f.regex = is_true(val);
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
         i += 1;
     }
 }
@@ -383,5 +410,17 @@ mod tests {
         assert!(c.sources.files);
         assert!(!c.sources.windows);
         assert!(c.sources.apps);
+    }
+
+    #[test]
+    fn files_flags_parse() {
+        let c = parse("files { index_lockfiles true regex true }");
+        assert!(c.files.index_lockfiles);
+        assert!(c.files.regex);
+        // Defaults are conservative: lock files hidden, regex off.
+        let d = parse("files { roots \"~/Documents\" }");
+        assert!(!d.files.index_lockfiles);
+        assert!(!d.files.regex);
+        assert!(d.files.roots.iter().any(|p| p.ends_with("Documents")));
     }
 }

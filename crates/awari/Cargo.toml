@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror.workspace = true
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 fff-search = "0.10.5"
+regex = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
