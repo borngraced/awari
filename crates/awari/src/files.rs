@@ -73,10 +73,13 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// If `raw` is a path-shaped query whose leading directory exists on disk,
-/// return that directory so results can be pulled directly from it (e.g.
-/// `~/dev/` → `~/dev`). Returns `None` otherwise.
-fn path_query_dir(raw: &str) -> Option<PathBuf> {
+/// If `raw` is a path-shaped query, return the directory to browse and the
+/// fragment to match within it. When the full path is itself an existing
+/// directory (e.g. `~/dev` or `~/dev/`), browse its contents; otherwise search
+/// its parent for the trailing segment (e.g. `~/dev` where `dev` does not yet
+/// exist, or `~/dev/aw`). Returns `None` if neither the path nor its parent is
+/// a real directory.
+fn path_query_dir(raw: &str) -> Option<(PathBuf, String)> {
     if !is_path_shaped(raw) {
         return None;
     }
@@ -91,15 +94,21 @@ fn path_query_dir(raw: &str) -> Option<PathBuf> {
     } else {
         PathBuf::from(trimmed)
     };
-    let dir = if expanded.to_string_lossy().ends_with('/') {
-        expanded
-    } else {
-        match expanded.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => expanded,
-        }
-    };
-    dir.is_dir().then_some(dir)
+    if expanded.is_dir() {
+        return Some((expanded, String::new()));
+    }
+    // Otherwise treat it as a partial: search the parent for the trailing
+    // segment. Only when the parent exists and isn't the filesystem root
+    // (scanning `/` would be pathological).
+    let parent = expanded.parent().filter(|p| !p.as_os_str().is_empty())?;
+    if !parent.is_dir() || parent.as_os_str() == "/" {
+        return None;
+    }
+    let term = expanded
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some((parent.to_path_buf(), term))
 }
 
 pub struct Files {
@@ -463,7 +472,7 @@ fn search_all(
     // When the query points at a real directory (e.g. `~/dev/`), search it
     // directly so path navigation reaches places outside the configured roots.
     // Only the trailing filename segment is fuzzy-matched, not the dir prefix.
-    if let Some(dir) = path_query_dir(raw) {
+    if let Some((dir, term)) = path_query_dir(raw) {
         // LRU eviction: keep at most TRANSIENT_DIR_CAP per-directory indexes.
         if let Some(pos) = transient_order.iter().position(|p| *p == dir) {
             transient_order.remove(pos);
@@ -497,11 +506,6 @@ fn search_all(
             );
             shared
         });
-        let term = if raw.trim_end().ends_with('/') {
-            String::new()
-        } else {
-            raw.rsplit('/').next().unwrap_or("").to_string()
-        };
         let (t_pat, t_re) = resolve_regex(&term, opts.regex);
         let t_fff = if t_re.is_some() {
             regex_hint(&t_pat)
@@ -820,18 +824,35 @@ mod tests {
     fn path_query_dir_resolves_existing_directory() {
         let base = std::env::temp_dir().join(format!("awari_pathq_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let q = format!("{}/", base.display());
-        let got = path_query_dir(&q);
+        // Trailing slash: browse the directory's contents (empty fragment).
+        let got = path_query_dir(&format!("{}/", base.display()));
+        // No trailing slash on an existing directory: still browse it.
+        let got2 = path_query_dir(&base.display().to_string());
         let _ = std::fs::remove_dir_all(&base);
-        let got = got.expect("existing directory with trailing slash should resolve");
+        let (dir, frag) = got.expect("existing directory with trailing slash should resolve");
         assert_eq!(
-            got.as_os_str()
+            dir.as_os_str()
                 .to_string_lossy()
                 .trim_end_matches('/')
                 .to_string(),
             base.to_string_lossy().to_string(),
             "resolved dir should match the queried directory"
         );
+        assert_eq!(frag, "", "browsing an existing dir uses an empty fragment");
+        let (dir2, frag2) = got2.expect("existing directory without slash should resolve");
+        assert_eq!(dir2, base, "no-slash existing dir resolves to itself");
+        assert_eq!(frag2, "", "no-slash existing dir uses an empty fragment");
+    }
+
+    #[test]
+    fn path_query_dir_resolves_parent_for_partial() {
+        let base = std::env::temp_dir().join(format!("awari_pathq_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let got = path_query_dir(&format!("{}/aw", base.display()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, frag) = got.expect("partial under an existing dir should resolve");
+        assert_eq!(dir, base, "partial searches the parent directory");
+        assert_eq!(frag, "aw", "partial matches the trailing segment");
     }
 
     #[test]
