@@ -48,21 +48,21 @@ a path, not an operator.
 
 ## Features
 
-- **Instant** — fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start.
-- **Resident** — the overlay never boots from scratch, so there's no launch lag to hide.
-- **One suggestion, not a list** — inline ghost-text completion; the full alternates list only shows on ↓.
-- **Wayland-native** — runtime-detects niri, Hyprland, Mutter, or Sway; one binary.
-- **Unified results** — windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
-- **Empty query** — shows recent apps first, then open windows (no file dump).
-- **Query prefixes** — `>` runs a shell command in a terminal, `o:<path>` opens a path and lists its real entries as you type (`~` and paths relative to `$HOME` both work), `r:<regex>` filters files by regular expression.
-- **Path navigation** — path-shaped queries (starting with `~`, `/`, `.`, or containing `/`) browse the filesystem; constraints like `*.pdf` and `!node_modules/` apply.
-- **Calculator** — an arithmetic query shows the result inline, and Enter copies it.
-- **Smart completion** — `Tab` autocompletes with the selected result's full value; `Shift`+`↑`/`↓` recalls previous queries.
-- **Action menu** — `Alt`+`Enter` opens a per-row menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
-- **Category chips** — clickable All, Apps, Files, Commands, Windows.
-- **Theming** — KDL with hex color tokens (no CSS, no remote fetches); nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); configurable font and size.
-- **Lockfiles hidden** — `Cargo.lock`, `package-lock.json`, and `*.lock` are skipped by default.
-- **Monitor-aware** — the overlay opens on the focused output.
+- **Instant**: fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start.
+- **Resident**: the overlay never boots from scratch, so there's no launch lag to hide.
+- **One suggestion, not a list**: inline ghost-text completion; the full alternates list only shows on ↓.
+- **Wayland-native**: runtime-detects niri, Hyprland, Mutter, or Sway; one binary.
+- **Unified results**: windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
+- **Empty query**: shows recent apps first, then open windows (no file dump).
+- **Query prefixes**: `>` runs a shell command in a terminal, `o:<path>` opens a path and lists its real entries as you type (`~` and paths relative to `$HOME` both work), `r:<regex>` filters files by regular expression.
+- **Path navigation**: path-shaped queries (starting with `~`, `/`, `.`, or containing `/`) browse the filesystem; constraints like `*.pdf` and `!node_modules/` apply.
+- **Calculator**: an arithmetic query shows the result inline, and Enter copies it.
+- **Smart completion**: `Tab` autocompletes with the selected result's full value; `Shift`+`↑`/`↓` recalls previous queries.
+- **Action menu**: `Alt`+`Enter` opens a per-row menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
+- **Category chips**: clickable All, Apps, Files, Commands, Windows.
+- **Theming**: KDL with hex color tokens (no CSS, no remote fetches); nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); configurable font and size.
+- **Lockfiles hidden**: `Cargo.lock`, `package-lock.json`, and `*.lock` are skipped by default.
+- **Monitor-aware**: the overlay opens on the focused output.
 
 ## Memory
 
@@ -115,7 +115,7 @@ bind = SUPER, D, exec, awari toggle-launcher
 ## Configuration
 
 KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys are ignored. No exec,
-scripts, or shell interpolation. Every block and token is optional — anything
+scripts, or shell interpolation. Every block and token is optional, so anything
 omitted keeps its default. The complete, copy-pasteable file is
 `contrib/config.kdl`.
 
@@ -165,14 +165,3 @@ token names you can also use these aliases:
 | `fg` | `text` |
 | `muted` | `text-dim` |
 | `faint` | `text-faint` |
-
-
-
-## Status
-
-Rust on a GPUI layer-shell. GPL-3.0-or-later; linking `niri-ipc` makes the
-binary a GPL derivative under niri. No plugins.
-
-Client commands: `toggle-launcher`, `open-launcher`, `close-launcher`,
-`ping`, `dump-stats`. `awari ping` talks to a running daemon over
-`$XDG_RUNTIME_DIR/awari/ipc.sock`.
