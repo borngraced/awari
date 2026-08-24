@@ -1,34 +1,56 @@
 // ~/.config/awari/config.kdl
-// Unknown keys are ignored. No exec / no shell.
+// Unknown keys are ignored. No exec / no shell interpolation.
+// Every block and token is optional; omit anything you don't want to change.
 
-// Concept palette. Every token is optional; omit to keep the default.
+// ── Theme ─────────────────────────────────────────────────────────────
+// Pick a built-in palette by name (case-insensitive), then override tokens:
+//   classic · catppuccin (default) · gruvbox · gruvbox-light
+//   tokyo-night · nord
+// (`default` and `mocha` also resolve to catppuccin.) Colors accept
+// #RGB, #RRGGBB, or #RRGGBBAA — no url() or named CSS colors.
 theme {
-    accent "#8b7bf0"
-    accent-dim "#8b7bf024"
-    bg "#0b0b0c"
-    panel "#141416"
-    raise "#ffffff0b"
-    border "#ffffff12"
-    text "#eceaf0"
-    text-dim "#8b8994"
-    text-faint "#57555f"
-    scrim "#0b0b0cb3"
+    name "catppuccin"          // preset; omit to define every color by hand
+
+    // font "Inter"             // system family via fontdb; "default"/"" = GPUI system UI font
+    // font-size 14             // px; clamped to 8..=64
+
+    // Token aliases also accepted in config:
+    //   select        → accent-dim
+    //   hover / surface → raise
+    //   fg            → text
+    //   muted         → text-dim
+    //   faint         → text-faint
+    accent      "#cba6f7"
+    accent-dim  "#cba6f733"
+    bg          "#11111b"
+    panel       "#1e1e2e"
+    raise       "#313244"
+    border      "#45475a"
+    text        "#cdd6f4"
+    text-dim    "#a6adc8"
+    text-faint  "#9399b2"
+    scrim       "#08080ce6"
 }
 
-// Empty `roots` = existing XDG user dirs (Desktop, Documents, …).
-// `/` is ignored. `~` expands. Full $HOME is a budget choice you opt into.
+// ── Files ────────────────────────────────────────────────────────────
 files {
     // roots "~/Documents" "~/Downloads" "~/code"
+    // Empty or omitted = existing XDG user dirs (Desktop, Documents, …).
+    // `/` is ignored; `~` expands to $HOME. Never index all of `/`.
+    index_lockfiles false     // show Cargo.lock, package-lock.json, *.lock, …
+    regex           false     // treat file queries as regex (the `r:` prefix forces it per-query)
 }
 
+// ── Sources ───────────────────────────────────────────────────────────
 // Hide a backend without recompiling.
 sources {
     windows true
-    apps true
-    files true
+    apps    true
+    files   true
 }
 
+// ── Motion ───────────────────────────────────────────────────────────
 motion {
-    reduced false
-    duration-ms 140
+    reduced     false          // skip animations entirely
+    duration-ms 140            // open/close length; clamped to 0..=1000
 }

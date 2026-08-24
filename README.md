@@ -77,26 +77,50 @@ Run as a user service (`contrib/awari.service`). With niri:
 
 ## Configuration
 
-KDL at `~/.config/awari/config.kdl`. No exec, scripts, or shell interpolation.
+KDL at `~/.config/awari/config.kdl`. Unknown keys are ignored. No exec,
+scripts, or shell interpolation. Every block and token is optional — anything
+omitted keeps its default. The complete, copy-pasteable file is
+`contrib/config.kdl`.
 
 ```kdl
 theme {
-  accent "#b4a0ff"
-  panel  "#141416"
-  text   "#f2f2f5"
+  name "catppuccin"            // preset: classic · catppuccin (default) · gruvbox
+                              //          gruvbox-light · tokyo-night · nord
+  // font "Inter"             // system family; "default"/"" = GPUI system UI font
+  // font-size 14             // px, clamped to 8..=64
+  accent      "#cba6f7"       // = select
+  accent-dim  "#cba6f733"
+  bg          "#11111b"
+  panel       "#1e1e2e"
+  raise       "#313244"       // = hover = surface
+  border      "#45475a"
+  text        "#cdd6f4"       // = fg
+  text-dim    "#a6adc8"       // = muted
+  text-faint  "#9399b2"       // = faint
+  scrim       "#08080ce6"
 }
+
 files {
-  roots "~/Documents" "~/code"
+  roots "~/Documents" "~/Downloads" "~/code"   // omit/empty = XDG user dirs
+  index_lockfiles false                        // show Cargo.lock, *.lock, …
+  regex           false                        // file queries as regex (r: prefix forces it)
 }
+
 sources {
   windows true
-  apps   true
-  files  true
+  apps    true
+  files   true
+}
+
+motion {
+  reduced     false            // disable animations
+  duration-ms 140              // open/close length, clamped to 0..=1000
 }
 ```
 
-See `contrib/config.kdl` for the full token list (theme, files, sources,
-motion).
+Colors accept `#RGB`, `#RRGGBB`, or `#RRGGBBAA`. Token aliases accepted in
+config: `select`→`accent-dim`, `hover`/`surface`→`raise`, `fg`→`text`,
+`muted`→`text-dim`, `faint`→`text-faint`.
 
 ## Status
 
