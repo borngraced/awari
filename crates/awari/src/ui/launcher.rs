@@ -8,12 +8,9 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui::prelude::*;
-
-/// Embedded awari brand mark (see assets/awari-icon.svg).
-const AWARI_LOGO: &[u8] = include_bytes!("../../assets/awari-icon.svg");
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -28,15 +25,12 @@ use crate::ui::theme::Theme;
 pub const LAUNCHER_W: f32 = 600.0;
 pub const LAUNCHER_H: f32 = 1080.0;
 const PANEL_H: f32 = 560.0;
-const ROW_CAP: usize = 10;
-const FILE_ROWS: usize = 8;
 const GRID_COLS: usize = 4;
 const SLIDE: f32 = 22.0;
 const PANEL_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
 const HEIGHT_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
 const SEARCH_H: f32 = 68.0;
 const ITEM_HOVER_SPRING: SpringConfig = SpringConfig::new(420.0, 34.0, 1.0);
-const CHIP_HOVER_SPRING: SpringConfig = SpringConfig::new(360.0, 30.0, 1.0);
 
 fn mix(a: &Rgba, b: &Rgba, t: f32) -> Rgba {
     let t = t.clamp(0.0, 1.0);
@@ -49,6 +43,7 @@ fn mix(a: &Rgba, b: &Rgba, t: f32) -> Rgba {
 }
 const ICON_LIST: f32 = 30.0;
 const ICON_GRID: f32 = 50.0;
+const AWARI_MARK: &[u8] = include_bytes!("../../assets/icons/awari_mark.svg");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -294,9 +289,10 @@ impl Launcher {
 
     /// Apply a keystroke to the query/cursor; returns the new query when it changed.
     fn edit(&mut self, k: &gpui::Keystroke) -> Option<String> {
+        let key = k.key.to_ascii_lowercase();
         let mut q = self.view.query.clone();
         let mut c = self.cursor.min(q.len());
-        match k.key.as_str() {
+        match key.as_str() {
             "backspace" => {
                 if c == 0 {
                     return None;
@@ -312,10 +308,10 @@ impl Launcher {
                 let next = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
                 q.replace_range(c..next, "");
             }
-            "arrowleft" => {
+            "arrowleft" | "left" => {
                 c = q[..c].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
             }
-            "arrowright" => {
+            "arrowright" | "right" => {
                 c = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
             }
             "home" => c = 0,
@@ -345,16 +341,12 @@ impl Launcher {
             .rounded(px(1.))
             .bg(t.accent())
             .when(!self.caret_on, |el| el.opacity(0.0));
-        let logo = img(Arc::new(Image::from_bytes(ImageFormat::Svg, AWARI_LOGO.to_vec())))
-            .size(px(20.))
-            .flex_none();
         if q.is_empty() {
             return div()
                 .flex()
                 .flex_nowrap()
                 .items_center()
                 .flex_none()
-                .child(logo)
                 .child(caret)
                 .child(
                     div()
@@ -363,16 +355,30 @@ impl Launcher {
                 )
                 .into_any_element();
         }
+        let token_len = command_token_len(q);
         let (prefix, suffix) = q.split_at(c);
+        let p_split = prefix.len().min(token_len);
+        let (p_accent, p_norm) = prefix.split_at(p_split);
+        let s_accent_len = token_len.saturating_sub(c).min(suffix.len());
+        let (s_accent, s_norm) = suffix.split_at(s_accent_len);
         div()
             .flex()
             .flex_nowrap()
             .items_center()
             .flex_none()
-            .child(logo)
-            .child(div().child(prefix.to_string()))
+            .when(!p_accent.is_empty(), |el| {
+                el.child(div().text_color(t.accent()).child(p_accent.to_string()))
+            })
+            .when(!p_norm.is_empty(), |el| {
+                el.child(div().child(p_norm.to_string()))
+            })
             .child(caret)
-            .child(div().child(suffix.to_string()))
+            .when(!s_accent.is_empty(), |el| {
+                el.child(div().text_color(t.accent()).child(s_accent.to_string()))
+            })
+            .when(!s_norm.is_empty(), |el| {
+                el.child(div().child(s_norm.to_string()))
+            })
             .into_any_element()
     }
 }
@@ -428,6 +434,134 @@ fn push_capped(
     }
 }
 
+/// Detect a command prefix at the start of `q`. `r:` switches file search to
+/// regex mode (handled in the files source), while `>` and `o:` are inline
+/// command modes that replace the result list here. Returned as the literal
+/// token so callers color it and branch on it from one source of truth.
+fn command_prefix(q: &str) -> Option<&'static str> {
+    if q.starts_with("r:") {
+        Some("r:")
+    } else if q.starts_with("o:") {
+        Some("o:")
+    } else if q.starts_with('>') {
+        Some(">")
+    } else {
+        None
+    }
+}
+
+fn command_token_len(q: &str) -> usize {
+    command_prefix(q).map_or(0, |p| p.len())
+}
+
+/// Expand an `o:` path argument: `~` → `$HOME`, absolute `/…` as-is, and a
+/// bare name (no `~`/`/`) resolved relative to `$HOME`.
+fn expand_open_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(rest) = trimmed.strip_prefix('~') {
+        let home = home?;
+        if rest.is_empty() || rest.starts_with('/') {
+            Some(home.join(rest.trim_start_matches('/')))
+        } else {
+            Some(home.join(rest))
+        }
+    } else if trimmed.starts_with('/') {
+        Some(PathBuf::from(trimmed))
+    } else {
+        home.map(|h| h.join(trimmed))
+    }
+}
+
+/// Build the result list for an `o:` (open path) query. Lists real entries
+/// under the typed path via `read_dir` (so it works outside the configured
+/// fff roots), and shows a direct "Open <path>" row only when that exact path
+/// exists. Never returns an optimistic row for a nonexistent path.
+fn open_path_rows(arg: &str, file_max: usize) -> Vec<LauncherRow> {
+    let Some(base) = expand_open_path(arg) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<LauncherRow> = Vec::new();
+    // Direct "Open <path>" row, only when the typed path already exists.
+    if base.exists() {
+        rows.push(open_file_row(&base, true));
+    }
+    // Real results: entries under the parent dir matching the last segment.
+    // When the typed path is itself an existing directory, list its contents
+    // (empty fragment) rather than searching the dir for its own name.
+    let parent = base
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| base.clone());
+    let frag = if base.is_dir() {
+        String::new()
+    } else {
+        base.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let search_dir = if base.is_dir() { &base } else { &parent };
+    if let Some(entries) = read_dir_matching(search_dir, &frag) {
+        for p in entries {
+            if rows.len() >= file_max {
+                break;
+            }
+            if p == base {
+                continue; // already shown as the direct row
+            }
+            rows.push(open_file_row(&p, false));
+        }
+    }
+    rows
+}
+
+fn open_file_row(p: &Path, is_direct: bool) -> LauncherRow {
+    let label = if is_direct {
+        format!("Open “{}”", p.display())
+    } else {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string())
+    };
+    LauncherRow {
+        kind: RowKind::File {
+            path: p.to_path_buf(),
+        },
+        label,
+        resolved_icon: None,
+    }
+}
+
+/// List entries of `dir`, filtered by `frag` (subsequence match, case-insensitive)
+/// and sorted best-match first. Returns `None` if `dir` isn't a readable directory.
+fn read_dir_matching(dir: &Path, frag: &str) -> Option<Vec<PathBuf>> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    let frag_lc = frag.to_lowercase();
+    let mut scored: Vec<(i32, PathBuf)> = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        let name = match p.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        let name_lc = name.to_lowercase();
+        let score = if frag_lc.is_empty() {
+            Some(0)
+        } else {
+            crate::files::subsequence_score(&name_lc, &frag_lc)
+        };
+        if let Some(s) = score {
+            scored.push((s, p));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    Some(scored.into_iter().map(|(_, p)| p).collect())
+}
+
 pub fn filter_rows(
     query: &str,
     apps: &[DesktopApp],
@@ -437,20 +571,31 @@ pub fn filter_rows(
     app_usage: &HashMap<String, u64>,
     app_icons: &HashMap<String, String>,
     category: Category,
+    file_max: usize,
+    total_max: usize,
 ) -> Vec<LauncherRow> {
     let q = query.trim();
-    // Trigger: a leading '>' enters command mode — the rest is a shell command.
-    if let Some(cmd) = q.strip_prefix('>') {
-        let cmd = cmd.trim();
-        return if cmd.is_empty() {
-            Vec::new()
-        } else {
-            vec![LauncherRow {
-                kind: RowKind::Command { command: cmd.to_string() },
-                label: format!("Run “{}” in terminal", cmd),
-                resolved_icon: None,
-            }]
-        };
+    // Inline command modes replace the result list. `r:` falls through to the
+    // normal path (it only flips file search to regex mode, handled below).
+    if let Some(prefix) = command_prefix(q) {
+        match prefix {
+            ">" => {
+                let cmd = q.strip_prefix('>').unwrap().trim();
+                return if cmd.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LauncherRow {
+                        kind: RowKind::Command { command: cmd.to_string() },
+                        label: format!("Run “{}” in terminal", cmd),
+                        resolved_icon: None,
+                    }]
+                };
+            }
+            "o:" => {
+                return open_path_rows(q.strip_prefix("o:").unwrap(), file_max);
+            }
+            _ => {}
+        }
     }
     if category == Category::Commands {
         return Vec::new();
@@ -462,7 +607,7 @@ pub fn filter_rows(
     let ranked_cap = if apps_only || files_only {
         None
     } else {
-        Some(ROW_CAP)
+        Some(total_max)
     };
 
     // Score indices/refs first and only materialize LauncherRows (with their
@@ -595,7 +740,7 @@ pub fn filter_rows(
     let mut out: Vec<LauncherRow> = Vec::new();
     if files_only {
         if !empty {
-            push_capped(&mut out, ranked_cap, files.iter().map(file_row));
+            push_capped(&mut out, Some(file_max), files.iter().map(file_row));
         }
         return out;
     }
@@ -613,7 +758,7 @@ pub fn filter_rows(
         push_capped(
             &mut out,
             ranked_cap,
-            files.iter().take(FILE_ROWS).map(file_row),
+            files.iter().take(file_max).map(file_row),
         );
         push_capped(
             &mut out,
@@ -632,7 +777,7 @@ pub fn filter_rows(
             push_capped(
                 &mut out,
                 ranked_cap,
-                files.iter().take(FILE_ROWS).map(file_row),
+                files.iter().take(file_max).map(file_row),
             );
         }
         push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
@@ -1028,45 +1173,23 @@ impl Render for Launcher {
         }
 
         let mut cat_icons = div()
-            .absolute()
-            .top(px(-18.0))
-            .left_0()
-            .right_0()
             .flex()
             .flex_none()
-            .justify_center()
-            .gap(px(14.))
-            .with_spring(
-                "cat-icons-fade",
-                SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
-                |el, v| el.opacity(v),
-            );
+            .items_center()
+            .gap(px(14.));
         let this = cx.entity();
         for c in Category::all() {
             let active = active_cat == c;
             let cc = c;
             let this = this.clone();
-            let chip_hv = if self.hovered_chip == Some(c) { 1.0f32 } else { 0.0 };
-            let base_col = if active { t.select() } else { t.surface() };
-            let hover_col = if active {
-                mix(&t.accent(), &t.bg(), 0.5)
-            } else {
-                t.border()
-            };
             let icon_col = if active { t.accent() } else { t.muted() };
             cat_icons = cat_icons.child(
                 div()
                     .id(("cat-icon", c as u64))
-                    .size(px(36.))
-                    .rounded(px(18.))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(base_col)
-                    .border_1()
-                    .border_color(if active { t.accent() } else { t.ghost() })
-                    .shadow_sm()
                     .cursor_pointer()
                     .on_hover(move |h: &bool, _window, cx: &mut App| {
                         this.update(cx, |l, cx| {
@@ -1089,12 +1212,7 @@ impl Render for Launcher {
                             post(this, cx, LauncherCmd::SetCategory { category: next });
                         }),
                     )
-                    .child(c.icon().element_px(icon_col, 18.0))
-                    .with_spring(
-                        ("cat-icon-hover", c as u64),
-                        SpringAnimation::new(CHIP_HOVER_SPRING).to(chip_hv).from(0.0),
-                        move |el, v| el.bg(mix(&base_col, &hover_col, v)),
-                    ),
+                    .child(c.icon().element_px(icon_col, 20.0)),
             );
         }
 
@@ -1289,7 +1407,7 @@ impl Render for Launcher {
                                 MouseButton::Left,
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                            .child(
+                             .child(
                                 div()
                                     .flex()
                                     .flex_none()
@@ -1299,20 +1417,27 @@ impl Render for Launcher {
                                     .py(px(16.))
                                     .child(
                                 div()
-                                    .h(px(24.))
+                                    .h(px(32.))
                                     .flex()
                                     .items_center()
                                     .flex_none()
-                                    .child(Icon::Search.element_px(
-                                        if q_empty { t.faint() } else { t.accent() },
-                                        20.0,
-                                    )),
+                                .child(
+                                    img(Arc::new(Image::from_bytes(
+                                        ImageFormat::Svg,
+                                        AWARI_MARK.to_vec(),
+                                    )))
+                                    .size(px(32.))
+                                    .flex_none(),
+                                ),
                             )
-                            .child(
+                                    .child(
                                 div()
                                     .id("query-wrap")
                                     .flex_1()
                                     .min_w_0()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
                                     .mt(px(2.))
                                     .when_some(t.font.clone(), |el, f| el.font_family(f))
                                     .text_size(px(24.))
@@ -1320,21 +1445,10 @@ impl Render for Launcher {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(t.fg())
                                     .overflow_hidden()
-                                .child(self.query_element()),
+                                    .child(self.query_element())
+                                    .child(div().flex_1().min_w_0())
+                                    .child(cat_icons),
                             )
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .ml(px(10.))
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_color(t.muted())
-                                    .when(
-                                        self.action_menu.is_none()
-                                            && !self.view.rows.is_empty(),
-                                        |el| el.child("Alt ⏎ actions"),
-                                    ),
                             )
                             .when(show_results, |el| el.child(results_body))
                             .when_some(action_menu_el, |el, menu| el.child(menu))
@@ -1344,7 +1458,6 @@ impl Render for Launcher {
                                 |el, v| el.mt(px((1.0 - v) * SLIDE)).opacity(v),
                             ),
                     )
-                    .child(cat_icons),
             )
     }
 }
@@ -1380,6 +1493,8 @@ mod tests {
             &Default::default(),
             &Default::default(),
             Category::All,
+            50,
+            30,
         )
     }
 
@@ -1456,6 +1571,8 @@ mod tests {
             &Default::default(),
             &Default::default(),
             Category::Apps,
+            50,
+            30,
         );
         assert_eq!(out.len(), 30);
     }
@@ -1476,6 +1593,8 @@ mod tests {
             &Default::default(),
             &Default::default(),
             Category::Files,
+            50,
+            30,
         );
         assert_eq!(out.len(), 40);
     }
@@ -1491,15 +1610,43 @@ mod tests {
             &Default::default(),
             &Default::default(),
             Category::Commands,
+            50,
+            30,
         );
         assert!(out.is_empty());
     }
 
     #[test]
     fn row_cap_holds() {
-        let apps: Vec<DesktopApp> = (0..30).map(|i| app(&format!("App{i:02}"), None)).collect();
+        let apps: Vec<DesktopApp> = (0..40).map(|i| app(&format!("App{i:02}"), None)).collect();
         let out = rows("app", &apps, &[], &[], &[]);
-        assert_eq!(out.len(), ROW_CAP);
+        assert_eq!(out.len(), 30);
+    }
+
+    #[test]
+    fn open_path_lists_real_entries() {
+        let dir = std::env::temp_dir().join(format!("awari_o_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("alpha.txt"), b"").unwrap();
+        std::fs::write(dir.join("beta.log"), b"").unwrap();
+        let out = open_path_rows(&dir.to_string_lossy(), 50);
+        let names: Vec<&str> = out.iter().map(|r| r.label.as_str()).collect();
+        assert!(names.iter().any(|n| *n == "alpha.txt"), "{names:?}");
+        assert!(names.iter().any(|n| *n == "beta.log"), "{names:?}");
+        // An existing directory also offers a direct "Open <dir>" row.
+        assert!(out
+            .iter()
+            .any(|r| r.label == format!("Open “{}”", dir.display())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_path_direct_row_only_when_exists() {
+        let dir = std::env::temp_dir().join(format!("awari_o2_{}", std::process::id()));
+        let arg = format!("{}/missing.txt", dir.display());
+        let out = open_path_rows(&arg, 50);
+        // Nonexistent path with no readable parent -> no optimistic row.
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -1514,5 +1661,37 @@ mod tests {
         assert_eq!(icon_letter(Some("org.example.firefox")), "F");
         assert_eq!(icon_letter(Some("1234")), "1");
         assert_eq!(icon_letter(None), "#");
+    }
+}
+
+#[cfg(test)]
+mod open_path_tests {
+    use super::*;
+
+    #[test]
+    fn expand_resolves_relative_and_absolute() {
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+        assert_eq!(
+            expand_open_path("~/docs"),
+            Some(PathBuf::from("/home/tester/docs"))
+        );
+        assert_eq!(
+            expand_open_path("/abs/path"),
+            Some(PathBuf::from("/abs/path"))
+        );
+        // Bare name resolves relative to $HOME.
+        assert_eq!(
+            expand_open_path("notes.txt"),
+            Some(PathBuf::from("/home/tester/notes.txt"))
+        );
+        assert!(expand_open_path("   ").is_none());
+    }
+
+    #[test]
+    fn command_token_lengths() {
+        assert_eq!(command_token_len("r:foo"), 2);
+        assert_eq!(command_token_len("o:foo"), 2);
+        assert_eq!(command_token_len(">foo"), 1);
+        assert_eq!(command_token_len("plain"), 0);
     }
 }

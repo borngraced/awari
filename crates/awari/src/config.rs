@@ -20,6 +20,8 @@ pub struct FilesConfig {
     /// Treat file queries as regex. Default `false`. The `r:` query prefix
     /// forces regex per-query regardless of this setting.
     pub regex: bool,
+    /// Max file rows to display. Default 50.
+    pub max_results: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub struct Config {
     pub theme: Theme,
     pub files: FilesConfig,
     pub sources: SourcesConfig,
+    /// Max total rows in the All view (apps + files + windows). Default 30.
+    pub max_results: usize,
 }
 
 impl Default for MotionConfig {
@@ -52,6 +56,7 @@ impl Default for FilesConfig {
             roots: Vec::new(),
             index_lockfiles: false,
             regex: false,
+            max_results: 50,
         }
     }
 }
@@ -73,6 +78,7 @@ impl Default for Config {
             theme: Theme::default(),
             files: FilesConfig::default(),
             sources: SourcesConfig::default(),
+            max_results: 30,
         }
     }
 }
@@ -131,6 +137,7 @@ pub fn parse(src: &str) -> Config {
     if let Some(body) = block_body(&stripped, "sources") {
         parse_sources_body(body, &mut cfg.sources);
     }
+    parse_top_level(&stripped, &mut cfg);
     cfg
 }
 
@@ -269,6 +276,31 @@ fn parse_files_body(body: &str, f: &mut FilesConfig) {
                 }
                 _ => {}
             }
+        }
+        i += 1;
+    }
+}
+
+/// Parse top-level scalar keys (outside any `{ … }` block). Currently only
+/// `max-results`, which caps the All-view result list.
+fn parse_top_level(src: &str, cfg: &mut Config) {
+    let tokens: Vec<&str> = src.split_whitespace().collect();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i] {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "max_results" | "max-results" if depth == 0 => {
+                if i + 1 < tokens.len() {
+                    if let Ok(n) = tokens[i + 1].parse::<usize>() {
+                        cfg.max_results = n.max(1);
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
         }
         i += 1;
     }

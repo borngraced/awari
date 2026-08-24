@@ -41,8 +41,8 @@ fn main() {
     let stats = Arc::new(Mutex::new(Stats::default()));
     lock::spawn_accept(server.listener, stats.clone());
 
-    let (compositor, inbox) = connect();
-    if compositor.windows().is_empty() {
+    let (compositor, inbox, wlr_connected) = connect();
+    if !wlr_connected {
         tracing::warn!(
             "compositor did not advertise wlr-foreign-toplevel; window switching disabled (apps/files/commands still work)"
         );

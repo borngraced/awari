@@ -7,7 +7,6 @@ pub const ICON_PX: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
-    Search,
     AppWindow,
     LayoutGrid,
     File,
@@ -18,7 +17,6 @@ impl Icon {
     #[allow(dead_code)]
     pub fn path(self) -> &'static str {
         match self {
-            Self::Search => "icons/search.svg",
             Self::AppWindow => "icons/app_window.svg",
             Self::LayoutGrid => "icons/layout_grid.svg",
             Self::File => "icons/file.svg",
@@ -28,7 +26,6 @@ impl Icon {
 
     fn bytes(self) -> &'static [u8] {
         match self {
-            Self::Search => include_bytes!("../../assets/icons/search.svg"),
             Self::AppWindow => include_bytes!("../../assets/icons/app_window.svg"),
             Self::LayoutGrid => include_bytes!("../../assets/icons/layout_grid.svg"),
             Self::File => include_bytes!("../../assets/icons/file.svg"),
@@ -56,7 +53,7 @@ mod tests {
 
     #[test]
     fn launcher_icons_are_embedded() {
-        for icon in [Icon::Search, Icon::AppWindow, Icon::LayoutGrid, Icon::File] {
+        for icon in [Icon::AppWindow, Icon::LayoutGrid, Icon::File] {
             let bytes = icon.bytes();
             assert!(bytes.starts_with(b"<svg"), "{}", icon.path());
         }

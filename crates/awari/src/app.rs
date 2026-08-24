@@ -60,6 +60,7 @@ pub struct Daemon {
     app_usage: HashMap<String, u64>,
     files_tx: crate::files::Files,
     files_seq: u64,
+    file_hits_gen: u64,
     file_hits: Vec<FileHit>,
     /// Cached window list, rebuilt only when niri reports a change (not on
     /// every keystroke), so `filtered_rows` can borrow it without re-cloning
@@ -72,7 +73,7 @@ pub struct Daemon {
     /// Last computed rows, reused across highlight moves (Select / arrows)
     /// and other non-query changes to avoid re-scoring on every keystroke.
     last_rows: Option<Vec<launcher::LauncherRow>>,
-    last_rows_key: Option<(String, launcher::Category, u64, u64)>,
+    last_rows_key: Option<(String, launcher::Category, u64, u64, u64)>,
 }
 
 impl Daemon {
@@ -134,6 +135,7 @@ impl Daemon {
             app_usage: HashMap::new(),
             files_tx,
             files_seq: 0,
+            file_hits_gen: 0,
             file_hits: Vec::new(),
             windows_list: Vec::new(),
             source_gen: 0,
@@ -230,6 +232,8 @@ impl Daemon {
             &self.app_usage,
             &self.app_icons,
             self.launcher_category,
+            self.cfg.files.max_results,
+            self.cfg.max_results,
         )
     }
 
@@ -243,6 +247,7 @@ impl Daemon {
             self.launcher_query.clone(),
             self.launcher_category,
             self.files_seq,
+            self.file_hits_gen,
             self.source_gen,
         );
         let rows = if self.last_rows_key.as_ref() == Some(&key) {
@@ -359,6 +364,7 @@ impl Daemon {
             self.launcher_selected = 0;
             self.launcher_category = launcher::Category::All;
             self.file_hits.clear();
+            self.file_hits_gen += 1;
             self.files_seq = self.files_tx.invalidate();
             let started = Instant::now();
             self.ensure_launcher(cx);
@@ -544,6 +550,7 @@ impl Daemon {
 
     fn refresh_file_hits(&mut self) {
         self.file_hits.clear();
+        self.file_hits_gen += 1;
         if self.cfg.sources.files && !self.launcher_query.trim().is_empty() {
             self.files_seq = self.files_tx.query(&self.launcher_query);
         } else {
@@ -744,6 +751,7 @@ fn spawn_files_pump(cx: &mut Context<Daemon>, rx: Receiver<(u64, Vec<FileHit>)>)
                 // Drop answers that no longer match the newest query.
                 if seq == d.files_seq {
                     d.file_hits = hits;
+                    d.file_hits_gen += 1;
                     if d.launcher_open {
                         d.sync_launcher(cx);
                         cx.notify();
@@ -771,7 +779,7 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
         use futures::StreamExt;
         while let Some(apps) = fut_rx.next().await {
             let _ = this.update(cx, |d, cx| {
-                d.app_icons = apps
+                let mut icons: HashMap<String, String> = apps
                     .iter()
                     .filter_map(|a| {
                         a.app_id_lc
@@ -780,6 +788,17 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
                             .map(|(k, v)| (k.clone(), v.clone()))
                     })
                     .collect();
+                // Also map the display name so apps whose app_id equals their
+                // name (and thus have no StartupWMClass) still resolve a window
+                // icon. app_id_lc wins ties via `or_insert`.
+                for a in &apps {
+                    if let Some(v) = a.icon.as_deref() {
+                        icons
+                            .entry(a.name_lc.clone())
+                            .or_insert_with(|| v.to_string());
+                    }
+                }
+                d.app_icons = icons;
                 d.apps = apps;
                 d.source_gen += 1;
                 if d.launcher_open {

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -43,6 +43,8 @@ pub enum CompositorError {
     Wayland(String),
     #[error("not connected")]
     NotConnected,
+    #[error("spawn failed: {0}")]
+    Spawn(String),
 }
 
 /// A single open toplevel window, normalized across compositors.
@@ -97,50 +99,45 @@ impl CompositorInbox {
     }
 }
 
-/// Connect to the running compositor. Returns a no-op backend (empty windows)
-/// when the foreign-toplevel global is unavailable, so the launcher still
-/// launches apps/files/commands.
-pub fn connect() -> (Arc<dyn Compositor>, Arc<CompositorInbox>) {
+/// Connect to the running compositor. Returns the backend, its inbox, and
+/// whether the wlr-foreign-toplevel global was bound (`false` → no-op backend;
+/// window switching is unavailable but apps/files/commands still work).
+pub fn connect() -> (Arc<dyn Compositor>, Arc<CompositorInbox>, bool) {
     match connect_wlr() {
-        Some(pair) => pair,
-        None => (Arc::new(NoopCompositor), CompositorInbox::new()),
+        Some((backend, inbox)) => (backend, inbox, true),
+        None => (Arc::new(NoopCompositor), CompositorInbox::new(), false),
     }
 }
 
 /// Spawn `command` (argv form) detached: a helper thread reaps the child so it
 /// never lingers as a zombie. stdio is nulled because awari runs headless.
-/// Returns false if the program could not be launched.
-fn spawn_detached(command: &[String]) -> bool {
+/// Returns `Err(message)` if the program could not be launched.
+fn spawn_detached(command: &[String]) -> Result<(), String> {
     if command.is_empty() {
-        return false;
+        return Err("empty command".into());
     }
-    match std::process::Command::new(&command[0])
+    std::process::Command::new(&command[0])
         .args(&command[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(mut child) => {
+        .map(|mut child| {
             thread::Builder::new()
                 .name("awari-spawn".into())
                 .spawn(move || {
                     let _ = child.wait();
                 })
                 .ok();
-            true
-        }
-        Err(e) => {
-            tracing::warn!(%e, cmd = ?command.first(), "failed to spawn");
-            false
-        }
-    }
+        })
+        .map_err(|e| e.to_string())
 }
 
 struct WlrInner {
     toplevels: HashMap<ObjectId, ToplevelInfo>,
     next_id: u64,
     dirty: bool,
+    seat: Option<WlSeat>,
 }
 
 struct ToplevelInfo {
@@ -155,7 +152,7 @@ struct WlrState {
     inner: Arc<Mutex<WlrInner>>,
     inbox: Arc<CompositorInbox>,
     manager: Option<ZwlrForeignToplevelManagerV1>,
-    seat: Option<WlSeat>,
+    manager_name: Option<u32>,
     _registry: Option<WlRegistry>,
 }
 
@@ -171,22 +168,37 @@ impl WlrState {
 
 struct WlrBackend {
     inner: Arc<Mutex<WlrInner>>,
-    cmd_tx: Sender<CompositorCommand>,
+    conn: Arc<wl::Connection>,
 }
 
 impl Compositor for WlrBackend {
     fn apply(&self, cmd: CompositorCommand) -> Result<(), CompositorError> {
         match cmd {
             CompositorCommand::Spawn { command } => {
-                if spawn_detached(&command) {
-                    Ok(())
-                } else {
-                    Err(CompositorError::NotConnected)
-                }
+                spawn_detached(&command).map_err(CompositorError::Spawn)
             }
             CompositorCommand::FocusWindow { id } => {
-                let _ = self.cmd_tx.send(CompositorCommand::FocusWindow { id });
-                Ok(())
+                // Sent synchronously: the request just enqueues on the shared
+                // connection, so it can't stall behind a blocked blocking_dispatch.
+                let (handle, seat) = {
+                    let g = self.inner.lock().expect("wlr inner");
+                    let handle = g
+                        .toplevels
+                        .values()
+                        .find(|t| t.id == id)
+                        .map(|t| t.handle.clone());
+                    (handle, g.seat.clone())
+                };
+                match (handle, seat) {
+                    (Some(h), Some(seat)) => {
+                        h.activate(&seat);
+                        if let Err(e) = self.conn.flush() {
+                            tracing::warn!(%e, "failed to flush focus request");
+                        }
+                        Ok(())
+                    }
+                    _ => Err(CompositorError::NotConnected),
+                }
             }
         }
     }
@@ -207,8 +219,9 @@ impl Compositor for WlrBackend {
                 )
             })
             .collect();
-        // Focused window first, then stable by id so unfocused rows don't reshuffle.
-        out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+        // Focused window first (Reverse(bool)), then stable by id so unfocused
+        // rows don't reshuffle.
+        out.sort_by_key(|(activated, t)| (std::cmp::Reverse(*activated), t.id));
         out.into_iter().map(|(_, t)| t).collect()
     }
 }
@@ -219,11 +232,7 @@ impl Compositor for NoopCompositor {
     fn apply(&self, cmd: CompositorCommand) -> Result<(), CompositorError> {
         match cmd {
             CompositorCommand::Spawn { command } => {
-                if spawn_detached(&command) {
-                    Ok(())
-                } else {
-                    Err(CompositorError::NotConnected)
-                }
+                spawn_detached(&command).map_err(CompositorError::Spawn)
             }
             CompositorCommand::FocusWindow { .. } => Ok(()),
         }
@@ -241,13 +250,14 @@ fn connect_wlr() -> Option<(Arc<dyn Compositor>, Arc<CompositorInbox>)> {
         toplevels: HashMap::new(),
         next_id: 1,
         dirty: false,
+        seat: None,
     }));
     let inbox = CompositorInbox::new();
     let mut state = WlrState {
         inner: inner.clone(),
         inbox: inbox.clone(),
         manager: None,
-        seat: None,
+        manager_name: None,
         _registry: None,
     };
     let registry = conn.display().get_registry(&qh, ());
@@ -261,45 +271,27 @@ fn connect_wlr() -> Option<(Arc<dyn Compositor>, Arc<CompositorInbox>)> {
     }
     inbox.push(CompositorMsg::Changed);
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<CompositorCommand>();
+    let conn = Arc::new(conn);
     let inbox_thread = inbox.clone();
     thread::Builder::new()
         .name("awari-wlr".into())
         .spawn(move || loop {
             match queue.blocking_dispatch(&mut state) {
                 Ok(_) => {
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        handle_command(&mut state, &queue, cmd);
-                    }
                     state.inner.lock().expect("wlr inner").dirty = false;
                 }
                 Err(e) => {
+                    // Connection died: clear the stale snapshot so the UI stops
+                    // offering dead window rows, then stop the pump.
+                    state.inner.lock().expect("wlr inner").toplevels.clear();
+                    inbox_thread.push(CompositorMsg::Changed);
                     inbox_thread.push(CompositorMsg::Degraded(e.to_string()));
                     break;
                 }
             }
         })
         .ok()?;
-    Some((Arc::new(WlrBackend { inner, cmd_tx }), inbox))
-}
-
-fn handle_command(state: &mut WlrState, _queue: &wl::EventQueue<WlrState>, cmd: CompositorCommand) {
-    if let CompositorCommand::FocusWindow { id } = cmd {
-        let (handle, seat) = {
-            let g = state.inner.lock().expect("wlr inner");
-            let handle = g
-                .toplevels
-                .values()
-                .find(|t| t.id == id)
-                .map(|t| t.handle.clone());
-            (handle, state.seat.clone())
-        };
-        if let (Some(h), Some(seat)) = (handle, seat) {
-            h.activate(&seat);
-        } else {
-            tracing::warn!("cannot focus window: no seat or handle");
-        }
-    }
+    Some((Arc::new(WlrBackend { inner, conn }), inbox))
 }
 
 impl Dispatch<WlRegistry, ()> for WlrState {
@@ -311,24 +303,37 @@ impl Dispatch<WlRegistry, ()> for WlrState {
         _conn: &wl::Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            if interface == ZwlrForeignToplevelManagerV1::interface().name {
-                let v = version.min(ZwlrForeignToplevelManagerV1::interface().version);
-                let manager =
-                    registry.bind::<ZwlrForeignToplevelManagerV1, (), WlrState>(name, v, qh, ());
-                st.manager = Some(manager);
-            } else if interface == WlSeat::interface().name {
-                let v = version.min(WlSeat::interface().version);
-                let seat = registry.bind::<WlSeat, (), WlrState>(name, v, qh, ());
-                if st.seat.is_none() {
-                    st.seat = Some(seat);
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => {
+                if interface == ZwlrForeignToplevelManagerV1::interface().name {
+                    let v = version.min(ZwlrForeignToplevelManagerV1::interface().version);
+                    let manager = registry
+                        .bind::<ZwlrForeignToplevelManagerV1, (), WlrState>(name, v, qh, ());
+                    st.manager = Some(manager);
+                    st.manager_name = Some(name);
+                } else if interface == WlSeat::interface().name {
+                    let v = version.min(WlSeat::interface().version);
+                    let seat = registry.bind::<WlSeat, (), WlrState>(name, v, qh, ());
+                    let mut g = st.inner.lock().expect("wlr inner");
+                    if g.seat.is_none() {
+                        g.seat = Some(seat);
+                    }
                 }
             }
+            wl_registry::Event::GlobalRemove { name } => {
+                if st.manager_name == Some(name) {
+                    st.manager_name = None;
+                    st.inner.lock().expect("wlr inner").toplevels.clear();
+                    st.inbox.push(CompositorMsg::Changed);
+                    st.inbox
+                        .push(CompositorMsg::Degraded("foreign-toplevel global retracted".into()));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -361,7 +366,20 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WlrState {
                 st.mark_dirty();
             }
             ManagerEvent::Finished => {
-                st.inner.lock().expect("wlr inner").toplevels.clear();
+                let handles: Vec<_> = st
+                    .inner
+                    .lock()
+                    .expect("wlr inner")
+                    .toplevels
+                    .drain()
+                    .map(|(_, t)| t.handle)
+                    .collect();
+                for h in handles {
+                    h.destroy();
+                }
+                // The manager has no destroy request; dropping it releases the
+                // proxy.
+                st.manager.take();
                 st.mark_dirty();
             }
             _ => {}
@@ -409,7 +427,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlrState {
                 st.mark_dirty();
             }
             HandleEvent::State { state: ws } => {
-                let activated = ws.contains(&STATE_ACTIVATED);
+                let activated = ws.chunks_exact(4).any(|c| {
+                    u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == STATE_ACTIVATED as u32
+                });
                 if let Some(t) = st.inner.lock().expect("wlr inner").toplevels.get_mut(&oid) {
                     t.activated = activated;
                 }

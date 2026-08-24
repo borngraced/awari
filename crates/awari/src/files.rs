@@ -32,6 +32,12 @@ const TRANSIENT_DIR_CAP: usize = 8;
 /// per-picker result cache so repeated searches don't grow memory without end.
 const FILE_CACHE_BUDGET: usize = 2048;
 
+/// Byte cap applied to transient per-directory indexes. Pure insurance: these
+/// pickers run with content indexing and mmap caching disabled (we never
+/// search inside files), so this budget is currently inert. It only becomes
+/// meaningful if that ever changes.
+const TRANSIENT_CACHE_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Content-cache byte cap applied to the persistent root indexes. Without a
 /// cap fff auto-sizes this from the scanned file count, which can be large for
 /// user dirs; bounding it keeps the baseline memory predictable.
@@ -196,6 +202,7 @@ fn picker_loop(
     let parser = QueryParser::default();
     let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
     let mut transient_order: VecDeque<PathBuf> = VecDeque::with_capacity(TRANSIENT_DIR_CAP);
+    let mut prev_raw = String::new();
     loop {
         // Reclaim memory on dismiss by dropping the per-directory scratch
         // indexes only. The root indexes stay warm (bounded by
@@ -206,6 +213,10 @@ fn picker_loop(
             tracing::debug!("clearing transient file caches on dismiss");
             transient.clear();
             transient_order.clear();
+            // Freed pages otherwise linger in glibc arenas; hand them back so
+            // RSS actually falls after a heavy session instead of plateauing
+            // at the peak.
+            unsafe { libc::malloc_trim(0) };
         }
         // Block for the next query, but wake periodically so a clear signal
         // isn't starved while the launcher is idle.
@@ -227,7 +238,16 @@ fn picker_loop(
         if raw.trim().is_empty() {
             continue;
         }
+        // Scratch pickers serve a single query lineage (refining or
+        // backspacing within one path). An unrelated query invalidates them,
+        // so drop them instead of letting up to 8 stale subtree indexes
+        // linger for the rest of the session.
+        if !(raw.starts_with(&prev_raw) || prev_raw.starts_with(&raw)) {
+            transient.clear();
+            transient_order.clear();
+        }
         let hits = search_all(&pickers, &mut transient, &mut transient_order, &parser, &raw, &opts);
+        prev_raw = raw;
         if rtx.send((seq, hits)).is_err() {
             return;
         }
@@ -264,6 +284,104 @@ fn regex_hint(raw: &str) -> String {
             c.is_alphanumeric() || *c == '/' || *c == '.' || *c == ' ' || *c == '-' || *c == '_'
         })
         .collect()
+}
+
+/// Subsequence fuzzy matcher. The query must be a *subsequence* of the
+/// candidate (every query char present, in order) — this alone excludes the
+/// loose fuzzy hits fff produces (`heap` never matches `head_formatter`, which
+/// has no `p`; `head` never matches `readme`, which has no `h`). Among true
+/// matches, a subsequence score ranks them: consecutive matches, matches at
+/// word boundaries (after `/`, `.`, `_`, `-`, …) and camelCase transitions
+/// score highest, with small penalties for leading/trailing unmatched chars.
+const SCORE_CONSECUTIVE: i32 = 10;
+const SCORE_WORD: i32 = 30;
+const SCORE_CAPITAL: i32 = 15;
+const SCORE_DOT: i32 = 8;
+const SCORE_LEAD: i32 = 1;
+const SCORE_TRAIL: i32 = 1;
+
+fn is_word_boundary(c: char) -> bool {
+    matches!(
+        c,
+        ':' | '/' | '\\' | '.' | '-' | '_' | ' ' | '`' | '(' | ')' | '[' | ']' | '@' | '#' | '~'
+    )
+}
+
+/// Best subsequence score of `needle` within `haystack`, or `None` if `needle`
+/// is not a subsequence of `haystack`. Case-insensitive.
+pub fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
+    let needle: Vec<char> = needle.chars().collect();
+    let haystack: Vec<char> = haystack.chars().collect();
+    let n = needle.len();
+    let m = haystack.len();
+    if n == 0 {
+        return Some(0);
+    }
+    if n > m {
+        return None;
+    }
+    // prev[j]: best score matching the first (i-1) needle chars, ending at
+    // haystack position (j-1). MIN marks "no match ends here".
+    let mut prev = vec![i32::MIN; m + 1];
+    let mut best = i32::MIN;
+    for i in 1..=n {
+        let mut cur = vec![i32::MIN; m + 1];
+        let mut best_prev_excl = i32::MIN; // max prev[k] for k < j-1 (gapped path)
+        let nc = needle[i - 1].to_ascii_lowercase();
+        for j in 1..=m {
+            // Skip this haystack char: carry forward the best ending at <= j-1.
+            cur[j] = cur[j - 1];
+            let hc = haystack[j - 1].to_ascii_lowercase();
+            if nc == hc {
+                let boundary = j == 1 || is_word_boundary(haystack[j - 2]);
+                let bonus = if boundary {
+                    SCORE_WORD
+                } else if haystack[j - 1].is_ascii_uppercase() {
+                    SCORE_CAPITAL
+                } else {
+                    SCORE_DOT
+                };
+                if i == 1 {
+                    let s = bonus - (j as i32 - 1) * SCORE_LEAD;
+                    if s > cur[j] {
+                        cur[j] = s;
+                    }
+                } else {
+                    // Consecutive: previous char matched at j-2 (prev[j-1]).
+                    if prev[j - 1] != i32::MIN {
+                        let s = prev[j - 1] + SCORE_CONSECUTIVE;
+                        if s > cur[j] {
+                            cur[j] = s;
+                        }
+                    }
+                    // Gapped: previous char matched somewhere before j-2.
+                    if best_prev_excl != i32::MIN {
+                        let s = best_prev_excl + bonus;
+                        if s > cur[j] {
+                            cur[j] = s;
+                        }
+                    }
+                }
+            }
+            // Expose prev[j-1] to the next column's gapped path.
+            if prev[j - 1] != i32::MIN && prev[j - 1] > best_prev_excl {
+                best_prev_excl = prev[j - 1];
+            }
+        }
+        prev = cur;
+    }
+    // Only a full match (the final row) counts; partial matches from earlier
+    // rows must not leak through as the score.
+    for j in 1..=m {
+        if prev[j] != i32::MIN {
+            let trail = (m - j) as i32 * SCORE_TRAIL;
+            let sc = prev[j] - trail;
+            if sc > best {
+                best = sc;
+            }
+        }
+    }
+    (best != i32::MIN).then_some(best)
 }
 
 /// Lock files that are usually noise in launcher file search.
@@ -356,7 +474,11 @@ fn search_all(
                     enable_mmap_cache: false,
                     enable_content_indexing: false,
                     follow_symlinks: false,
-                    cache_budget: ContentCacheBudget::from_overrides(FILE_CACHE_BUDGET, 0, 0),
+                    cache_budget: ContentCacheBudget::from_overrides(
+                        FILE_CACHE_BUDGET,
+                        TRANSIENT_CACHE_BYTES,
+                        0,
+                    ),
                 },
             );
             shared
@@ -417,43 +539,68 @@ fn search_one(
         return Vec::new();
     };
     let query = parser.parse(fff_query);
-    // Lockfile/regex filters run after FFF's pagination, so overscan the
-    // page when they will shrink it; otherwise a heavily-filtered query
-    // delivers fewer rows than exist past the limit.
-    let limit = if regex.is_some() || !index_lockfiles {
-        PER_ROOT_ROWS * 4
-    } else {
-        PER_ROOT_ROWS
-    };
+    let q_lc = fff_query.to_lowercase();
+    let fff_limit = PER_ROOT_ROWS * 2;
     let results = p.fuzzy_search(
         &query,
         None,
         FuzzySearchOptions {
             pagination: PaginationArgs {
                 offset: 0,
-                limit,
+                limit: fff_limit,
             },
             ..Default::default()
         },
     );
     let base = p.base_path.clone();
-    results
+
+    // Regex mode: FFF only narrows by the hint; the compiled regex is the
+    // real filter, matched against the absolute path.
+    if let Some(re) = regex {
+        return results
+            .items
+            .iter()
+            .map(|item| FileHit {
+                path: item.absolute_path(p, &base),
+            })
+            .filter(|h| {
+                (index_lockfiles || !is_lockfile(&h.path))
+                    && re.is_match(&h.path.to_string_lossy())
+            })
+            .take(PER_ROOT_ROWS)
+            .collect();
+    }
+
+    // Normal mode: subsequence match + score ranking.
+    let mut scored: Vec<(i32, FileHit)> = results
         .items
         .iter()
         .map(|item| FileHit {
             path: item.absolute_path(p, &base),
         })
-        .filter(|h| {
-            if !index_lockfiles && is_lockfile(&h.path) {
-                return false;
-            }
-            if let Some(re) = regex
-                && !re.is_match(&h.path.to_string_lossy())
-            {
-                return false;
-            }
-            true
+        .filter(|h| index_lockfiles || !is_lockfile(&h.path))
+        .filter_map(|h| {
+            let p_lc = h.path.to_string_lossy().to_lowercase();
+            let name_lc = h
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let s_path = subsequence_score(&q_lc, &p_lc);
+            let s_name = subsequence_score(&q_lc, &name_lc);
+            let score = match (s_path, s_name) {
+                (Some(a), Some(b)) => a.max(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => return None,
+            };
+            Some((score, h))
         })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+        .into_iter()
+        .map(|(_, h)| h)
         .take(PER_ROOT_ROWS)
         .collect()
 }
@@ -662,5 +809,108 @@ mod tests {
     fn path_query_dir_ignores_missing_and_plain() {
         assert!(path_query_dir("firefox").is_none());
         assert!(path_query_dir("/nonexistent_awari_xyz_123/").is_none());
+    }
+
+    #[test]
+    fn subsequence_excludes_loose_fuzzy_hits() {
+        // The two real complaints: fff's typo/subsequence fuzz returned these
+        // for "heap"/"head", but neither is a subsequence, so the matcher drops them.
+        assert!(subsequence_score("heap", "head_formatter").is_none());
+        assert!(subsequence_score("head", "readme.md").is_none());
+        assert!(subsequence_score("head", "readme").is_none());
+    }
+
+    #[test]
+    fn subsequence_keeps_real_subsequence_matches() {
+        assert!(subsequence_score("heap", "heaptrace.rs").is_some());
+        assert!(subsequence_score("head", "head.rs").is_some());
+        assert!(subsequence_score("head", "src/headless.rs").is_some());
+    }
+
+    #[test]
+    fn subsequence_ranks_shorter_paths_higher() {
+        let bare = subsequence_score("head", "head.rs").unwrap();
+        // Same basename deeper in the tree pays leading/trailing penalties.
+        let nested = subsequence_score("head", "src/deep/nested/head.rs").unwrap();
+        assert!(bare > nested);
+        // A late, deeply-prefixed match ranks below a filename-length one.
+        let late = subsequence_score("head", "zzz/verylongpath/head.rs").unwrap();
+        assert!(bare > late);
+    }
+
+    #[test]
+    fn subsequence_empty_query_matches_everything() {
+        assert_eq!(subsequence_score("", "anything"), Some(0));
+    }
+
+    /// Temporary diagnostic: hammer the worker with distinct plain queries and
+    /// print RSS at checkpoints. Run with:
+    ///   cargo test -p awari --release rss_files -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rss_files_plain_queries() {
+        use std::time::Duration;
+        fn rss_kb() -> i64 {
+            std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| {
+                    s.split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse::<i64>().ok())
+                })
+                .map(|p| p * 4)
+                .unwrap_or(0)
+        }
+        let root = std::path::Path::new("/tmp/opencode/rssfix");
+        for d in ["a", "b", "c", "d"] {
+            let dir = root.join(d);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..300u32 {
+                let _ = std::fs::write(dir.join(format!("file_{d}_{i}.txt")), "x");
+            }
+        }
+        let (mut files, rx) = Files::spawn(
+            vec![root.to_path_buf()],
+            FilesOptions {
+                index_lockfiles: false,
+                regex: false,
+            },
+        );
+        let drain = std::thread::spawn(move || for _ in rx {});
+        // Let the picker finish its initial walk so the scan itself isn't
+        // conflated with per-query growth.
+        files.query("warm");
+        std::thread::sleep(Duration::from_millis(1500));
+        let base = rss_kb();
+        eprintln!("base rss = {base} KB");
+        for i in 0..2000u64 {
+            files.query(&format!("zz{}x{}", i % 977, i));
+            if i % 400 == 399 {
+                std::thread::sleep(Duration::from_millis(120));
+                eprintln!("after {} queries: rss = {} KB", i + 1, rss_kb());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let end = rss_kb();
+        eprintln!("end rss = {end} KB (delta {} KB)", end - base);
+        // Phase 2: cycle MORE distinct path dirs than TRANSIENT_DIR_CAP (8),
+        // forcing constant picker eviction + re-walk churn.
+        let pbase = rss_kb();
+        eprintln!("path-phase base rss = {pbase} KB");
+        for i in 0..600u64 {
+            let d = i % 16;
+            files.query(&format!("/tmp/opencode/rssfix/dir{d}/x{}", i % 13));
+            if i % 150 == 149 {
+                std::thread::sleep(Duration::from_millis(120));
+                eprintln!("after {} path queries: rss = {} KB", i + 1, rss_kb());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("after path phase: rss = {} KB (delta {} KB)", rss_kb(), rss_kb() - pbase);
+        files.clear();
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("after clear: rss = {} KB", rss_kb());
+        drop(files);
+        drain.join().ok();
     }
 }
