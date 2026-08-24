@@ -76,12 +76,36 @@ cargo run -p awari
 awari ping
 ```
 
-Run as a user service (`contrib/awari.service`). With niri:
-`spawn-at-startup "awari"` and `Mod+D { spawn "awari" "toggle-launcher"; }`.
+Run `awari` as a resident user service so the overlay is always one key away:
+
+```sh
+systemctl --user enable --now ~/.config/systemd/user/awari.service
+```
+
+(See `contrib/awari.service` for the unit.)
+
+Then bind a key in your compositor to toggle the overlay.
+
+**niri** (`~/.config/niri/config.kdl`):
+
+```kdl
+spawn-at-startup "awari"
+binds {
+    Mod+D { spawn "awari" "toggle-launcher"; }
+}
+```
+
+**Hyprland** (`~/.config/hypr/hyprland.conf`):
+
+```ini
+bind = SUPER, D, exec, awari toggle-launcher
+```
+
+Client commands: `toggle-launcher`, `open-launcher`, `close-launcher`, `ping`.
 
 ## Configuration
 
-KDL at `~/.config/awari/config.kdl`. Unknown keys are ignored. No exec,
+KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys are ignored. No exec,
 scripts, or shell interpolation. Every block and token is optional — anything
 omitted keeps its default. The complete, copy-pasteable file is
 `contrib/config.kdl`.
