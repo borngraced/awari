@@ -12,6 +12,13 @@ resident, so the result lands on the next frame, not after some program boots.
 
 The name is Yoruba for "a finding, a discovery".
 
+## Highlights
+
+- **Instant** — fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start
+- **Resident** — the overlay never boots from scratch, so there's no launch lag to hide
+- **One suggestion, not a list** — inline ghost-text completion; the full alternates list only shows on ↓
+- **Wayland-native** — runtime-detects niri, Hyprland, Mutter, or Sway, one binary
+
 ## Motivation
 
 Most launchers are slow in ways you learn to live with. They fork a search tool
