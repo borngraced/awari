@@ -5,7 +5,7 @@ use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     Image, ImageFormat, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
     Render, Rgba, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage, StyledText,
-    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list, Point, Pixels,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -204,6 +204,8 @@ pub struct Launcher {
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
     scrolled_to: Option<usize>,
+    scroll_target: Option<Pixels>,
+    scroll_anim_gen: u64,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
     hovered: Option<usize>,
@@ -249,6 +251,8 @@ impl Launcher {
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             scrolled_to: None,
+            scroll_target: None,
+            scroll_anim_gen: 0,
             open_started: None,
             closing: false,
             hovered: None,
@@ -266,6 +270,8 @@ impl Launcher {
     pub fn apply_view(&mut self, view: LauncherView, cx: &mut Context<Self>) {
         if self.view.query != view.query || self.view.category != view.category {
             self.scrolled_to = None;
+            self.scroll_target = None;
+            self.scroll_anim_gen = self.scroll_anim_gen.wrapping_add(1);
         }
         if self.view.query != view.query || self.view.selected != view.selected {
             self.action_menu = None;
@@ -1107,22 +1113,97 @@ impl Launcher {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn keep_selected_visible(&mut self, grid: bool) {
+    fn keep_selected_visible(&mut self, grid: bool, cx: &mut Context<Self>) {
         let sel = self.view.selected;
-        // Pointer-driven selection (sel == hovered) must not auto-scroll, or
-        // wheel scrolling fights itself: the content slides under a stationary
-        // cursor, the newly-hovered tile re-selects, and we'd snap back every
-        // frame. Only keyboard navigation scrolls the selection into view.
-        if self.hovered == Some(sel) {
-            self.scrolled_to = Some(sel);
+        if self.view.rows.is_empty() {
             return;
         }
         if self.scrolled_to == Some(sel) {
             return;
         }
         self.scrolled_to = Some(sel);
+
+        let (item_h, viewport, max_off, cur) = {
+            let state = self.scroll.0.borrow();
+            let handle = &state.base_handle;
+            let Some(item_h) = handle.bounds_for_item(0).map(|b| b.size.height) else {
+                drop(state);
+                let ix = if grid { sel / GRID_COLS } else { sel };
+                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                return;
+            };
+            (
+                item_h,
+                handle.bounds().size.height,
+                handle.max_offset().y,
+                handle.offset().y,
+            )
+        };
+
         let ix = if grid { sel / GRID_COLS } else { sel };
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        let item_top = item_h * (ix as f32);
+        let item_visible_top = item_top + cur;
+        let item_visible_bottom = item_visible_top + item_h;
+        let mut target = if item_visible_top < px(0.0) {
+            cur - item_visible_top
+        } else if item_visible_bottom > viewport {
+            cur - (item_visible_bottom - viewport)
+        } else {
+            return;
+        };
+        if target > px(0.0) {
+            target = px(0.0);
+        }
+        if target < max_off {
+            target = max_off;
+        }
+        if (target - cur).abs() < px(0.5) {
+            return;
+        }
+
+        self.scroll_target = Some(target);
+        let anim_gen = self.scroll_anim_gen.wrapping_add(1);
+        self.scroll_anim_gen = anim_gen;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let current = this
+                    .update(cx, |l, _| l.scroll.0.borrow().base_handle.offset().y)
+                    .unwrap_or(px(0.0));
+                let target_y = this
+                    .update(cx, |l, _| l.scroll_target)
+                    .unwrap_or(None)
+                    .unwrap_or(current);
+                if this
+                    .update(cx, |l, _| l.scroll_anim_gen != anim_gen)
+                    .unwrap_or(true)
+                {
+                    break;
+                }
+                let next = current + (target_y - current) * 0.35;
+                if (target_y - next).abs() < px(0.5) {
+                    let _ = this.update(cx, |l, cx| {
+                        l.scroll
+                            .0
+                            .borrow()
+                            .base_handle
+                            .set_offset(Point::new(px(0.0), target_y));
+                        l.scroll_target = None;
+                        cx.notify();
+                    });
+                    break;
+                }
+                let _ = this.update(cx, |l, cx| {
+                    l.scroll
+                        .0
+                        .borrow()
+                        .base_handle
+                        .set_offset(Point::new(px(0.0), next));
+                    cx.notify();
+                });
+                let _ = cx.background_executor().timer(Duration::from_millis(16)).await;
+            }
+        })
+        .detach();
     }
 
     fn tile(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1326,7 +1407,7 @@ impl Render for Launcher {
         let show_results = !q_empty || cat != Category::All;
         let compact = q_empty && cat == Category::All;
         let panel_h = if compact { SEARCH_H } else { PANEL_H };
-        self.keep_selected_visible(browsing_grid);
+        self.keep_selected_visible(browsing_grid, cx);
 
         let mut results = div()
             .id("launch-results")
