@@ -12,13 +12,6 @@ resident, so the result lands on the next frame, not after some program boots.
 
 The name is Yoruba for "a finding, a discovery".
 
-## Highlights
-
-- **Instant** — fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start
-- **Resident** — the overlay never boots from scratch, so there's no launch lag to hide
-- **One suggestion, not a list** — inline ghost-text completion; the full alternates list only shows on ↓
-- **Wayland-native** — runtime-detects niri, Hyprland, Mutter, or Sway, one binary
-
 ## Motivation
 
 Most launchers are slow in ways you learn to live with. They fork a search tool
@@ -55,21 +48,21 @@ a path, not an operator.
 
 ## Features
 
-- One unified list for **windows** (focus), **apps** (XDG `.desktop`), and **files**. Apps are always indexed; the files and windows sources can each be toggled off.
-- Empty query shows recent apps first, then open windows (no file dump).
-- Fuzzy matching across apps and windows, with frecency-ranked files.
-- Query prefixes:
-  - `>` runs the rest as a shell command in a terminal.
-  - `o:<path>` opens a path with the default handler. It lists the real entries as you type and accepts `~` or paths relative to `$HOME`.
-  - `r:<regex>` filters files by regular expression.
-- Path-shaped queries (starting with `~`, `/`, or `.`, or containing `/`) enter directory navigation; constraints like `*.pdf` and `!node_modules/` apply.
-- Calculator: a query that is arithmetic shows the result inline, and Enter copies it.
-- `Tab` autocompletes with the selected result's full value. `Shift`+`Up`/`Down` recalls previous queries.
-- `Alt`+`Enter` opens a per-row action menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
-- Clickable category chips: All, Apps, Files, Commands, Windows.
-- Theming is KDL with hex color tokens (no CSS, no remote fetches). There are nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`). Font and size are configurable too.
-- Lockfiles like `Cargo.lock` and `package-lock.json` are skipped by default.
-- Monitor-aware placement: the overlay opens on the focused output.
+- **Instant** — fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start.
+- **Resident** — the overlay never boots from scratch, so there's no launch lag to hide.
+- **One suggestion, not a list** — inline ghost-text completion; the full alternates list only shows on ↓.
+- **Wayland-native** — runtime-detects niri, Hyprland, Mutter, or Sway; one binary.
+- **Unified results** — windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
+- **Empty query** — shows recent apps first, then open windows (no file dump).
+- **Query prefixes** — `>` runs a shell command in a terminal, `o:<path>` opens a path and lists its real entries as you type (`~` and paths relative to `$HOME` both work), `r:<regex>` filters files by regular expression.
+- **Path navigation** — path-shaped queries (starting with `~`, `/`, `.`, or containing `/`) browse the filesystem; constraints like `*.pdf` and `!node_modules/` apply.
+- **Calculator** — an arithmetic query shows the result inline, and Enter copies it.
+- **Smart completion** — `Tab` autocompletes with the selected result's full value; `Shift`+`↑`/`↓` recalls previous queries.
+- **Action menu** — `Alt`+`Enter` opens a per-row menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
+- **Category chips** — clickable All, Apps, Files, Commands, Windows.
+- **Theming** — KDL with hex color tokens (no CSS, no remote fetches); nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); configurable font and size.
+- **Lockfiles hidden** — `Cargo.lock`, `package-lock.json`, and `*.lock` are skipped by default.
+- **Monitor-aware** — the overlay opens on the focused output.
 
 ## Memory
 
