@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use smithay_client_toolkit::reexports::client as wl;
+use wl::protocol::wl_output::{self, WlOutput};
 use wl::protocol::wl_registry::{self, WlRegistry};
 use wl::protocol::wl_seat::{self, WlSeat};
 use wl::backend::ObjectId;
@@ -54,10 +55,30 @@ pub struct Toplevel {
     pub app_id: Option<String>,
 }
 
+/// Logical geometry of an output plus its scale factor. Enough for a client
+/// to place a surface on the same monitor as a given toplevel without needing
+/// to correlate `wl_output` identities across separate Wayland connections.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OutputRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// `wl_output` scale factor (>=1). The caller converts logical coordinates
+    /// to physical pixels by multiplying by this when matching against its own
+    /// display list.
+    pub scale: i32,
+}
+
 pub trait Compositor: Send + Sync {
     fn apply(&self, cmd: CompositorCommand) -> Result<(), CompositorError>;
     /// All open toplevel windows (no workspace filtering).
     fn windows(&self) -> Vec<Toplevel>;
+    /// Geometry of the output currently holding the focused (activated)
+    /// toplevel, if any. Lets the launcher appear on the same monitor as the
+    /// window the user is working in. `None` when there is no focus
+    /// information (no compositor, or no activated toplevel).
+    fn focused_output(&self) -> Option<OutputRect>;
 }
 
 /// Coalesced compositor events: many protocol messages, one UI wake.
@@ -135,9 +156,21 @@ fn spawn_detached(command: &[String]) -> Result<(), String> {
 
 struct WlrInner {
     toplevels: HashMap<ObjectId, ToplevelInfo>,
+    /// Outputs we've bound, keyed by their `wl_output` object id. Geometry is
+    /// filled in as `wl_output` events arrive.
+    outputs: HashMap<ObjectId, OutputInfo>,
     next_id: u64,
     dirty: bool,
     seat: Option<WlSeat>,
+}
+
+/// Accumulated `wl_output` geometry. Each field arrives in a separate event;
+/// we assemble them as they come.
+#[derive(Default)]
+struct OutputInfo {
+    geometry: Option<(i32, i32)>,
+    mode: Option<(i32, i32)>,
+    scale: i32,
 }
 
 struct ToplevelInfo {
@@ -146,6 +179,8 @@ struct ToplevelInfo {
     title: Option<String>,
     app_id: Option<String>,
     activated: bool,
+    /// `wl_output` object ids the toplevel is currently shown on.
+    outputs: Vec<ObjectId>,
 }
 
 struct WlrState {
@@ -224,6 +259,22 @@ impl Compositor for WlrBackend {
         out.sort_by_key(|(activated, t)| (std::cmp::Reverse(*activated), t.id));
         out.into_iter().map(|(_, t)| t).collect()
     }
+
+    fn focused_output(&self) -> Option<OutputRect> {
+        let g = self.inner.lock().expect("wlr inner");
+        let toplevel = g.toplevels.values().find(|t| t.activated)?;
+        let out_id = toplevel.outputs.first()?;
+        let info = g.outputs.get(out_id)?;
+        let (x, y) = info.geometry?;
+        let (width, height) = info.mode?;
+        Some(OutputRect {
+            x,
+            y,
+            width,
+            height,
+            scale: info.scale.max(1),
+        })
+    }
 }
 
 struct NoopCompositor;
@@ -240,6 +291,9 @@ impl Compositor for NoopCompositor {
     fn windows(&self) -> Vec<Toplevel> {
         Vec::new()
     }
+    fn focused_output(&self) -> Option<OutputRect> {
+        None
+    }
 }
 
 fn connect_wlr() -> Option<(Arc<dyn Compositor>, Arc<CompositorInbox>)> {
@@ -248,6 +302,7 @@ fn connect_wlr() -> Option<(Arc<dyn Compositor>, Arc<CompositorInbox>)> {
     let qh = queue.handle();
     let inner = Arc::new(Mutex::new(WlrInner {
         toplevels: HashMap::new(),
+        outputs: HashMap::new(),
         next_id: 1,
         dirty: false,
         seat: None,
@@ -322,6 +377,14 @@ impl Dispatch<WlRegistry, ()> for WlrState {
                     if g.seat.is_none() {
                         g.seat = Some(seat);
                     }
+                } else if interface == WlOutput::interface().name {
+                    let v = version.min(WlOutput::interface().version);
+                    let output = registry.bind::<WlOutput, (), WlrState>(name, v, qh, ());
+                    st.inner
+                        .lock()
+                        .expect("wlr inner")
+                        .outputs
+                        .insert(output.id(), OutputInfo::default());
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
@@ -360,6 +423,7 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WlrState {
                         title: None,
                         app_id: None,
                         activated: false,
+                        outputs: Vec::new(),
                     },
                 );
                 drop(g);
@@ -403,6 +467,33 @@ impl Dispatch<WlSeat, ()> for WlrState {
     }
 }
 
+impl Dispatch<WlOutput, ()> for WlrState {
+    fn event(
+        _st: &mut Self,
+        proxy: &WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &wl::Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let oid = proxy.id();
+        let mut g = _st.inner.lock().expect("wlr inner");
+        let info = g.outputs.entry(oid).or_default();
+        match event {
+            wl_output::Event::Geometry { x, y, .. } => {
+                info.geometry = Some((x, y));
+            }
+            wl_output::Event::Mode { width, height, .. } => {
+                info.mode = Some((width, height));
+            }
+            wl_output::Event::Scale { factor } => {
+                info.scale = factor;
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlrState {
     fn event(
         st: &mut Self,
@@ -438,6 +529,26 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlrState {
             HandleEvent::Closed => {
                 st.inner.lock().expect("wlr inner").toplevels.remove(&oid);
                 proxy.destroy();
+                st.mark_dirty();
+            }
+            HandleEvent::OutputEnter { output } => {
+                let out_id = output.id();
+                let mut g = st.inner.lock().expect("wlr inner");
+                if let Some(t) = g.toplevels.get_mut(&oid) {
+                    if !t.outputs.contains(&out_id) {
+                        t.outputs.push(out_id);
+                    }
+                }
+                drop(g);
+                st.mark_dirty();
+            }
+            HandleEvent::OutputLeave { output } => {
+                let out_id = output.id();
+                let mut g = st.inner.lock().expect("wlr inner");
+                if let Some(t) = g.toplevels.get_mut(&oid) {
+                    t.outputs.retain(|o| o != &out_id);
+                }
+                drop(g);
                 st.mark_dirty();
             }
             _ => {}

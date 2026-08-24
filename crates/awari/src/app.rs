@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::fs;
 
 use gpui::{
-    point, px, size, App, AppContext, Bounds, ClipboardItem, Context, Entity, Global, QuitMode,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    point, px, size, App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global,
+    QuitMode, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use awari_compositor::{
     Compositor, CompositorCommand, CompositorInbox, CompositorMsg,
@@ -31,6 +31,11 @@ pub struct Daemon {
     /// doesn't advertise foreign-toplevel; apps/files/commands still work.
     compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
+    /// Display the launcher is currently shown on. `None` means "let the
+    /// compositor decide" (historically: all outputs). Recomputed on each open
+    /// from the focused window's output so the launcher follows the monitor
+    /// you're working on.
+    launcher_display: Option<DisplayId>,
     launcher_open: bool,
     launcher_query: String,
     launcher_selected: usize,
@@ -129,6 +134,7 @@ impl Daemon {
         let mut daemon = Self {
             compositor,
             launcher: None,
+            launcher_display: None,
             launcher_open: false,
             launcher_query: String::new(),
             launcher_selected: 0,
@@ -362,6 +368,7 @@ impl Daemon {
                 app_id: Some("awari".into()),
                 window_background: WindowBackgroundAppearance::Transparent,
                 kind: WindowKind::LayerShell(launcher::layer_opts()),
+                display_id: self.launcher_display,
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Launcher::new(shell, theme, window, cx)),
@@ -369,6 +376,49 @@ impl Daemon {
             Ok(handle) => self.launcher = Some(handle),
             Err(e) => tracing::warn!(%e, "launcher overlay failed to open"),
         }
+    }
+
+    /// Pick the `DisplayId` the launcher should appear on: the monitor of the
+    /// focused (activated) toplevel when we can determine it, otherwise the
+    /// primary display, otherwise `None` (compositor's default).
+    fn launcher_target_display(&self, cx: &App) -> Option<DisplayId> {
+        let origin = match self.compositor.as_ref().and_then(|c| c.focused_output()) {
+            Some(rect) => {
+                let scale = rect.scale.max(1) as f32;
+                (rect.x as f32 * scale, rect.y as f32 * scale)
+            }
+            None => return cx.primary_display().map(|d| d.id()),
+        };
+        let (fx, fy) = origin;
+        let displays = cx.displays();
+        if displays.is_empty() {
+            return cx.primary_display().map(|d| d.id());
+        }
+        let best = displays
+            .iter()
+            .min_by_key(|d| {
+                let o = d.bounds().origin;
+                let dx = o.x.as_f32() - fx;
+                let dy = o.y.as_f32() - fy;
+                (dx * dx + dy * dy) as i64
+            })
+            .expect("displays non-empty");
+        Some(best.id())
+    }
+
+    /// Ensure the resident launcher overlay exists and is on the monitor of the
+    /// focused window. Recreates the surface only when the desired display has
+    /// changed, so simply re-opening on the same monitor is a no-op.
+    fn ensure_launcher_display(&mut self, cx: &mut Context<Self>) {
+        let desired = self.launcher_target_display(cx);
+        if self.launcher.is_some() && self.launcher_display == desired {
+            return;
+        }
+        if let Some(handle) = self.launcher.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.launcher_display = desired;
+        self.ensure_launcher(cx);
     }
 
     pub(crate) fn apply_launcher_cmd(&mut self, cmd: LauncherCmd, cx: &mut Context<Self>) {
@@ -427,7 +477,7 @@ impl Daemon {
             self.file_hits_gen += 1;
             self.files_seq = self.files_tx.invalidate();
             let started = Instant::now();
-            self.ensure_launcher(cx);
+            self.ensure_launcher_display(cx);
             if let Some(h) = self.launcher.clone() {
                 let generation = self.launcher_gen;
                 let shell = cx.entity().downgrade();
