@@ -22,8 +22,6 @@ pub enum ClientReply {
     Ok,
     Err(String),
     Stats {
-        idle_ms_since_commit: u64,
-        niri_event_lag_ms: u64,
         launcher_open_to_first_commit_ms: Option<u64>,
         rss_bytes: u64,
     },

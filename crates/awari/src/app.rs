@@ -45,6 +45,10 @@ pub struct Daemon {
     files_tx: crate::files::Files,
     files_seq: u64,
     file_hits: Vec<FileHit>,
+    /// Cached window list, rebuilt only when niri reports a change (not on
+    /// every keystroke), so `filtered_rows` can borrow it without re-cloning
+    /// every title/app_id per character typed.
+    windows_list: Vec<(u64, String, Option<String>)>,
 }
 
 impl Daemon {
@@ -85,6 +89,7 @@ impl Daemon {
                 regex: cfg.files.regex,
             },
         );
+        let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
         let daemon = Self {
             niri,
             state: EventStreamState::default(),
@@ -96,21 +101,32 @@ impl Daemon {
             launcher_selected: 0,
             launcher_category: launcher::Category::All,
             launcher_gen: 0,
-            apps: crate::desktop::scan_applications(),
+            apps: Vec::new(),
             cfg,
             stats,
             recents: Vec::new(),
             files_tx,
             files_seq: 0,
             file_hits: Vec::new(),
+            windows_list: Vec::new(),
         };
         spawn_niri_pump(cx, inbox);
         spawn_ipc(cx);
         spawn_files_pump(cx, files_rx);
+        spawn_apps_pump(cx, apps_rx);
+        // Scan `.desktop` files off the bootstrap path so the overlay prewarm
+        // (wgpu device, shaders, fonts) runs first; apps swap in when ready.
+        thread::Builder::new()
+            .name("awari-apps-scan".into())
+            .spawn(move || {
+                let _ = apps_tx.send(crate::desktop::scan_applications());
+            })
+            .ok();
         daemon
     }
 
-    fn apply_niri(&mut self, msgs: Vec<NiriMsg>) {
+    fn apply_niri(&mut self, msgs: Vec<NiriMsg>) -> bool {
+        let changed = !msgs.is_empty();
         for msg in msgs {
             match msg {
                 NiriMsg::Event(ev) => {
@@ -159,6 +175,15 @@ impl Daemon {
                 self.output_name = name;
             }
         }
+        self.refresh_windows();
+        changed
+    }
+
+    /// Rebuild the cached window list from the current niri state. Cheap enough
+    /// to run on every niri batch, and far cheaper than rebuilding it on every
+    /// keystroke inside `filtered_rows`.
+    fn refresh_windows(&mut self) {
+        self.windows_list = self.launcher_windows();
     }
 
     fn launcher_windows(&self) -> Vec<(u64, String, Option<String>)> {
@@ -200,10 +225,11 @@ impl Daemon {
         } else {
             &[]
         };
+        let empty_windows: &[(u64, String, Option<String>)] = &[];
         let windows = if self.cfg.sources.windows {
-            self.launcher_windows()
+            self.windows_list.as_slice()
         } else {
-            Vec::new()
+            empty_windows
         };
         let files = if self.cfg.sources.files {
             self.file_hits.as_slice()
@@ -213,7 +239,7 @@ impl Daemon {
         launcher::filter_rows(
             &self.launcher_query,
             apps,
-            &windows,
+            windows,
             files,
             &self.recents,
             self.launcher_category,
@@ -246,7 +272,7 @@ impl Daemon {
                 return;
             }
             let _ = h.update(cx, |l, _, cx| {
-                l.apply_view(view);
+                l.apply_view(view, cx);
                 cx.notify();
             });
         });
@@ -367,7 +393,7 @@ impl Daemon {
                 return;
             }
             let _ = h.update(cx, |l, window, cx| {
-                l.apply_view(LauncherView::closed(theme));
+                l.apply_view(LauncherView::closed(theme), cx);
                 l.closing = true;
                 window.set_input_region(Some(&[]));
                 window.set_keyboard_interactivity(
@@ -441,14 +467,21 @@ impl Daemon {
         });
     }
 
-    fn apply_ipc(&mut self, req: ClientRequest, cx: &mut Context<Self>) {
+    fn apply_ipc(&mut self, req: ClientRequest, cx: &mut Context<Self>) -> bool {
         match req {
             ClientRequest::ToggleLauncher => {
                 self.set_launcher_open(!self.launcher_open, cx);
+                true
             }
-            ClientRequest::OpenLauncher => self.set_launcher_open(true, cx),
-            ClientRequest::CloseLauncher => self.set_launcher_open(false, cx),
-            _ => {}
+            ClientRequest::OpenLauncher => {
+                self.set_launcher_open(true, cx);
+                true
+            }
+            ClientRequest::CloseLauncher => {
+                self.set_launcher_open(false, cx);
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -469,11 +502,11 @@ fn spawn_niri_pump(cx: &mut Context<Daemon>, inbox: Arc<NiriInbox>) {
         use futures::StreamExt;
         while let Some(msgs) = rx.next().await {
             let _ = this.update(cx, |d, cx| {
-                d.apply_niri(msgs);
-                if d.launcher_open {
+                let changed = d.apply_niri(msgs);
+                if changed && d.launcher_open {
                     d.sync_launcher(cx);
+                    cx.notify();
                 }
-                cx.notify();
             });
         }
     })
@@ -497,8 +530,10 @@ fn spawn_ipc(cx: &mut Context<Daemon>) {
         use futures::StreamExt;
         while let Some(req) = rx.next().await {
             let _ = this.update(cx, |d, cx| {
-                d.apply_ipc(req, cx);
-                cx.notify();
+                let changed = d.apply_ipc(req, cx);
+                if changed {
+                    cx.notify();
+                }
             });
         }
     })
@@ -526,9 +561,35 @@ fn spawn_files_pump(cx: &mut Context<Daemon>, rx: Receiver<(u64, Vec<FileHit>)>)
                     d.file_hits = hits;
                     if d.launcher_open {
                         d.sync_launcher(cx);
+                        cx.notify();
                     }
                 }
-                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+/// Streams the `.desktop` scan result into the daemon once it's ready, then
+/// swaps `apps` and refreshes the open launcher. Mirrors the files pump shape.
+fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
+    let (tx, mut fut_rx) = futures::channel::mpsc::unbounded();
+    thread::Builder::new()
+        .name("awari-apps-pump".into())
+        .spawn(move || {
+            if let Ok(apps) = rx.recv() {
+                let _ = tx.unbounded_send(apps);
+            }
+        })
+        .ok();
+    cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        while let Some(apps) = fut_rx.next().await {
+            let _ = this.update(cx, |d, cx| {
+                d.apps = apps;
+                if d.launcher_open {
+                    d.sync_launcher(cx);
+                }
             });
         }
     })

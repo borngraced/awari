@@ -41,22 +41,8 @@ gpui_shared_string = { version = "=0.1.0", git = "file:///home/borngraced/dev/re
 gpui_util = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
 sum_tree = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
 # END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
-# END-GPUI-PATCH
 
 [profile.release]
 lto = true
 codegen-units = 8
+strip = true

@@ -4,11 +4,14 @@ use gpui::{
     div, img, px, AnyElement, AnimationExt, App, Context, FocusHandle,
     Focusable, FontWeight, Rgba, InteractiveElement, IntoElement, MouseButton, ObjectFit,
     ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
+    StyledText, HighlightStyle,
     UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui::prelude::*;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::app::Daemon;
@@ -82,7 +85,7 @@ pub enum LauncherCmd {
 pub struct LauncherRow {
     pub kind: RowKind,
     pub label: String,
-    pub icon: Option<String>,
+    pub resolved_icon: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -127,6 +130,20 @@ pub struct Launcher {
     pub(crate) closing: bool,
     hovered: Option<usize>,
     hovered_chip: Option<Category>,
+    /// Last row index we posted a `Select` for, so pointer-move spam over the
+    /// same row doesn't round-trip through the daemon.
+    last_select: Option<usize>,
+    /// Whether we last set the Wayland input region for open vs closed; we only
+    /// re-issue `set_input_region` on a transition, not every animation frame.
+    last_input_open: Option<bool>,
+    /// Whether keyboard focus is currently held; `focus_search` is only called
+    /// once per open session instead of on every rendered frame.
+    focused: bool,
+    /// Caret-timer generation. Bumped on close/reopen so a tick parked in the
+    /// background executor can tell it is stale and exit: the closed daemon
+    /// must have no periodic wakeups at all.
+    blink_gen: Arc<AtomicU64>,
+    blink_running: bool,
 }
 
 impl Launcher {
@@ -136,21 +153,8 @@ impl Launcher {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let blink = cx.entity();
-        cx.spawn(async move |_, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(530))
-                    .await;
-                let _ = blink.update(cx, |this, cx| {
-                    if this.view.open {
-                        this.caret_on = !this.caret_on;
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
+        // No caret timer here: it is spawned on open (ensure_blink) and torn
+        // down on close so the idle daemon never wakes periodically.
         Self {
             shell,
             view: LauncherView::closed(theme),
@@ -163,20 +167,67 @@ impl Launcher {
             closing: false,
             hovered: None,
             hovered_chip: None,
+            last_select: None,
+            last_input_open: None,
+            focused: false,
+            blink_gen: Arc::new(AtomicU64::new(0)),
+            blink_running: false,
         }
     }
 
-    pub fn apply_view(&mut self, view: LauncherView) {
+    pub fn apply_view(&mut self, view: LauncherView, cx: &mut Context<Self>) {
         if self.view.query != view.query || self.view.category != view.category {
             self.scrolled_to = None;
         }
         self.view = view;
+        self.last_select = Some(self.view.selected);
         if self.view.open {
             self.closing = false;
+            self.ensure_blink(cx);
         } else {
             self.cursor = 0;
             self.caret_on = true;
+            self.stop_blink();
         }
+    }
+
+    /// Run the caret timer only while the overlay is open. The task parks in
+    /// a 530ms timer; a generation counter invalidates any tick that fires
+    /// after close or reopen, so exactly one ticker exists while open and
+    /// zero while closed.
+    fn ensure_blink(&mut self, cx: &mut Context<Self>) {
+        if self.blink_running {
+            return;
+        }
+        self.blink_running = true;
+        let gen_id = self.blink_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let flag = self.blink_gen.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
+                if flag.load(Ordering::Relaxed) != gen_id {
+                    break;
+                }
+                let Ok(()) = this.update(cx, |this, cx| {
+                    if this.view.open && flag.load(Ordering::Relaxed) == gen_id {
+                        this.caret_on = !this.caret_on;
+                        cx.notify();
+                    } else {
+                        this.stop_blink();
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
+    }
+
+    fn stop_blink(&mut self) {
+        self.blink_running = false;
+        self.blink_gen.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn arm_open_timer(&mut self, started: Instant) {
@@ -300,6 +351,19 @@ fn row_category(r: &LauncherRow) -> Category {
     }
 }
 
+fn push_capped(
+    out: &mut Vec<LauncherRow>,
+    cap: Option<usize>,
+    rows: impl IntoIterator<Item = LauncherRow>,
+) {
+    for r in rows {
+        if cap.is_some_and(|c| out.len() >= c) {
+            return;
+        }
+        out.push(r);
+    }
+}
+
 pub fn filter_rows(
     query: &str,
     apps: &[DesktopApp],
@@ -311,7 +375,8 @@ pub fn filter_rows(
     if category == Category::Commands {
         return Vec::new();
     }
-    let q = query.trim().to_lowercase();
+    // Score folds case internally; keep the raw trimmed query.
+    let q = query.trim();
     let empty = q.is_empty();
     let apps_only = category == Category::Apps;
     let files_only = category == Category::Files;
@@ -321,39 +386,35 @@ pub fn filter_rows(
         Some(ROW_CAP)
     };
 
-    let mut win_rows: Vec<(i64, LauncherRow)> = if files_only || apps_only {
+    // Score indices/refs first and only materialize LauncherRows (with their
+    // String/Vec clones) for rows that survive sorting and the cap.
+    let mut win_scored: Vec<(i64, usize)> = if files_only || apps_only {
         Vec::new()
     } else {
         windows
             .iter()
-            .filter_map(|(id, title, app_id)| {
+            .enumerate()
+            .filter_map(|(ix, (_, title, app_id))| {
                 let s = if empty {
                     1
                 } else {
-                    crate::matchq::score(title, &q)
-                        .max(app_id.as_deref().and_then(|a| crate::matchq::score(a, &q)))?
+                    crate::matchq::score(title, q)
+                        .max(app_id.as_deref().and_then(|a| crate::matchq::score(a, q)))?
                 };
-                Some((
-                    s,
-                    LauncherRow {
-                        kind: RowKind::Window { id: *id },
-                        label: title.clone(),
-                        icon: app_id.clone(),
-                    },
-                ))
+                Some((s, ix))
             })
             .collect()
     };
     if !empty {
-        win_rows.sort_by(|a, b| b.0.cmp(&a.0));
+        win_scored.sort_by(|a, b| b.0.cmp(&a.0));
     }
 
-    let visible_app_ids: Vec<String> = win_rows
+    let visible_app_ids: Vec<String> = win_scored
         .iter()
-        .filter_map(|(_, r)| r.icon.as_deref().map(|s| s.to_lowercase()))
+        .filter_map(|&(_, ix)| windows[ix].2.as_deref().map(|s| s.to_lowercase()))
         .collect();
 
-    let mut app_rows: Vec<(i64, LauncherRow)> = if files_only {
+    let mut app_scored: Vec<(i64, &DesktopApp)> = if files_only {
         Vec::new()
     } else {
         apps.iter()
@@ -377,95 +438,107 @@ pub fn filter_rows(
                 let s = if empty {
                     1
                 } else {
-                    let by_name = crate::matchq::score(&app.name, &q);
+                    let by_name = crate::matchq::score(&app.name, q);
                     let by_id = app
                         .app_id
                         .as_deref()
-                        .and_then(|a| crate::matchq::score(a, &q));
+                        .and_then(|a| crate::matchq::score(a, q));
                     match (by_name, by_id) {
                         (Some(a), Some(b)) => Some(a.max(b)),
                         (a, b) => a.or(b),
                     }?
                 };
-                Some((
-                    s,
-                    LauncherRow {
-                        kind: RowKind::App {
-                            exec: app.exec.clone(),
-                        },
-                        label: app.name.clone(),
-                        icon: app.icon.clone(),
-                    },
-                ))
+                Some((s, app))
             })
             .collect()
     };
     if empty {
-        app_rows.sort_by(|a, b| {
-            let ra = recents.iter().position(|n| *n == a.1.label);
-            let rb = recents.iter().position(|n| *n == b.1.label);
+        app_scored.sort_by(|a, b| {
+            let ra = recents.iter().position(|n| *n == a.1.name);
+            let rb = recents.iter().position(|n| *n == b.1.name);
             ra.unwrap_or(usize::MAX)
                 .cmp(&rb.unwrap_or(usize::MAX))
-                .then_with(|| a.1.label.cmp(&b.1.label))
+                .then_with(|| a.1.name.cmp(&b.1.name))
         });
     } else {
-        app_rows.sort_by(|a, b| b.0.cmp(&a.0));
+        app_scored.sort_by(|a, b| b.0.cmp(&a.0));
     }
 
-    let file_rows = |take: usize| {
-        files
-            .iter()
-            .take(take)
-            .map(|hit| LauncherRow {
-                kind: RowKind::File {
-                    path: hit.path.clone(),
-                },
-                label: hit
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| hit.path.display().to_string()),
-                icon: None,
-            })
-            .collect::<Vec<_>>()
+    let win_row = |ix: usize| -> LauncherRow {
+        let (id, title, app_id) = &windows[ix];
+        LauncherRow {
+            kind: RowKind::Window { id: *id },
+            label: title.clone(),
+            resolved_icon: app_id.as_deref().and_then(crate::icons::resolve),
+        }
     };
-
-    let mut out: Vec<LauncherRow> = Vec::new();
-    let push = |out: &mut Vec<LauncherRow>, rows: Vec<LauncherRow>| {
-        for r in rows {
-            if ranked_cap.is_some_and(|c| out.len() >= c) {
-                return;
-            }
-            out.push(r);
+    let app_row = |app: &DesktopApp| -> LauncherRow {
+        LauncherRow {
+            kind: RowKind::App {
+                exec: app.exec.clone(),
+            },
+            label: app.name.clone(),
+            resolved_icon: app.icon.as_deref().and_then(crate::icons::resolve),
+        }
+    };
+    let file_row = |hit: &FileHit| -> LauncherRow {
+        LauncherRow {
+            kind: RowKind::File {
+                path: hit.path.clone(),
+            },
+            label: hit
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| hit.path.display().to_string()),
+            resolved_icon: None,
         }
     };
 
+    let mut out: Vec<LauncherRow> = Vec::new();
     if files_only {
         if !empty {
-            push(&mut out, file_rows(files.len()));
+            push_capped(&mut out, ranked_cap, files.iter().map(file_row));
         }
         return out;
     }
     if apps_only {
-        push(
+        push_capped(
             &mut out,
-            app_rows.into_iter().map(|(_, r)| r).collect(),
+            ranked_cap,
+            app_scored.iter().map(|&(_, a)| app_row(a)),
         );
         return out;
     }
 
-    if crate::files::is_path_shaped(&q) {
+    if crate::files::is_path_shaped(q) {
         // Explicit path navigation: files first, then apps, then windows.
-        push(&mut out, file_rows(FILE_ROWS));
-        push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
-        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
+        push_capped(
+            &mut out,
+            ranked_cap,
+            files.iter().take(FILE_ROWS).map(file_row),
+        );
+        push_capped(
+            &mut out,
+            ranked_cap,
+            app_scored.iter().map(|&(_, a)| app_row(a)),
+        );
+        push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
     } else {
         // Apps are the primary action: rank above files and windows.
-        push(&mut out, app_rows.into_iter().map(|(_, r)| r).collect());
+        push_capped(
+            &mut out,
+            ranked_cap,
+            app_scored.iter().map(|&(_, a)| app_row(a)),
+        );
         if !empty {
-            push(&mut out, file_rows(FILE_ROWS));
+            push_capped(
+                &mut out,
+                ranked_cap,
+                files.iter().take(FILE_ROWS).map(file_row),
+            );
         }
-        push(&mut out, win_rows.into_iter().map(|(_, r)| r).collect());
+        push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
     }
     out
 }
@@ -487,7 +560,7 @@ fn icon_letter(app_id: Option<&str>) -> String {
         .unwrap_or_else(|| "#".into())
 }
 
-fn icon_slot(row: &LauncherRow, selected: bool, t: Theme, size: f32, radius: f32) -> gpui::Div {
+fn icon_slot(row: &LauncherRow, selected: bool, t: &Theme, size: f32, radius: f32) -> gpui::Div {
     let tile = div()
         .size(px(size))
         .flex_none()
@@ -505,9 +578,9 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: Theme, size: f32, radius: f32
             if selected { t.fg() } else { t.muted() },
             size * 0.58,
         )),
-        _ => match crate::icons::resolve(row.icon.as_deref().unwrap_or("")) {
+        _ => match &row.resolved_icon {
             Some(path) => tile.overflow_hidden().child(
-                img(path)
+                img(path.clone())
                     .size(px(size))
                     .object_fit(ObjectFit::Contain)
                     .flex_none(),
@@ -520,36 +593,34 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: Theme, size: f32, radius: f32
     }
 }
 
-fn highlighted_name(label: &str, query: &str, selected: bool, t: Theme, size: f32) -> gpui::Div {
-    let base = if selected { t.fg() } else { t.muted() };
+fn highlighted_name(label: &str, query: &str, t: &Theme) -> StyledText {
     let q: Vec<char> = query.trim().to_lowercase().chars().collect();
-    if q.is_empty() {
-        return div()
-            .text_size(px(size))
-            .font_weight(FontWeight::BOLD)
-            .text_color(base)
-            .truncate()
-            .child(label.to_string());
-    }
-    let mut row = div().flex().flex_row().min_w_0().overflow_hidden();
+    let accent = HighlightStyle {
+        color: Some(t.accent().into()),
+        ..Default::default()
+    };
+    let mut ranges: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut qi = 0usize;
+    let mut start = 0usize;
     for c in label.chars() {
+        let len = c.len_utf8();
         let hit = qi < q.len() && c.to_lowercase().eq(q[qi].to_lowercase());
         if hit {
+            let end = start + len;
+            if let Some(last) = ranges.last_mut() {
+                if last.0.end == start {
+                    last.0 = last.0.start..end;
+                } else {
+                    ranges.push((start..end, accent));
+                }
+            } else {
+                ranges.push((start..end, accent));
+            }
             qi += 1;
         }
-        let mut span = div()
-            .text_size(px(size))
-            .font_weight(FontWeight::BOLD)
-            .child(c.to_string());
-        if hit {
-            span = span.text_color(t.accent());
-        } else {
-            span = span.text_color(base);
-        }
-        row = row.child(span);
+        start += len;
     }
-    row
+    StyledText::new(label.to_string()).with_highlights(ranges)
 }
 
 /// Secondary line shown under a list item: the file path, the launch command,
@@ -581,8 +652,7 @@ impl Launcher {
         self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
     }
 
-    fn tile(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.view.theme.clone();
+    fn tile(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let this = cx.entity();
         let Some(row) = self.view.rows.get(i) else {
             return div()
@@ -621,7 +691,10 @@ impl Launcher {
             })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                post(this, cx, LauncherCmd::Select { index: i });
+                if this.last_select != Some(i) {
+                    this.last_select = Some(i);
+                    post(this, cx, LauncherCmd::Select { index: i });
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -629,7 +702,7 @@ impl Launcher {
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
-            .child(icon_slot(row, selected, t.clone(), ICON_GRID, 12.0))
+            .child(icon_slot(row, selected, t, ICON_GRID, 12.0))
             .child(
                 div()
                     .w_full()
@@ -648,8 +721,7 @@ impl Launcher {
             .into_any_element()
     }
 
-    fn list_row(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.view.theme.clone();
+    fn list_row(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let this = cx.entity();
         let q = &self.view.query;
         let Some(row) = self.view.rows.get(i) else {
@@ -683,7 +755,10 @@ impl Launcher {
             })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                post(this, cx, LauncherCmd::Select { index: i });
+                if this.last_select != Some(i) {
+                    this.last_select = Some(i);
+                    post(this, cx, LauncherCmd::Select { index: i });
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -691,7 +766,7 @@ impl Launcher {
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
-            .child(icon_slot(row, selected, t.clone(), ICON_LIST, 8.0))
+            .child(icon_slot(row, selected, t, ICON_LIST, 8.0))
             .child(
                 div()
                     .flex_1()
@@ -699,7 +774,14 @@ impl Launcher {
                     .flex_col()
                     .gap(px(2.))
                     .overflow_hidden()
-                    .child(highlighted_name(&row.label, q, selected, t.clone(), 16.0))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if selected { t.fg() } else { t.muted() })
+                            .truncate()
+                            .child(highlighted_name(&row.label, q, t)),
+                    )
                     .child(
                         div()
                             .text_size(px(12.))
@@ -720,13 +802,24 @@ impl Launcher {
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animating = self.view.open || self.closing;
+        let open = self.view.open;
+        // set_input_region / focus only change on open-close transitions;
+        // skip the no-op churn on every animation frame.
+        if self.last_input_open != Some(open) {
+            window.set_input_region(if open { None } else { Some(&[]) });
+            self.last_input_open = Some(open);
+        }
         if !animating {
-            window.set_input_region(Some(&[]));
+            self.focused = false;
             return div().id("launcher-root").w_full().h_full();
         }
-        window.set_input_region(if self.view.open { None } else { Some(&[]) });
-        let target = if self.view.open { 1.0f32 } else { 0.0 };
-        self.focus_search(window, cx);
+        if open && !self.focused {
+            self.focus_search(window, cx);
+            self.focused = true;
+        } else if !open {
+            self.focused = false;
+        }
+        let target = if open { 1.0f32 } else { 0.0 };
 
         if let Some(t0) = self.open_started.take() {
             let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -783,6 +876,7 @@ impl Render for Launcher {
             );
         } else if browsing_grid {
             let n = self.view.rows.len().div_ceil(GRID_COLS);
+            let t_grid = t.clone();
             results = results.child(
                 uniform_list(
                     "launch-grid",
@@ -798,7 +892,7 @@ impl Render for Launcher {
                                     .w_full();
                                 for col in 0..GRID_COLS {
                                     let i = row_i * GRID_COLS + col;
-                                    row = row.child(this.tile(i, cx));
+                                    row = row.child(this.tile(i, &t_grid, cx));
                                 }
                                 row
                             })
@@ -811,12 +905,13 @@ impl Render for Launcher {
             );
         } else {
             let n = self.view.rows.len();
+            let t_list = t.clone();
             results = results.child(
                 uniform_list(
                     "launch-list",
                     n,
-                    cx.processor(|this, range: Range<usize>, _, cx| {
-                        range.map(|i| this.list_row(i, cx)).collect()
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        range.map(|i| this.list_row(i, &t_list, cx)).collect()
                     }),
                 )
                 .track_scroll(&self.scroll)

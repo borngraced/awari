@@ -14,8 +14,6 @@ pub struct IpcServer {
 
 #[derive(Default)]
 pub struct Stats {
-    pub idle_ms_since_commit: u64,
-    pub niri_event_lag_ms: u64,
     pub launcher_open_to_first_commit_ms: Option<u64>,
 }
 
@@ -133,8 +131,6 @@ fn handle_client(
         ClientRequest::DumpStats => {
             let s = stats.lock().expect("stats");
             ClientReply::Stats {
-                idle_ms_since_commit: s.idle_ms_since_commit,
-                niri_event_lag_ms: s.niri_event_lag_ms,
                 launcher_open_to_first_commit_ms: s.launcher_open_to_first_commit_ms,
                 rss_bytes: rss_bytes(),
             }

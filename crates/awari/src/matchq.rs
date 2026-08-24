@@ -6,27 +6,37 @@
 /// Subsequence is the floor; contiguity and word-boundary bonuses make
 /// prefix matches beat scattered ones so `firfox` still hits Firefox but
 /// ranks below `fire`.
+/// Primary lowercase fold of one char (first char of the full Unicode
+/// fold). Allocation-free; multi-char expansions collapse to their head,
+/// which is fine for ranking app/window labels.
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
 pub fn score(haystack: &str, needle: &str) -> Option<i64> {
     let needle = needle.trim();
     if needle.is_empty() {
         return Some(0);
     }
-    let hay: Vec<char> = haystack.to_lowercase().chars().collect();
-    let ned_str = needle.to_lowercase();
-    let mut ned = ned_str.chars().peekable();
+    // No lowercase Strings, no Vec<char>: fold per char as we walk. Called
+    // for every app/window on every keystroke, so it must not allocate.
+    let mut ned = needle.chars().map(fold);
+    let mut want = ned.next();
 
     let mut total = 0i64;
     let mut prev_hit: Option<usize> = None;
+    let mut prev_hay: Option<char> = None;
 
-    for (i, c) in hay.iter().enumerate() {
-        let Some(&want) = ned.peek() else { break };
-        if *c != want {
+    for (i, c) in haystack.chars().enumerate() {
+        let Some(w) = want else { break };
+        if fold(c) != w {
+            prev_hay = Some(c);
             continue;
         }
-        ned.next();
+        want = ned.next();
         total += 1;
         // Boundary: start of string or after a non-alphanumeric char.
-        let boundary = i == 0 || !hay[i - 1].is_alphanumeric();
+        let boundary = !prev_hay.is_some_and(|p| p.is_alphanumeric());
         total += if boundary { 10 } else { 0 };
         // Contiguity: adjacent to the previous matched char.
         match prev_hit {
@@ -35,9 +45,10 @@ pub fn score(haystack: &str, needle: &str) -> Option<i64> {
             None => {}
         }
         prev_hit = Some(i);
+        prev_hay = Some(c);
     }
 
-    if ned.peek().is_some() {
+    if want.is_some() {
         return None;
     }
     Some(total)

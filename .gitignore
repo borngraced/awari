@@ -4,3 +4,8 @@
 .idea/
 
 .third_party/
+
+# Profiling artifacts
+perf.data
+flamegraph.svg
+heaptrack.*.zst

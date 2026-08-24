@@ -2,22 +2,44 @@
 //! configured root. One thread owns all pickers; the daemon sends queries,
 //! results come back tagged with a sequence number so stale answers drop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread;
+use std::time::Duration;
 
 use regex::Regex;
 
 use fff_search::{
-    FilePicker, FilePickerOptions, FFFMode, FuzzySearchOptions, PaginationArgs, QueryParser,
-    SharedFilePicker, SharedFrecency,
+    ContentCacheBudget, FilePicker, FilePickerOptions, FFFMode, FuzzySearchOptions, PaginationArgs,
+    QueryParser, SharedFilePicker, SharedFrecency,
 };
 
 /// Hits asked of each FFF picker. High enough to browse; the overlay
 /// virtualizes, so this is a search-cost cap, not a paint cap.
 const PER_ROOT_ROWS: usize = 200;
+
+/// Cap on the number of distinct path-shaped directories we keep an in-memory
+/// index for. Path navigation (`~/dev/`) builds a `SharedFilePicker` per
+/// directory; without a cap this map grows for every directory the user ever
+/// types, leaking memory for the life of the daemon. Each picker recursively
+/// indexes its whole subtree, so keep this small.
+const TRANSIENT_DIR_CAP: usize = 8;
+
+/// Max cached query results retained per `FilePicker`. Bounding this caps the
+/// per-picker result cache so repeated searches don't grow memory without end.
+const FILE_CACHE_BUDGET: usize = 2048;
+
+/// Content-cache byte cap applied to the persistent root indexes. Without a
+/// cap fff auto-sizes this from the scanned file count, which can be large for
+/// user dirs; bounding it keeps the baseline memory predictable.
+const ROOT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Typing-burst debounce before a search runs. Results are async rows, so
+/// the added latency hides under continued typing; a keystroke burst costs
+/// one search instead of one per key.
+const QUERY_DEBOUNCE: Duration = Duration::from_millis(20);
 
 /// Behavior flags for the file source.
 pub struct FilesOptions {
@@ -138,7 +160,7 @@ fn picker_loop(
                 enable_mmap_cache: false,
                 enable_content_indexing: false,
                 follow_symlinks: false,
-                cache_budget: None,
+                cache_budget: ContentCacheBudget::from_overrides(0, ROOT_CACHE_BYTES, 0),
             },
         );
         match res {
@@ -150,12 +172,16 @@ fn picker_loop(
 
     let parser = QueryParser::default();
     let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
+    let mut transient_order: VecDeque<PathBuf> = VecDeque::with_capacity(TRANSIENT_DIR_CAP);
     while let Ok(first) = qrx.recv() {
+        // Debounce: let a typing burst land, then answer only the newest
+        // queued query (coalesce drains everything that arrived).
+        thread::sleep(QUERY_DEBOUNCE);
         let (seq, raw) = coalesce(&qrx, first);
         if raw.trim().is_empty() {
             continue;
         }
-        let hits = search_all(&pickers, &mut transient, &parser, &raw, &opts);
+        let hits = search_all(&pickers, &mut transient, &mut transient_order, &parser, &raw, &opts);
         if rtx.send((seq, hits)).is_err() {
             return;
         }
@@ -237,6 +263,7 @@ fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> (u64, String
 fn search_all(
     pickers: &[SharedFilePicker],
     transient: &mut HashMap<PathBuf, SharedFilePicker>,
+    transient_order: &mut VecDeque<PathBuf>,
     parser: &QueryParser<fff_search::FileSearchConfig>,
     raw: &str,
     opts: &FilesOptions,
@@ -255,6 +282,15 @@ fn search_all(
     // directly so path navigation reaches places outside the configured roots.
     // Only the trailing filename segment is fuzzy-matched, not the dir prefix.
     if let Some(dir) = path_query_dir(raw) {
+        // LRU eviction: keep at most TRANSIENT_DIR_CAP per-directory indexes.
+        if let Some(pos) = transient_order.iter().position(|p| *p == dir) {
+            transient_order.remove(pos);
+        } else if transient_order.len() >= TRANSIENT_DIR_CAP {
+            if let Some(old) = transient_order.pop_front() {
+                transient.remove(&old);
+            }
+        }
+        transient_order.push_back(dir.clone());
         let shared = transient.entry(dir.clone()).or_insert_with(|| {
             let shared = SharedFilePicker::default();
             let frecency = SharedFrecency::default();
@@ -270,7 +306,7 @@ fn search_all(
                     enable_mmap_cache: false,
                     enable_content_indexing: false,
                     follow_symlinks: false,
-                    cache_budget: None,
+                    cache_budget: ContentCacheBudget::from_overrides(FILE_CACHE_BUDGET, 0, 0),
                 },
             );
             shared
@@ -331,13 +367,21 @@ fn search_one(
         return Vec::new();
     };
     let query = parser.parse(fff_query);
+    // Lockfile/regex filters run after FFF's pagination, so overscan the
+    // page when they will shrink it; otherwise a heavily-filtered query
+    // delivers fewer rows than exist past the limit.
+    let limit = if regex.is_some() || !index_lockfiles {
+        PER_ROOT_ROWS * 4
+    } else {
+        PER_ROOT_ROWS
+    };
     let results = p.fuzzy_search(
         &query,
         None,
         FuzzySearchOptions {
             pagination: PaginationArgs {
                 offset: 0,
-                limit: PER_ROOT_ROWS,
+                limit,
             },
             ..Default::default()
         },
@@ -360,6 +404,7 @@ fn search_one(
             }
             true
         })
+        .take(PER_ROOT_ROWS)
         .collect()
 }
 

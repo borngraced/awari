@@ -115,7 +115,8 @@ if grep -qF "$BLOCK_BEGIN" "$MANIFEST"; then
     # Replace everything between the markers.
     awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" -v repl="$(cat "$ROOT/.gpui-patch-block.tmp")" '
         $0 == begin {inblock=1; print repl; next}
-        $0 == end {inblock=0; print; next}
+        inblock && $0 == end {inblock=0; print; next}
+        !inblock && $0 == end {next}
         !inblock {print}
     ' "$MANIFEST" > "$MANIFEST.tmp"
     mv "$MANIFEST.tmp" "$MANIFEST"
