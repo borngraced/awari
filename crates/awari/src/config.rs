@@ -179,22 +179,40 @@ fn parse_theme_body(body: &str, t: &mut Theme) {
     while i + 1 < tokens.len() {
         let key = tokens[i];
         let val = tokens[i + 1].trim_matches('"');
-        if let Some(c) = theme::parse_hex(val) {
-            match key {
-                "accent" => t.accent = c,
-                "accent-dim" | "accent_dim" | "select" => t.accent_dim = c,
-                "bg" => t.bg = c,
-                "panel" => t.panel = c,
-                "raise" | "hover" | "surface" => t.raise = c,
-                "border" => t.border = c,
-                "text" | "fg" => t.text = c,
-                "text-dim" | "text_dim" | "muted" => t.text_dim = c,
-                "text-faint" | "text_faint" | "faint" => t.text_faint = c,
-                "scrim" => t.scrim = c,
-                _ => {}
+        match key {
+            "font" => {
+                if !val.is_empty() && val != "default" {
+                    t.font = Some(val.to_string());
+                }
+                i += 2;
+            }
+            "font-size" | "font_size" => {
+                if let Ok(n) = val.parse::<u32>() {
+                    if (8..=64).contains(&n) {
+                        t.font_size = Some(n);
+                    }
+                }
+                i += 2;
+            }
+            _ => {
+                if let Some(c) = theme::parse_hex(val) {
+                    match key {
+                        "accent" => t.accent = c,
+                        "accent-dim" | "accent_dim" | "select" => t.accent_dim = c,
+                        "bg" => t.bg = c,
+                        "panel" => t.panel = c,
+                        "raise" | "hover" | "surface" => t.raise = c,
+                        "border" => t.border = c,
+                        "text" | "fg" => t.text = c,
+                        "text-dim" | "text_dim" | "muted" => t.text_dim = c,
+                        "text-faint" | "text_faint" | "faint" => t.text_faint = c,
+                        "scrim" => t.scrim = c,
+                        _ => {}
+                    }
+                }
+                i += 2;
             }
         }
-        i += 2;
     }
 }
 
@@ -314,6 +332,17 @@ mod tests {
         assert_eq!(big.motion.duration_ms, 1000);
         let bad = parse(r#"motion { duration-ms "abc" }"#);
         assert_eq!(bad.motion.duration_ms, 140);
+    }
+
+    #[test]
+    fn theme_font_tokens() {
+        let c = parse("theme { font \"Inter\" font-size 14 }");
+        assert_eq!(c.theme.font.as_deref(), Some("Inter"));
+        assert_eq!(c.theme.font_size, Some(14));
+        // "default" clears back to the system font; out-of-range sizes drop.
+        let d = parse("theme { font \"default\" font-size 999 }");
+        assert_eq!(d.theme.font, None);
+        assert_eq!(d.theme.font_size, None);
     }
 
     #[test]

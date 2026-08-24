@@ -227,7 +227,7 @@ impl Daemon {
             query: self.launcher_query.clone(),
             selected: self.launcher_selected,
             rows,
-            theme: self.cfg.theme,
+            theme: self.cfg.theme.clone(),
             category: self.launcher_category,
         };
         let generation = self.launcher_gen;
@@ -251,7 +251,7 @@ impl Daemon {
             return;
         }
         let shell = cx.entity().downgrade();
-        let theme = self.cfg.theme;
+        let theme = self.cfg.theme.clone();
         let bounds = Bounds {
             origin: point(px(0.), px(0.)),
             size: size(px(1920.), px(launcher::LAUNCHER_H)),
@@ -351,7 +351,7 @@ impl Daemon {
         let Some(h) = self.launcher.clone() else {
             return;
         };
-        let theme = self.cfg.theme;
+        let theme = self.cfg.theme.clone();
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
         cx.defer(move |cx| {

@@ -1,11 +1,12 @@
 //! Overlay finder: search, chips, list/grid, preview. Mock layout.
 
 use gpui::{
-    div, img, px, AnyElement, Animation, AnimationExt, App, AppContext, Context, Entity,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, ObjectFit,
+    div, img, px, AnyElement, AnimationExt, App, AppContext, Context, Entity, FocusHandle,
+    Focusable, FontWeight, Rgba, InteractiveElement, IntoElement, MouseButton, ObjectFit,
     ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
     Subscription, UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
+use gpui::prelude::*;
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -27,6 +28,19 @@ const GRID_COLS: usize = 4;
 const SLIDE: f32 = 22.0;
 const PANEL_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
 const SCRIM_SPRING: SpringConfig = SpringConfig::new(320.0, 34.0, 1.0);
+const ITEM_HOVER_SPRING: SpringConfig = SpringConfig::new(420.0, 34.0, 1.0);
+const CHIP_HOVER_SPRING: SpringConfig = SpringConfig::new(360.0, 30.0, 1.0);
+const SEARCH_FOCUS_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
+
+fn mix(a: &Rgba, b: &Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
 const ICON_LIST: f32 = 26.0;
 const ICON_GRID: f32 = 42.0;
 
@@ -110,6 +124,8 @@ pub struct Launcher {
     scrolled_to: Option<usize>,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
+    hovered: Option<usize>,
+    hovered_chip: Option<Category>,
     _input_sub: Subscription,
 }
 
@@ -124,7 +140,7 @@ impl Launcher {
             let mut state = InputState::new(window, cx)
                 .placeholder("search apps, files, and commands")
                 .context_menu(false);
-            state.set_editor_style(editor_style(theme));
+            state.set_editor_style(editor_style(theme.clone()));
             state
         });
         let input_ev = input.clone();
@@ -142,6 +158,8 @@ impl Launcher {
             scrolled_to: None,
             open_started: None,
             closing: false,
+            hovered: None,
+            hovered_chip: None,
             _input_sub,
         }
     }
@@ -478,7 +496,8 @@ impl Launcher {
     }
 
     fn tile(&self, i: usize, tile_w: f32, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.view.theme;
+        let t = self.view.theme.clone();
+        let this = cx.entity();
         let Some(row) = self.view.rows.get(i) else {
             return div()
                 .id(("launch-tile-empty", i))
@@ -487,6 +506,9 @@ impl Launcher {
                 .into_any_element();
         };
         let selected = i == self.view.selected;
+        let hv = if self.hovered == Some(i) { 1.0f32 } else { 0.0 };
+        let base = if selected { t.select() } else { t.ghost() };
+        let hover_col = t.hover();
         div()
             .id(("launch-tile", i))
             .flex()
@@ -499,8 +521,17 @@ impl Launcher {
             .py(px(14.))
             .px(px(6.))
             .rounded(px(10.))
-            .bg(if selected { t.select() } else { t.ghost() })
-            .hover(|s| s.bg(t.hover()))
+            .bg(base)
+            .on_hover(move |h: &bool, _window, cx: &mut App| {
+                this.update(cx, |l, cx| {
+                    if *h {
+                        l.hovered = Some(i);
+                    } else if l.hovered == Some(i) {
+                        l.hovered = None;
+                    }
+                    cx.notify();
+                });
+            })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 post(this, cx, LauncherCmd::Select { index: i });
@@ -511,7 +542,7 @@ impl Launcher {
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
-            .child(icon_slot(row, selected, t, ICON_GRID, 11.0))
+            .child(icon_slot(row, selected, t.clone(), ICON_GRID, 11.0))
             .child(
                 div()
                     .w_full()
@@ -521,16 +552,25 @@ impl Launcher {
                     .truncate()
                     .child(row.label.clone()),
             )
+            .with_spring(
+                ("launch-tile-hover", i as u64),
+                SpringAnimation::new(ITEM_HOVER_SPRING).to(hv).from(0.0),
+                move |el, v| el.bg(mix(&base, &hover_col, v)),
+            )
             .into_any_element()
     }
 
     fn list_row(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.view.theme;
+        let t = self.view.theme.clone();
+        let this = cx.entity();
         let q = &self.view.query;
         let Some(row) = self.view.rows.get(i) else {
             return div().id(("launch-row-empty", i)).into_any_element();
         };
         let selected = i == self.view.selected;
+        let hv = if self.hovered == Some(i) { 1.0f32 } else { 0.0 };
+        let base = if selected { t.select() } else { t.ghost() };
+        let hover_col = t.hover();
         div()
             .id(("launch-row", i))
             .flex()
@@ -542,8 +582,17 @@ impl Launcher {
             .px(px(10.))
             .py(px(9.))
             .rounded(px(9.))
-            .bg(if selected { t.select() } else { t.ghost() })
-            .hover(|s| s.bg(t.hover()))
+            .bg(base)
+            .on_hover(move |h: &bool, _window, cx: &mut App| {
+                this.update(cx, |l, cx| {
+                    if *h {
+                        l.hovered = Some(i);
+                    } else if l.hovered == Some(i) {
+                        l.hovered = None;
+                    }
+                    cx.notify();
+                });
+            })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 post(this, cx, LauncherCmd::Select { index: i });
@@ -554,12 +603,17 @@ impl Launcher {
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
-            .child(icon_slot(row, selected, t, ICON_LIST, 7.0))
+            .child(icon_slot(row, selected, t.clone(), ICON_LIST, 7.0))
             .child(
                 highlighted_name(&row.label, q, selected, t, 14.0)
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden(),
+            )
+            .with_spring(
+                ("launch-row-hover", i as u64),
+                SpringAnimation::new(ITEM_HOVER_SPRING).to(hv).from(0.0),
+                move |el, v| el.bg(mix(&base, &hover_col, v)),
             )
             .into_any_element()
     }
@@ -596,7 +650,7 @@ impl Render for Launcher {
         let target = if self.view.open { 1.0f32 } else { 0.0 };
         self.focus_search(window, cx);
         self.input.update(cx, |state, _| {
-            state.set_editor_style(editor_style(self.view.theme));
+            state.set_editor_style(editor_style(self.view.theme.clone()));
         });
 
         if let Some(t0) = self.open_started.take() {
@@ -604,10 +658,19 @@ impl Render for Launcher {
             post(self, cx, LauncherCmd::OpenToRender { ms });
         }
 
-        let t = self.view.theme;
+        let t = self.view.theme.clone();
+        // Font customization: a rem override scales every text_* token at
+        // once; the family refines the root div so all children inherit.
+        if let Some(size) = t.font_size {
+            window.set_rem_size(px(size as f32));
+        }
+        let font_family = t.font.clone();
         let win_w = f32::from(window.bounds().size.width);
         let panel_w = LAUNCHER_W.min(win_w * 0.92).max(280.0);
         let q_empty = self.view.query.trim().is_empty();
+        let search_v = if q_empty { 0.0f32 } else { 1.0 };
+        let panel_col = t.panel();
+        let accent_col = t.accent();
         let cat = self.view.category;
         let browsing_apps = cat == Category::Apps && q_empty;
         let show_preview = cat != Category::Apps;
@@ -743,26 +806,45 @@ impl Render for Launcher {
             .gap(px(22.))
             .px(px(20.))
             .pb(px(14.));
+        let this = cx.entity();
         for c in Category::all() {
             let active = cat == c;
             let cc = c;
+            let this = this.clone();
+            let chip_hv = if self.hovered_chip == Some(c) { 1.0f32 } else { 0.0 };
+            let base_col = if active { t.fg() } else { t.faint() };
+            let muted_col = t.muted();
             chips = chips.child(
                 div()
                     .id(("chip", c as u64))
                     .text_size(px(11.))
                     .pb(px(6.))
                     .cursor_pointer()
-                    .text_color(if active { t.fg() } else { t.faint() })
+                    .text_color(base_col)
                     .border_b(px(2.))
                     .border_color(if active { t.accent() } else { t.ghost() })
-                    .hover(|s| s.text_color(t.muted()))
+            .on_hover(move |h: &bool, _window, cx: &mut App| {
+                this.update(cx, |l, cx| {
+                    if *h {
+                        l.hovered_chip = Some(cc);
+                    } else if l.hovered_chip == Some(cc) {
+                        l.hovered_chip = None;
+                    }
+                    cx.notify();
+                });
+            })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             post(this, cx, LauncherCmd::SetCategory { category: cc });
                         }),
                     )
-                    .child(c.label().to_uppercase()),
+                    .child(c.label().to_uppercase())
+                    .with_spring(
+                        ("chip-hover", c as u64),
+                        SpringAnimation::new(CHIP_HOVER_SPRING).to(chip_hv).from(0.0),
+                        move |el, v| el.text_color(mix(&base_col, &muted_col, v)),
+                    ),
             );
         }
 
@@ -776,6 +858,7 @@ impl Render for Launcher {
             .justify_center()
             .w_full()
             .h_full()
+            .when_some(font_family, |root, family| root.font_family(family))
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 let key = ev.keystroke.key.to_ascii_lowercase();
                 if matches!(
@@ -840,7 +923,11 @@ impl Render for Launcher {
                             .px(px(20.))
                             .pt(px(18.))
                             .pb(px(14.))
-                            .child(Icon::Search.element_px(t.faint(), 20.0))
+                            .bg(t.panel())
+                            .child(Icon::Search.element_px(
+                                if q_empty { t.faint() } else { t.accent() },
+                                20.0,
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -848,6 +935,11 @@ impl Render for Launcher {
                                     .text_size(px(18.))
                                     .text_color(t.fg())
                                     .child(Input::new(&self.input)),
+                            )
+                            .with_spring(
+                                "search-row",
+                                SpringAnimation::new(SEARCH_FOCUS_SPRING).to(search_v).from(0.0),
+                                move |el, v| el.bg(mix(&panel_col, &accent_col, 0.08 * v)),
                             )
                     )
                     .child(chips)
@@ -887,8 +979,8 @@ impl Render for Launcher {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .child(keycap(t, "↑"))
-                                    .child(keycap(t, "↓"))
+                                    .child(keycap(t.clone(), "↑"))
+                                    .child(keycap(t.clone(), "↓"))
                                     .child("navigate"),
                             )
                             .child(
@@ -896,7 +988,7 @@ impl Render for Launcher {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .child(keycap(t, "↵"))
+                                    .child(keycap(t.clone(), "↵"))
                                     .child("open"),
                             )
                             .child(
@@ -904,7 +996,7 @@ impl Render for Launcher {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .child(keycap(t, "esc"))
+                                    .child(keycap(t.clone(), "esc"))
                                     .child("close"),
                             ),
                     )

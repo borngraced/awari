@@ -15,7 +15,7 @@ impl Color {
         Self(hex)
     }
 
-    pub fn to_rgba(self) -> Rgba {
+    pub fn to_rgba(&self) -> Rgba {
         let v = self.0;
         if v & 0xff == 0xff {
             rgb(v >> 8)
@@ -26,7 +26,10 @@ impl Color {
 }
 
 /// Concept tokens (`--accent`, `--panel`, …). Unknown KDL keys are ignored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `font` is a system family name resolved through fontdb (empty = GPUI's
+/// `.SystemUIFont` default); `font_size` overrides the rem size in px.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub accent: Color,
     pub accent_dim: Color,
@@ -38,6 +41,8 @@ pub struct Theme {
     pub text_dim: Color,
     pub text_faint: Color,
     pub scrim: Color,
+    pub font: Option<String>,
+    pub font_size: Option<u32>,
 }
 
 impl Default for Theme {
@@ -53,46 +58,48 @@ impl Default for Theme {
             text_dim: Color::rgb(0x8b_89_94),
             text_faint: Color::rgb(0x57_55_5f),
             scrim: Color::rgba(0x0b_0b_0c_b3),
+            font: None,
+            font_size: None,
         }
     }
 }
 
 impl Theme {
-    pub fn accent(self) -> Rgba {
+    pub fn accent(&self) -> Rgba {
         self.accent.to_rgba()
     }
-    pub fn select(self) -> Rgba {
+    pub fn select(&self) -> Rgba {
         self.accent_dim.to_rgba()
     }
     #[allow(dead_code)]
-    pub fn bg(self) -> Rgba {
+    pub fn bg(&self) -> Rgba {
         self.bg.to_rgba()
     }
-    pub fn panel(self) -> Rgba {
+    pub fn panel(&self) -> Rgba {
         self.panel.to_rgba()
     }
-    pub fn hover(self) -> Rgba {
+    pub fn hover(&self) -> Rgba {
         self.raise.to_rgba()
     }
-    pub fn surface(self) -> Rgba {
+    pub fn surface(&self) -> Rgba {
         self.raise.to_rgba()
     }
-    pub fn border(self) -> Rgba {
+    pub fn border(&self) -> Rgba {
         self.border.to_rgba()
     }
-    pub fn fg(self) -> Rgba {
+    pub fn fg(&self) -> Rgba {
         self.text.to_rgba()
     }
-    pub fn muted(self) -> Rgba {
+    pub fn muted(&self) -> Rgba {
         self.text_dim.to_rgba()
     }
-    pub fn faint(self) -> Rgba {
+    pub fn faint(&self) -> Rgba {
         self.text_faint.to_rgba()
     }
-    pub fn scrim(self) -> Rgba {
+    pub fn scrim(&self) -> Rgba {
         self.scrim.to_rgba()
     }
-    pub fn ghost(self) -> Rgba {
+    pub fn ghost(&self) -> Rgba {
         rgba(0x00_00_00_00)
     }
 }
