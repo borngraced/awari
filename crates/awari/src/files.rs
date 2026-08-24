@@ -489,7 +489,7 @@ pub fn reveal(path: &Path) {
 /// Resolve the user's preferred terminal emulator: `$TERMINAL`, then probing
 /// `$PATH` directly (no `which` fork) so this is safe to call on the UI
 /// thread. The result is cached for the process lifetime.
-fn resolve_terminal() -> Option<String> {
+pub(crate) fn resolve_terminal() -> Option<String> {
     static CACHED: OnceLock<Option<String>> = OnceLock::new();
     CACHED
         .get_or_init(|| {

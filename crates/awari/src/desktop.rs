@@ -19,7 +19,6 @@ pub struct DesktopApp {
 pub enum ExecError {
     Empty,
     UnclosedQuote,
-    MultiFileCode,
 }
 
 /// Parse `Exec=` per the Desktop Entry Spec. No shell.
@@ -29,14 +28,13 @@ pub fn parse_exec(exec: &str, name: &str, desktop_path: &str, icon: Option<&str>
     if exec.is_empty() {
         return Err(ExecError::Empty);
     }
-    if exec.contains("%F") || exec.contains("%U") {
-        return Err(ExecError::MultiFileCode);
-    }
 
     let tokens = split_exec(exec)?;
     let mut out = Vec::new();
     for tok in tokens {
-        if tok == "%f" || tok == "%u" || tok == "%d" || tok == "%D" || tok == "%n" || tok == "%N" || tok == "%v" || tok == "%m" {
+        if tok == "%f" || tok == "%u" || tok == "%F" || tok == "%U" || tok == "%d"
+            || tok == "%D" || tok == "%n" || tok == "%N" || tok == "%v" || tok == "%m"
+        {
             continue;
         }
         if tok == "%c" {
@@ -172,7 +170,9 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
     let path_str = path.to_string_lossy();
     let mut argv = parse_exec(&exec, &name, &path_str, icon.as_deref()).ok()?;
     if terminal {
-        let term = std::env::var("TERMINAL").ok().filter(|s| !s.is_empty())?;
+        let Some(term) = crate::files::resolve_terminal() else {
+            return None;
+        };
         let mut wrapped = vec![term, "-e".into()];
         wrapped.append(&mut argv);
         argv = wrapped;
@@ -260,14 +260,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_multi_file_codes() {
+    fn strips_multi_file_codes() {
         assert_eq!(
-            parse_exec("foo %F", "Foo", "/x.desktop", None),
-            Err(ExecError::MultiFileCode)
+            parse_exec("foo %F", "Foo", "/x.desktop", None).unwrap(),
+            vec!["foo"]
         );
         assert_eq!(
-            parse_exec("foo %U", "Foo", "/x.desktop", None),
-            Err(ExecError::MultiFileCode)
+            parse_exec("foo %U", "Foo", "/x.desktop", None).unwrap(),
+            vec!["foo"]
+        );
+        assert_eq!(
+            parse_exec("foo %f %F", "Foo", "/x.desktop", None).unwrap(),
+            vec!["foo"]
+        );
+    }
+
+    #[test]
+    fn terminal_true_wraps_exec_with_resolved_terminal() {
+        unsafe { std::env::set_var("TERMINAL", "xterm") };
+        let entry = "[Desktop Entry]\nType=Application\nName=Top\nExec=top\nTerminal=true\n";
+        let app = parse_desktop_entry(entry, std::path::Path::new("/x.desktop"));
+        assert_eq!(
+            app.map(|a| a.exec),
+            Some(vec![
+                "xterm".to_string(),
+                "-e".to_string(),
+                "top".to_string()
+            ])
         );
     }
 
