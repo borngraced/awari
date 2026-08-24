@@ -46,21 +46,9 @@ pub struct Theme {
 }
 
 impl Default for Theme {
+    /// Shipped default: Gruvbox (dark).
     fn default() -> Self {
-        Self {
-            accent: Color::rgb(0x8b_7b_f0),
-            accent_dim: Color::rgba(0x8b_7b_f0_24),
-            bg: Color::rgb(0x0b_0b_0c),
-            panel: Color::rgb(0x14_14_16_u32),
-            raise: Color::rgba(0xff_ff_ff_0b),
-            border: Color::rgba(0xff_ff_ff_12),
-            text: Color::rgb(0xec_ea_f0),
-            text_dim: Color::rgb(0x8b_89_94),
-            text_faint: Color::rgb(0x57_55_5f),
-            scrim: Color::rgba(0x0b_0b_0c_b3),
-            font: None,
-            font_size: None,
-        }
+        Self::gruvbox()
     }
 }
 
@@ -105,6 +93,24 @@ impl Theme {
 }
 
 impl Theme {
+    /// Original concept palette (purple accent on near-black). Select via `theme { name "classic" }`.
+    pub fn classic() -> Self {
+        Self {
+            accent: Color::rgb(0x8b_7b_f0),
+            accent_dim: Color::rgba(0x8b_7b_f0_24),
+            bg: Color::rgb(0x0b_0b_0c),
+            panel: Color::rgb(0x14_14_16_u32),
+            raise: Color::rgba(0xff_ff_ff_0b),
+            border: Color::rgba(0xff_ff_ff_12),
+            text: Color::rgb(0xec_ea_f0),
+            text_dim: Color::rgb(0x8b_89_94),
+            text_faint: Color::rgb(0x57_55_5f),
+            scrim: Color::rgba(0x0b_0b_0c_b3),
+            font: None,
+            font_size: None,
+        }
+    }
+
     /// Gruvbox (dark) palette. Any token can still be overridden via `theme { … }` in config.
     pub fn gruvbox() -> Self {
         Self {
@@ -146,6 +152,7 @@ impl Theme {
         match name.to_ascii_lowercase().as_str() {
             "gruvbox" => Some(Self::gruvbox()),
             "gruvbox-light" | "gruvbox_light" => Some(Self::gruvbox_light()),
+            "classic" | "default" => Some(Self::classic()),
             _ => None,
         }
     }
