@@ -4,9 +4,11 @@
 
 # Àwárí
 
-Àwárí is a launcher for Wayland. Hit Super, type, and you get a ranked list of
-the windows, apps, and files you're after. The overlay stays resident, so the
-result lands on the next frame instead of after some program boots.
+Àwárí is a launcher for Wayland. Hit Super, type, and get a ranked list of the
+windows, apps, and files you're after, matched by
+[fff-search](https://github.com/dmtrKovalenko/fff), an in-process,
+frecency-ranked index, not a subprocess spawned per keystroke. Àwárí stays
+resident, so the result lands on the next frame, not after some program boots.
 
 The name is Yoruba for "a finding, a discovery".
 
