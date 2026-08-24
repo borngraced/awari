@@ -8,6 +8,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui::prelude::*;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,7 +74,7 @@ impl Category {
 #[derive(Clone)]
 pub enum LauncherCmd {
     Dismiss,
-    Key { key: String, ch: Option<String> },
+    Key { key: String, ch: Option<String>, shift: bool },
     SetQuery { query: String },
     Activate { index: usize },
     Select { index: usize },
@@ -418,6 +419,7 @@ pub fn filter_rows(
     windows: &[(u64, String, Option<String>)],
     files: &[FileHit],
     recents: &[String],
+    app_usage: &HashMap<String, u64>,
     category: Category,
 ) -> Vec<LauncherRow> {
     if category == Category::Commands {
@@ -491,10 +493,14 @@ pub fn filter_rows(
                         .app_id
                         .as_deref()
                         .and_then(|a| crate::matchq::score(a, q));
-                    match (by_name, by_id) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
+                    let base = match (by_name, by_id) {
+                        o @ (Some(_), Some(_)) => o.0,
                         (a, b) => a.or(b),
-                    }?
+                    }?;
+                    // Boost repeatedly-launched apps so muscle-memory picks
+                    // stay near the top without overriding a strong match.
+                    let usage = app_usage.get(&app.name).copied().unwrap_or(0);
+                    base + (usage.saturating_sub(1) as i64) * 5
                 };
                 Some((s, app))
             })
@@ -504,9 +510,16 @@ pub fn filter_rows(
         app_scored.sort_by(|a, b| {
             let ra = recents.iter().position(|n| *n == a.1.name);
             let rb = recents.iter().position(|n| *n == b.1.name);
-            ra.unwrap_or(usize::MAX)
-                .cmp(&rb.unwrap_or(usize::MAX))
-                .then_with(|| a.1.name.cmp(&b.1.name))
+            let r = ra
+                .unwrap_or(usize::MAX)
+                .cmp(&rb.unwrap_or(usize::MAX));
+            if r != std::cmp::Ordering::Equal {
+                return r;
+            }
+            // Recent ties broken by launch frequency (most-used first).
+            let ua = app_usage.get(&a.1.name).copied().unwrap_or(0);
+            let ub = app_usage.get(&b.1.name).copied().unwrap_or(0);
+            ub.cmp(&ua).then_with(|| a.1.name.cmp(&b.1.name))
         });
     } else {
         app_scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1163,13 +1176,28 @@ impl Render for Launcher {
                         LauncherCmd::Key {
                             key: ev.keystroke.key.clone(),
                             ch: ev.keystroke.key_char.clone(),
+                            shift: ev.keystroke.modifiers.shift,
                         },
                     );
                     return;
                 }
+                if key == "tab" {
+                    cx.stop_propagation();
+                    if let Some(row) = this.view.rows.get(this.view.selected) {
+                        let completion = match &row.kind {
+                            RowKind::File { path } => path.display().to_string(),
+                            RowKind::App { .. } | RowKind::Window { .. } => row.label.clone(),
+                        };
+                        if !completion.is_empty() {
+                            this.cursor = completion.len();
+                            post(this, cx, LauncherCmd::SetQuery { query: completion });
+                        }
+                    }
+                    return;
+                }
                 if let Some(query) = this.edit(&ev.keystroke) {
                     cx.stop_propagation();
-                    post(this, cx, LauncherCmd::SetQuery { query });
+                    post(this, cx, LauncherCmd::SetQuery { query: query });
                 }
             }))
             .child(
@@ -1294,7 +1322,7 @@ mod tests {
         files: &[FileHit],
         recents: &[String],
     ) -> Vec<LauncherRow> {
-        filter_rows(q, apps, windows, files, recents, Category::All)
+        filter_rows(q, apps, windows, files, recents, &Default::default(), Category::All)
     }
 
     #[test]
@@ -1361,7 +1389,7 @@ mod tests {
     #[test]
     fn apps_chip_empty_is_uncapped() {
         let apps: Vec<DesktopApp> = (0..30).map(|i| app(&format!("App{i:02}"), None)).collect();
-        let out = filter_rows("", &apps, &[], &[], &[], Category::Apps);
+        let out = filter_rows("", &apps, &[], &[], &[], &Default::default(), Category::Apps);
         assert_eq!(out.len(), 30);
     }
 
@@ -1372,13 +1400,13 @@ mod tests {
                 path: format!("/tmp/f{i}").into(),
             })
             .collect();
-        let out = filter_rows("f", &[], &[], &files, &[], Category::Files);
+        let out = filter_rows("f", &[], &[], &files, &[], &Default::default(), Category::Files);
         assert_eq!(out.len(), 40);
     }
 
     #[test]
     fn commands_chip_is_empty() {
-        let out = filter_rows("x", &[app("X", None)], &[], &[], &[], Category::Commands);
+        let out = filter_rows("x", &[app("X", None)], &[], &[], &[], &Default::default(), Category::Commands);
         assert!(out.is_empty());
     }
 

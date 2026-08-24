@@ -41,7 +41,7 @@ pub fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("awari")
+        .join(".awari")
 }
 
 pub fn socket_path() -> PathBuf {

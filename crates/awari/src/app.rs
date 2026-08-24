@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use std::sync::mpsc::Receiver;
+use std::collections::HashMap;
+use std::fs;
 
 use gpui::{
     point, px, size, App, AppContext, Bounds, ClipboardItem, Context, Entity, Global, QuitMode,
@@ -42,6 +44,16 @@ pub struct Daemon {
     stats: Arc<Mutex<Stats>>,
     /// Desktop names by last activation, most recent first.
     recents: Vec<String>,
+    /// Past launcher queries, most recent first (Shift+Up/Down recall).
+    query_history: Vec<String>,
+    /// Position within `query_history` while recalling, or `None` for the
+    /// live (currently typed) query.
+    history_cursor: Option<usize>,
+    /// Query that was on screen before we entered history recall, restored
+    /// when the user steps back past the newest entry.
+    history_live: Option<String>,
+    /// Launch counts per app name; boosts repeated picks in ranking.
+    app_usage: HashMap<String, u64>,
     files_tx: crate::files::Files,
     files_seq: u64,
     file_hits: Vec<FileHit>,
@@ -90,7 +102,7 @@ impl Daemon {
             },
         );
         let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
-        let daemon = Self {
+        let mut daemon = Self {
             niri,
             state: EventStreamState::default(),
             output_name: String::new(),
@@ -105,6 +117,10 @@ impl Daemon {
             cfg,
             stats,
             recents: Vec::new(),
+            query_history: Vec::new(),
+            history_cursor: None,
+            history_live: None,
+            app_usage: HashMap::new(),
             files_tx,
             files_seq: 0,
             file_hits: Vec::new(),
@@ -122,6 +138,8 @@ impl Daemon {
                 let _ = apps_tx.send(crate::desktop::scan_applications());
             })
             .ok();
+        daemon.load_history();
+        daemon.load_usage();
         daemon
     }
 
@@ -242,6 +260,7 @@ impl Daemon {
             windows,
             files,
             &self.recents,
+            &self.app_usage,
             self.launcher_category,
         )
     }
@@ -324,11 +343,16 @@ impl Daemon {
                     self.sync_launcher(cx);
                 }
             }
-            LauncherCmd::Key { key, ch } => self.launcher_key(&key, ch.as_deref(), cx),
+            LauncherCmd::Key { key, ch, shift } => {
+                self.launcher_key(&key, ch.as_deref(), shift, cx)
+            }
             LauncherCmd::SetQuery { query } => {
                 if self.launcher_query != query {
                     self.launcher_query = query;
                     self.launcher_selected = 0;
+                    // Typing returns to the live query, leaving history recall.
+                    self.history_cursor = None;
+                    self.history_live = None;
                     self.refresh_file_hits();
                     self.sync_launcher(cx);
                 }
@@ -383,6 +407,16 @@ impl Daemon {
         // drop the per-directory scratch indexes and rebuild the root
         // indexes from scratch. The next open re-indexes on demand.
         self.files_tx.clear();
+        // Remember the query just used so Shift+Up can recall it next time.
+        let q = self.launcher_query.trim().to_string();
+        if !q.is_empty() {
+            self.query_history.retain(|h| *h != q);
+            self.query_history.insert(0, q);
+            self.query_history.truncate(50);
+            self.save_history();
+        }
+        self.history_cursor = None;
+        self.history_live = None;
         // Resident overlay: the window stays alive for the whole session.
         let Some(h) = self.launcher.clone() else {
             return;
@@ -408,8 +442,19 @@ impl Daemon {
         });
     }
 
-    fn launcher_key(&mut self, key: &str, _ch: Option<&str>, cx: &mut Context<Self>) {
+    fn launcher_key(
+        &mut self,
+        key: &str,
+        _ch: Option<&str>,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
         let key = key.to_ascii_lowercase();
+        // Shift+Up/Down recall past queries without disturbing the live one.
+        if shift && matches!(key.as_str(), "up" | "arrowup" | "down" | "arrowdown") {
+            self.history_step(key == "down" || key == "arrowdown", cx);
+            return;
+        }
         match key.as_str() {
             "escape" | "esc" => self.dismiss_launcher(cx),
             "enter" | "return" => self.activate_launcher_row(cx),
@@ -423,6 +468,95 @@ impl Daemon {
             }
             _ => {}
         }
+    }
+
+    /// Step through `query_history`. `newer` = Shift+Down (toward the live
+    /// query), `older` = Shift+Up (deeper into history, most-recent-first).
+    fn history_step(&mut self, newer: bool, cx: &mut Context<Self>) {
+        if self.query_history.is_empty() {
+            return;
+        }
+        let len = self.query_history.len();
+        let next = match self.history_cursor {
+            None => {
+                if newer {
+                    None
+                } else {
+                    self.history_live = Some(self.launcher_query.clone());
+                    Some(0)
+                }
+            }
+            Some(i) => {
+                if newer {
+                    if i == 0 {
+                        let live = self.history_live.take().unwrap_or_default();
+                        self.history_cursor = None;
+                        self.launcher_query = live;
+                        self.launcher_selected = 0;
+                        self.refresh_file_hits();
+                        self.sync_launcher(cx);
+                        return;
+                    }
+                    Some(i - 1)
+                } else if i + 1 < len {
+                    Some(i + 1)
+                } else {
+                    Some(len - 1)
+                }
+            }
+        };
+        self.history_cursor = next;
+        if let Some(idx) = next {
+            self.launcher_query = self.query_history[idx].clone();
+        }
+        self.launcher_selected = 0;
+        self.refresh_file_hits();
+        self.sync_launcher(cx);
+    }
+
+    /// Load past queries from `$XDG_RUNTIME_DIR/.awari/history`.
+    fn load_history(&mut self) {
+        let path = awari_ipc::runtime_dir().join("history");
+        if let Ok(s) = fs::read_to_string(&path) {
+            self.query_history = s
+                .lines()
+                .map(str::to_string)
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+        }
+    }
+
+    /// Persist `query_history` to `history` (newline-separated).
+    fn save_history(&self) {
+        let dir = awari_ipc::runtime_dir();
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join("history"), self.query_history.join("\n"));
+    }
+
+    /// Load app launch counts from `$XDG_RUNTIME_DIR/.awari/usage`.
+    fn load_usage(&mut self) {
+        let path = awari_ipc::runtime_dir().join("usage");
+        if let Ok(s) = fs::read_to_string(&path) {
+            for line in s.lines() {
+                if let Some((name, cnt)) = line.split_once('\t') {
+                    if let Ok(n) = cnt.parse::<u64>() {
+                        self.app_usage.insert(name.to_string(), n);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Persist `app_usage` to `usage` as `name\tcount` lines.
+    fn save_usage(&self) {
+        let dir = awari_ipc::runtime_dir();
+        let _ = fs::create_dir_all(&dir);
+        let body: Vec<String> = self
+            .app_usage
+            .iter()
+            .map(|(k, v)| format!("{}\t{}", k, v))
+            .collect();
+        let _ = fs::write(dir.join("usage"), body.join("\n"));
     }
 
     fn refresh_file_hits(&mut self) {
@@ -487,8 +621,11 @@ impl Daemon {
             if let Some(row) = rows.get(self.launcher_selected) {
                 let name = row.label.clone();
                 self.recents.retain(|n| *n != name);
-                self.recents.insert(0, name);
+                self.recents.insert(0, name.clone());
                 self.recents.truncate(20);
+                // Track launch frequency to bias ranking toward used apps.
+                *self.app_usage.entry(name).or_insert(0) += 1;
+                self.save_usage();
             }
         }
         self.dismiss_launcher(cx);
