@@ -1,16 +1,15 @@
 //! Overlay finder: search, chips, list/grid. Clean, text-focused layout.
 
 use gpui::{
-    div, img, px, AnyElement, AnimationExt, App, AppContext, Context, Entity, FocusHandle,
+    div, img, px, AnyElement, AnimationExt, App, Context, FocusHandle,
     Focusable, FontWeight, Rgba, InteractiveElement, IntoElement, MouseButton, ObjectFit,
     ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
-    Subscription, UniformListScrollHandle, WeakEntity, Window, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui::prelude::*;
-use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::Daemon;
 use crate::desktop::DesktopApp;
@@ -63,8 +62,8 @@ impl Category {
         }
     }
 
-    fn all() -> [Category; 4] {
-        [Self::All, Self::Apps, Self::Files, Self::Commands]
+    fn all() -> [Category; 3] {
+        [Self::Apps, Self::Files, Self::Commands]
     }
 }
 
@@ -119,48 +118,51 @@ impl LauncherView {
 pub struct Launcher {
     pub shell: WeakEntity<Daemon>,
     view: LauncherView,
-    input: Entity<InputState>,
+    cursor: usize,
+    caret_on: bool,
+    focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
     scrolled_to: Option<usize>,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
     hovered: Option<usize>,
     hovered_chip: Option<Category>,
-    _input_sub: Subscription,
 }
 
 impl Launcher {
     pub fn new(
         shell: WeakEntity<Daemon>,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx)
-                .placeholder("search apps, files, and commands")
-                .context_menu(false);
-            state.set_editor_style(editor_style(theme.clone()));
-            state
-        });
-        let input_ev = input.clone();
-        let _input_sub = cx.subscribe(&input, move |this, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) {
-                let query = input_ev.read(cx).value().to_string();
-                post(this, cx, LauncherCmd::SetQuery { query });
+        let blink = cx.entity();
+        cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
+                let _ = blink.update(cx, |this, cx| {
+                    if this.view.open {
+                        this.caret_on = !this.caret_on;
+                        cx.notify();
+                    }
+                });
             }
-        });
+        })
+        .detach();
         Self {
             shell,
             view: LauncherView::closed(theme),
-            input,
+            cursor: 0,
+            caret_on: true,
+            focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             scrolled_to: None,
             open_started: None,
             closing: false,
             hovered: None,
             hovered_chip: None,
-            _input_sub,
         }
     }
 
@@ -171,29 +173,99 @@ impl Launcher {
         self.view = view;
         if self.view.open {
             self.closing = false;
+        } else {
+            self.cursor = 0;
+            self.caret_on = true;
         }
     }
 
     pub fn arm_open_timer(&mut self, started: Instant) {
         self.open_started = Some(started);
     }
-}
 
-impl Focusable for Launcher {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.input.read(cx).focus_handle(cx)
+    /// Apply a keystroke to the query/cursor; returns the new query when it changed.
+    fn edit(&mut self, k: &gpui::Keystroke) -> Option<String> {
+        let mut q = self.view.query.clone();
+        let mut c = self.cursor.min(q.len());
+        match k.key.as_str() {
+            "backspace" => {
+                if c == 0 {
+                    return None;
+                }
+                let prev = q[..c].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                q.replace_range(prev..c, "");
+                c = prev;
+            }
+            "delete" => {
+                if c >= q.len() {
+                    return None;
+                }
+                let next = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
+                q.replace_range(c..next, "");
+            }
+            "arrowleft" => {
+                c = q[..c].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+            }
+            "arrowright" => {
+                c = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
+            }
+            "home" => c = 0,
+            "end" => c = q.len(),
+            _ => {
+                let Some(ch) = &k.key_char else { return None };
+                if ch.is_empty() || ch.chars().any(|b| b.is_control()) {
+                    return None;
+                }
+                q.insert_str(c, ch);
+                c += ch.len();
+            }
+        }
+        self.view.query = q.clone();
+        self.cursor = c;
+        Some(q)
+    }
+
+    fn query_element(&self) -> AnyElement {
+        let t = self.view.theme.clone();
+        let q = &self.view.query;
+        let c = self.cursor.min(q.len());
+        let caret = div()
+            .id("caret")
+            .w(px(2.))
+            .h(px(20.))
+            .rounded(px(1.))
+            .bg(t.accent())
+            .when(!self.caret_on, |el| el.opacity(0.0));
+        if q.is_empty() {
+            return div()
+                .flex()
+                .flex_nowrap()
+                .items_center()
+                .flex_none()
+                .child(caret)
+                .child(
+                    div()
+                        .text_color(t.muted())
+                        .child("Search apps, files, and commands"),
+                )
+                .into_any_element();
+        }
+        let (prefix, suffix) = q.split_at(c);
+        div()
+            .flex()
+            .flex_nowrap()
+            .items_center()
+            .flex_none()
+            .child(div().child(prefix.to_string()))
+            .child(caret)
+            .child(div().child(suffix.to_string()))
+            .into_any_element()
     }
 }
 
-fn editor_style(t: Theme) -> InputEditorStyle {
-    InputEditorStyle {
-        foreground: t.fg().into(),
-        muted_foreground: t.muted().into(),
-        background: t.panel().into(),
-        border: t.ghost().into(),
-        selection: t.select().into(),
-        caret: t.accent().into(),
-        ..Default::default()
+impl Focusable for Launcher {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -216,6 +288,15 @@ pub fn layer_opts() -> gpui::layer_shell::LayerShellOptions {
         exclusive_edge: None,
         margin: None,
         keyboard_interactivity: KeyboardInteractivity::None,
+    }
+}
+
+fn row_category(r: &LauncherRow) -> Category {
+    match r.kind {
+        RowKind::App { .. } => Category::Apps,
+        RowKind::File { .. } => Category::Files,
+        // Windows have no dedicated tab; treat them as neutral (no highlight).
+        RowKind::Window { .. } => Category::All,
     }
 }
 
@@ -481,7 +562,7 @@ fn row_subtitle(row: &LauncherRow) -> String {
 
 impl Launcher {
     fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |state, cx| state.focus(window, cx));
+        window.focus(&self.focus_handle, cx);
     }
 
     fn keep_selected_visible(&mut self, grid: bool) {
@@ -644,9 +725,6 @@ impl Render for Launcher {
         window.set_input_region(if self.view.open { None } else { Some(&[]) });
         let target = if self.view.open { 1.0f32 } else { 0.0 };
         self.focus_search(window, cx);
-        self.input.update(cx, |state, _| {
-            state.set_editor_style(editor_style(self.view.theme.clone()));
-        });
 
         if let Some(t0) = self.open_started.take() {
             let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -664,10 +742,23 @@ impl Render for Launcher {
         let panel_w = LAUNCHER_W.min(win_w * 0.92).max(280.0);
         let q_empty = self.view.query.trim().is_empty();
         let cat = self.view.category;
-        let browsing_apps = cat == Category::Apps && q_empty;
-        let compact = q_empty;
+        let active_cat = if cat != Category::All {
+            cat
+        } else if q_empty {
+            Category::All
+        } else {
+            self.view
+                .rows
+                .get(self.view.selected)
+                .or_else(|| self.view.rows.first())
+                .map(row_category)
+                .unwrap_or(Category::All)
+        };
+        let browsing_grid = cat == Category::Apps && q_empty;
+        let show_results = !q_empty || cat != Category::All;
+        let compact = q_empty && cat == Category::All;
         let panel_h = if compact { SEARCH_H } else { PANEL_H };
-        self.keep_selected_visible(browsing_apps);
+        self.keep_selected_visible(browsing_grid);
 
         let mut results = div()
             .id("launch-results")
@@ -688,7 +779,7 @@ impl Render for Launcher {
                     .text_color(t.faint())
                     .child("no matches"),
             );
-        } else if browsing_apps {
+        } else if browsing_grid {
             let n = self.view.rows.len().div_ceil(GRID_COLS);
             results = results.child(
                 uniform_list(
@@ -740,15 +831,24 @@ impl Render for Launcher {
             .flex()
             .flex_none()
             .justify_center()
-            .gap(px(14.));
+            .gap(px(14.))
+            .with_spring(
+                "cat-icons-fade",
+                SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
+                |el, v| el.opacity(v),
+            );
         let this = cx.entity();
         for c in Category::all() {
-            let active = cat == c;
+            let active = active_cat == c;
             let cc = c;
             let this = this.clone();
             let chip_hv = if self.hovered_chip == Some(c) { 1.0f32 } else { 0.0 };
             let base_col = if active { t.select() } else { t.surface() };
-            let hover_col = if active { t.accent() } else { t.border() };
+            let hover_col = if active {
+                mix(&t.accent(), &t.bg(), 0.5)
+            } else {
+                t.border()
+            };
             let icon_col = if active { t.accent() } else { t.muted() };
             cat_icons = cat_icons.child(
                 div()
@@ -777,7 +877,12 @@ impl Render for Launcher {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            post(this, cx, LauncherCmd::SetCategory { category: cc });
+                            let next = if this.view.category == cc {
+                                Category::All
+                            } else {
+                                cc
+                            };
+                            post(this, cx, LauncherCmd::SetCategory { category: next });
                         }),
                     )
                     .child(c.icon().element_px(icon_col, 18.0))
@@ -799,7 +904,7 @@ impl Render for Launcher {
             .border_color(t.border())
             .child(results);
 
-        let search_focus = self.input.read(cx).focus_handle(cx);
+        let search_focus = self.focus_handle.clone();
         div()
             .id("launcher-root")
             .track_focus(&search_focus)
@@ -825,6 +930,11 @@ impl Render for Launcher {
                             ch: ev.keystroke.key_char.clone(),
                         },
                     );
+                    return;
+                }
+                if let Some(query) = this.edit(&ev.keystroke) {
+                    cx.stop_propagation();
+                    post(this, cx, LauncherCmd::SetQuery { query });
                 }
             }))
             .child(
@@ -875,33 +985,41 @@ impl Render for Launcher {
                                     .items_center()
                                     .gap(px(12.))
                                     .px(px(20.))
-                                    .pt(px(18.))
-                                    .pb(px(14.))
-                                    .bg(t.panel())
+                                    .py(px(16.))
+                                    .child(
+                                div()
+                                    .h(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .flex_none()
                                     .child(Icon::Search.element_px(
                                         if q_empty { t.faint() } else { t.accent() },
                                         20.0,
-                                    ))
-                                    .child(
-                                        div()
-                                            .id("query-wrap")
-                                            .flex_1()
-                                            .min_w_0()
-                                            .when_some(t.font.clone(), |el, f| el.font_family(f))
-                                            .text_size(px(24.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(t.fg())
-                                            .child(Input::new(&self.input)),
-                                    )
+                                    )),
                             )
-                            .when(!q_empty, |el| el.child(results_body))
+                            .child(
+                                div()
+                                    .id("query-wrap")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .mt(px(2.))
+                                    .when_some(t.font.clone(), |el, f| el.font_family(f))
+                                    .text_size(px(24.))
+                                    .line_height(px(24.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.fg())
+                                    .overflow_hidden()
+                                    .child(self.query_element()),
+                            )
+                            )
+                            .when(show_results, |el| el.child(results_body))
                             .with_spring(
                                 "launcher-panel",
                                 SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
                                 |el, v| el.mt(px((1.0 - v) * SLIDE)).opacity(v),
                             ),
                     )
-                    .when(!q_empty, |el| el.child(cat_icons)),
+                    .child(cat_icons),
             )
     }
 }
