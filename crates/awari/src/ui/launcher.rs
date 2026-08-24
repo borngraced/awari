@@ -144,6 +144,8 @@ pub struct LauncherView {
     pub rows: Vec<LauncherRow>,
     pub theme: Theme,
     pub category: Category,
+    /// Whether the Files source is enabled; gates the Files category chip.
+    pub files_enabled: bool,
 }
 
 impl LauncherView {
@@ -155,6 +157,7 @@ impl LauncherView {
             rows: Vec::new(),
             theme,
             category: Category::All,
+            files_enabled: true,
         }
     }
 }
@@ -193,6 +196,11 @@ pub struct Launcher {
     /// Open action menu for the selected row. `Alt+Enter` opens it, arrows
     /// move the highlight, `Enter` runs the highlighted action, `Esc` closes.
     action_menu: Option<ActionMenu>,
+    /// Accepted inline completion: the query it applies to plus the byte
+    /// offset where the completed suffix starts. Rendered accent while the
+    /// cursor sits at the end and the query is unchanged; any edit or query
+    /// swap clears it.
+    accepted: Option<(String, usize)>,
 }
 
 impl Launcher {
@@ -222,6 +230,7 @@ impl Launcher {
             blink_gen: Arc::new(AtomicU64::new(0)),
             blink_running: false,
             action_menu: None,
+            accepted: None,
         }
     }
 
@@ -231,6 +240,7 @@ impl Launcher {
         }
         if self.view.query != view.query || self.view.selected != view.selected {
             self.action_menu = None;
+            self.accepted = None;
         }
         self.view = view;
         self.last_select = Some(self.view.selected);
@@ -290,6 +300,7 @@ impl Launcher {
     /// Apply a keystroke to the query/cursor; returns the new query when it changed.
     fn edit(&mut self, k: &gpui::Keystroke) -> Option<String> {
         let key = k.key.to_ascii_lowercase();
+        self.accepted = None;
         let mut q = self.view.query.clone();
         let mut c = self.cursor.min(q.len());
         match key.as_str() {
@@ -359,8 +370,30 @@ impl Launcher {
         let (prefix, suffix) = q.split_at(c);
         let p_split = prefix.len().min(token_len);
         let (p_accent, p_norm) = prefix.split_at(p_split);
-        let s_accent_len = token_len.saturating_sub(c).min(suffix.len());
+        // Accepted-completion highlight wins over command-mode coloring only
+        // when they can't both apply (command mode never ghosts).
+        let accepted_off = self
+            .accepted
+            .as_ref()
+            .filter(|(aq, _)| aq == q && c == q.len() && token_len == 0)
+            .map(|(_, off)| *off.min(&c));
+        let s_accent_len = if token_len > 0 {
+            token_len.saturating_sub(c)
+        } else if let Some(off) = accepted_off {
+            c - off
+        } else {
+            0
+        }
+        .min(suffix.len());
         let (s_accent, s_norm) = suffix.split_at(s_accent_len);
+        let ghost = if token_len == 0 && c == q.len() {
+            self.view
+                .rows
+                .first()
+                .and_then(|r| ghost_suffix(q, &r.label))
+        } else {
+            None
+        };
         div()
             .flex()
             .flex_nowrap()
@@ -378,6 +411,11 @@ impl Launcher {
             })
             .when(!s_norm.is_empty(), |el| {
                 el.child(div().child(s_norm.to_string()))
+            })
+            // Ghost preview hides once its own accept is on screen.
+            .when(ghost.is_some() && accepted_off.is_none(), |el| {
+                let g = ghost.unwrap();
+                el.child(div().text_color(t.faint()).child(g))
             })
             .into_any_element()
     }
@@ -452,6 +490,32 @@ pub fn command_prefix(q: &str) -> Option<&'static str> {
 
 fn command_token_len(q: &str) -> usize {
     command_prefix(q).map_or(0, |p| p.len())
+}
+
+/// Inline autocomplete candidate: the untyped remainder of `top_label` when
+/// the live query is a case-insensitive prefix of it. `None` when there is
+/// nothing to complete (empty query, no prefix match, or label == query).
+fn ghost_suffix(query: &str, top_label: &str) -> Option<String> {
+    if query.is_empty() {
+        return None;
+    }
+    let mut qi = query.chars();
+    let mut matched = 0usize;
+    for (off, lc) in top_label.char_indices() {
+        match qi.next() {
+            None => return Some(top_label[matched..].to_string()),
+            Some(qc) => {
+                if !qc
+                    .to_lowercase()
+                    .eq(lc.to_lowercase())
+                {
+                    return None;
+                }
+                matched = off + lc.len_utf8();
+            }
+        }
+    }
+    None
 }
 
 /// Expand an `o:` path argument: `~` → `$HOME`, absolute `/…` as-is, and a
@@ -1238,7 +1302,11 @@ impl Render for Launcher {
             .items_center()
             .gap(px(14.));
         let this = cx.entity();
+        let files_enabled = self.view.files_enabled;
         for c in Category::all() {
+            if c == Category::Files && !files_enabled {
+                continue;
+            }
             let active = active_cat == c;
             let cc = c;
             let this = this.clone();
@@ -1407,6 +1475,20 @@ impl Render for Launcher {
                 }
                 if key == "tab" {
                     cx.stop_propagation();
+                    // Inline ghost first: complete from the top row's label
+                    // and keep its suffix accent-marked until the next edit.
+                    let q = this.view.query.clone();
+                    if let Some(sugg) =
+                        this.view.rows.first().and_then(|r| ghost_suffix(&q, &r.label))
+                    {
+                        let off = q.len();
+                        let mut completed = q;
+                        completed.push_str(&sugg);
+                        this.cursor = completed.len();
+                        this.accepted = Some((completed.clone(), off));
+                        post(this, cx, LauncherCmd::SetQuery { query: completed });
+                        return;
+                    }
                     if let Some(row) = this.view.rows.get(this.view.selected) {
                         let completion = match &row.kind {
                             RowKind::File { path } => path.display().to_string(),
@@ -1415,6 +1497,7 @@ impl Render for Launcher {
                         };
                         if !completion.is_empty() {
                             this.cursor = completion.len();
+                            this.accepted = None;
                             post(this, cx, LauncherCmd::SetQuery { query: completion });
                         }
                     }
@@ -1753,5 +1836,22 @@ mod open_path_tests {
         assert_eq!(command_token_len("o:foo"), 2);
         assert_eq!(command_token_len(">foo"), 1);
         assert_eq!(command_token_len("plain"), 0);
+    }
+
+    #[test]
+    fn ghost_completes_case_insensitively() {
+        assert_eq!(ghost_suffix("Go", "GoLand").as_deref(), Some("Land"));
+        assert_eq!(ghost_suffix("gO", "GoLand").as_deref(), Some("Land"));
+        assert_eq!(ghost_suffix("goland", "GoLand").as_deref(), None);
+        assert_eq!(ghost_suffix("golands", "GoLand"), None);
+        assert_eq!(ghost_suffix("", "GoLand"), None);
+        assert_eq!(ghost_suffix("zz", "GoLand"), None);
+    }
+
+    #[test]
+    fn ghost_respects_char_boundaries() {
+        assert_eq!(ghost_suffix("é", "Émigré").as_deref(), Some("migré"));
+        // Multi-byte query that fully consumes the label → nothing to add.
+        assert_eq!(ghost_suffix("émigré", "Émigré"), None);
     }
 }

@@ -332,6 +332,7 @@ impl Daemon {
             rows,
             theme: self.cfg.theme.clone(),
             category: self.launcher_category,
+            files_enabled: self.cfg.sources.files,
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
