@@ -67,7 +67,7 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 - **Instant**: fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start.
 - **Resident**: the overlay never boots from scratch, so there's no launch lag to hide.
 - **One suggestion, not a list**: inline ghost-text completion; the full alternates list only shows on ↓.
-- **Wayland-native**: runtime-detects niri, Hyprland, Mutter, or Sway; one binary.
+- **Wayland-native**: one binary for any Wayland compositor. The overlay uses `wlr-layer-shell` (wlroots family: sway, Hyprland, river, labwc, and niri); on compositors without it, like GNOME/Mutter, it falls back to a normal window for apps, files, and commands.
 - **Unified results**: windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
 - **Empty query**: shows recent apps first, then open windows (no file dump).
 - **Query prefixes**: `>` runs a shell command in a terminal, `o:<path>` opens a path and lists its real entries as you type (`~` and paths relative to `$HOME` both work), `r:<regex>` filters files by regular expression.
@@ -89,8 +89,9 @@ indexes.
 
 ## Build
 
-Linux with a Wayland compositor (niri, hyprland, mutter, sway detected at
-runtime).
+Linux with a Wayland compositor. Best on wlroots-family compositors (sway,
+Hyprland, river, labwc, and others) and niri, which provide `wlr-layer-shell`;
+on GNOME/Mutter it falls back to a normal window for apps, files, and commands.
 
 ```sh
 # Debian/Ubuntu

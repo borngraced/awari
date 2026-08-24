@@ -14,6 +14,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
     size,
 };
+use gpui::layer_shell::LayerShellNotSupportedError;
 
 use crate::config::Config;
 use crate::desktop::DesktopApp;
@@ -360,7 +361,7 @@ impl Daemon {
             origin: point(px(0.), px(0.)),
             size: size(px(1920.), px(launcher::LAUNCHER_H)),
         };
-        match cx.open_window(
+        let result = cx.open_window(
             WindowOptions {
                 titlebar: None,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -370,8 +371,28 @@ impl Daemon {
                 display_id: self.launcher_display,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Launcher::new(shell, theme, window, cx)),
-        ) {
+            |window, cx| cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx)),
+        );
+        // Compositors without `wlr-layer-shell` (e.g. GNOME/Mutter) can't host
+        // the overlay; fall back to a regular window so apps/files/commands
+        // still work. Window switching is unavailable there regardless.
+        let result = match result {
+            Ok(handle) => Ok(handle),
+            Err(e) if e.downcast_ref::<LayerShellNotSupportedError>().is_some() => cx.open_window(
+                WindowOptions {
+                    titlebar: None,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some("awari".into()),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    kind: WindowKind::Normal,
+                    display_id: self.launcher_display,
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx)),
+            ),
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(handle) => self.launcher = Some(handle),
             Err(e) => tracing::warn!(%e, "launcher overlay failed to open"),
         }
