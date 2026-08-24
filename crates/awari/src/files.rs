@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -129,8 +130,9 @@ impl Files {
         self.seq
     }
 
-    /// Reclaim file-search memory (per-directory scratch + root indexes).
-    /// Call when the launcher is dismissed so idle RAM returns to baseline.
+    /// Reclaim file-search memory: drops the per-directory scratch indexes
+    /// kept during path navigation. Root indexes are bounded and kept warm,
+    /// so idle RAM stays near baseline without a re-index walk. Call on dismiss.
     pub fn clear(&self) {
         let _ = self.ctrl.send(());
     }
@@ -149,8 +151,9 @@ fn is_home_root(root: &Path) -> bool {
     }
 }
 
-/// Build the persistent per-root `FilePicker`s. Called at startup and again
-/// whenever caches are reclaimed on dismiss, so the index is rebuilt fresh.
+/// Build the persistent per-root `FilePicker`s. Called once at startup; the
+/// indexes are kept warm for the daemon's lifetime (bounded by
+/// `ROOT_CACHE_BYTES` and carrying FFF watches + frecency).
 fn build_root_pickers(roots: &[PathBuf]) -> Vec<SharedFilePicker> {
     let mut pickers = Vec::new();
     for root in roots {
@@ -187,21 +190,22 @@ fn picker_loop(
     ctrl: Receiver<()>,
     opts: FilesOptions,
 ) {
-    let mut pickers = build_root_pickers(&roots);
+    let pickers = build_root_pickers(&roots);
     tracing::info!(roots = pickers.len(), "file index started");
 
     let parser = QueryParser::default();
     let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
     let mut transient_order: VecDeque<PathBuf> = VecDeque::with_capacity(TRANSIENT_DIR_CAP);
     loop {
-        // Reclaim memory as soon as the launcher is dismissed: drop the
-        // per-directory scratch indexes and rebuild the root indexes from
-        // scratch, returning to a near-baseline "sleeping" footprint.
+        // Reclaim memory on dismiss by dropping the per-directory scratch
+        // indexes only. The root indexes stay warm (bounded by
+        // ROOT_CACHE_BYTES, with live FFF watches + frecency), so the next
+        // open is fast and we avoid a full filesystem walk here. Multiple
+        // queued clear signals just repeat this cheap transient drop.
         while ctrl.try_recv().is_ok() {
-            tracing::debug!("clearing file caches on dismiss");
+            tracing::debug!("clearing transient file caches on dismiss");
             transient.clear();
             transient_order.clear();
-            pickers = build_root_pickers(&roots);
         }
         // Block for the next query, but wake periodically so a clear signal
         // isn't starved while the launcher is idle.
@@ -473,35 +477,43 @@ pub fn reveal(path: &Path) {
 }
 
 /// Resolve the user's preferred terminal emulator: `$TERMINAL`, then probing
-/// for common ones.
+/// `$PATH` directly (no `which` fork) so this is safe to call on the UI
+/// thread. The result is cached for the process lifetime.
 fn resolve_terminal() -> Option<String> {
-    if let Ok(term) = std::env::var("TERMINAL") {
-        if !term.trim().is_empty() {
-            return Some(term.trim().to_string());
-        }
-    }
-    for candidate in [
-        "alacritty",
-        "kitty",
-        "wezterm",
-        "foot",
-        "gnome-terminal",
-        "konsole",
-        "st",
-    ] {
-        if Command::new("which")
-            .arg(candidate)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return Some(candidate.to_string());
-        }
-    }
-    None
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            if let Ok(term) = std::env::var("TERMINAL") {
+                if !term.trim().is_empty() {
+                    return Some(term.trim().to_string());
+                }
+            }
+            let Some(paths) = std::env::var("PATH").ok() else {
+                return None;
+            };
+            for candidate in [
+                "alacritty",
+                "kitty",
+                "ghostty",
+                "wezterm",
+                "foot",
+                "gnome-terminal",
+                "konsole",
+                "st",
+            ] {
+                for dir in paths.split(':') {
+                    if dir.is_empty() {
+                        continue;
+                    }
+                    let p = Path::new(dir).join(candidate);
+                    if p.is_file() {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .clone()
 }
 
 /// Build the args to run `script` via `sh -c` in the given terminal.
@@ -512,20 +524,30 @@ fn terminal_args(term: &str, script: &str) -> Vec<String> {
     }
 }
 
-/// Spawn `script` inside the user's terminal emulator.
+/// Spawn `script` inside the user's terminal emulator. The child is reaped on
+/// a background thread (like `activate`) so the UI thread never blocks.
 fn run_script(script: &str) {
     let Some(term) = resolve_terminal() else {
         tracing::warn!("no terminal emulator found; set $TERMINAL");
         return;
     };
-    if let Err(e) = Command::new(&term)
+    match Command::new(&term)
         .args(terminal_args(&term, script))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
-        tracing::warn!(%e, term, "failed to spawn terminal");
+        Ok(child) => {
+            thread::Builder::new()
+                .name("awari-terminal".into())
+                .spawn(move || {
+                    let mut child = child;
+                    let _ = child.wait();
+                })
+                .ok();
+        }
+        Err(e) => tracing::warn!(%e, term, "failed to spawn terminal"),
     }
 }
 

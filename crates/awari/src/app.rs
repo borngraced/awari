@@ -145,9 +145,11 @@ impl Daemon {
 
     fn apply_niri(&mut self, msgs: Vec<NiriMsg>) -> bool {
         let changed = !msgs.is_empty();
+        let mut windows_changed = false;
         for msg in msgs {
             match msg {
                 NiriMsg::Event(ev) => {
+                    windows_changed = true;
                     if let niri_ipc::Event::WorkspaceActivated { id, focused: true } = &ev {
                         self.focused_ws = Some(*id);
                         if let Some(w) = self.state.workspaces.workspaces.values().find(|w| w.id == *id)
@@ -193,7 +195,13 @@ impl Daemon {
                 self.output_name = name;
             }
         }
-        self.refresh_windows();
+        // Only rebuild the window list when windows/workspaces actually
+        // changed; Outputs/Degraded/Version batches don't touch it. The
+        // `is_empty` guard still populates it on the first batch (which may be
+        // Outputs-only with no Event yet).
+        if windows_changed || self.windows_list.is_empty() {
+            self.refresh_windows();
+        }
         changed
     }
 
@@ -599,7 +607,7 @@ impl Daemon {
             launcher::RowAction::CopyPath => {
                 let text = match &kind {
                     launcher::RowKind::File { path } => path.display().to_string(),
-                    launcher::RowKind::App { exec } => exec.join(" "),
+                    launcher::RowKind::App { exec, .. } => exec.join(" "),
                     launcher::RowKind::Window { .. } => String::new(),
                     launcher::RowKind::Command { command } => command.clone(),
                 };
@@ -619,19 +627,16 @@ impl Daemon {
     }
 
     fn activate_kind(&mut self, kind: launcher::RowKind, cx: &mut Context<Self>) {
-        if let launcher::RowKind::App { .. } = &kind {
-            let rows = self.filtered_rows();
-            if let Some(row) = rows.get(self.launcher_selected) {
-                let name = row.label.clone();
-                self.recents.retain(|n| *n != name);
-                self.recents.insert(0, name.clone());
+        // Record recents + usage from the app name carried on the kind, so we
+        // don't have to re-score every row here (which also races async
+        // updates that may have changed the selection since the menu opened).
+        if let launcher::RowKind::App { name, .. } = &kind {
+            self.recents.retain(|n| n != name);
+            self.recents.insert(0, name.clone());
                 self.recents.truncate(20);
-                // Track launch frequency to bias ranking toward used apps.
-                *self.app_usage.entry(name).or_insert(0) += 1;
-                self.save_usage();
-            }
+                *self.app_usage.entry(name.clone()).or_insert(0) += 1;
+            self.save_usage();
         }
-        // A shell command: spawn it in the terminal and close the launcher.
         if let launcher::RowKind::Command { command } = &kind {
             crate::files::run_command(command);
             self.dismiss_launcher(cx);
@@ -651,7 +656,7 @@ impl Daemon {
                 return;
             };
             match kind {
-                launcher::RowKind::App { exec } => {
+                launcher::RowKind::App { exec, .. } => {
                     let _ = niri.apply(CompositorCommand::Spawn { command: exec });
                 }
                 launcher::RowKind::Window { id } => {
@@ -670,7 +675,12 @@ impl Daemon {
                 true
             }
             ClientRequest::OpenLauncher => {
-                self.set_launcher_open(true, cx);
+                // Idempotent: re-opening while already open must not re-run the
+                // open path (gen bump, query reset, seq invalidate), which would
+                // wipe a typed query on keybind auto-repeat.
+                if !self.launcher_open {
+                    self.set_launcher_open(true, cx);
+                }
                 true
             }
             ClientRequest::CloseLauncher => {

@@ -112,7 +112,7 @@ impl RowAction {
 
 #[derive(Clone)]
 pub enum RowKind {
-    App { exec: Vec<String> },
+    App { name: String, exec: Vec<String> },
     Window { id: u64 },
     File { path: PathBuf },
     /// A shell command to run in a terminal (from `>` command mode or the
@@ -556,6 +556,7 @@ pub fn filter_rows(
     let app_row = |app: &DesktopApp| -> LauncherRow {
         LauncherRow {
             kind: RowKind::App {
+                name: app.name.clone(),
                 exec: app.exec.clone(),
             },
             label: app.name.clone(),
@@ -718,7 +719,7 @@ fn highlighted_name(label: &str, query: &str, t: &Theme) -> StyledText {
 fn row_subtitle(row: &LauncherRow) -> String {
     match &row.kind {
         RowKind::File { path } => path.display().to_string(),
-        RowKind::App { exec } => exec.join(" "),
+        RowKind::App { exec, .. } => exec.join(" "),
         RowKind::Window { .. } => "Window".into(),
         RowKind::Command { command } => command.clone(),
     }
