@@ -47,8 +47,8 @@ a path, not an operator.
 ## Features
 
 - One list covering windows (focus), apps (XDG `.desktop`), and files.
-- Empty query shows windows on the focused output, then recent apps.
-- Dynamic path search: `~/dev/reelshell/src/` lists its contents as you type.
+- Empty query shows recent apps first, then open windows (no file dump).
+- Dynamic path search: `~/dev/awari/src/` lists its contents as you type.
 - Regex file filter with the `r:` prefix.
 - Lockfiles like `Cargo.lock` and `package-lock.json` are skipped by default.
 - Theme is KDL with hex color tokens. No CSS, no remote fetches.
