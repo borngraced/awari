@@ -6,7 +6,7 @@ use std::time::Instant;
 use std::sync::mpsc::Receiver;
 
 use gpui::{
-    point, px, size, App, AppContext, Bounds, Context, Entity, Global, QuitMode,
+    point, px, size, App, AppContext, Bounds, ClipboardItem, Context, Entity, Global, QuitMode,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use niri_ipc::state::{EventStreamState, EventStreamStatePart};
@@ -379,6 +379,10 @@ impl Daemon {
 
     fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
         self.launcher_open = false;
+        // Return file-search RAM to a near-baseline "sleeping" footprint:
+        // drop the per-directory scratch indexes and rebuild the root
+        // indexes from scratch. The next open re-indexes on demand.
+        self.files_tx.clear();
         // Resident overlay: the window stays alive for the whole session.
         let Some(h) = self.launcher.clone() else {
             return;
@@ -436,11 +440,56 @@ impl Daemon {
             return;
         };
         let kind = row.kind.clone();
+        self.run_row_action(kind, launcher::RowAction::Open, cx);
+    }
+
+    /// Perform `action` on `kind`. Index 0 of `RowKind::actions` is `Open`,
+    /// which reuses the original activation path; the others are auxiliary
+    /// (reveal, copy path, run in terminal).
+    pub fn run_row_action(
+        &mut self,
+        kind: launcher::RowKind,
+        action: launcher::RowAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            launcher::RowAction::Open => self.activate_kind(kind, cx),
+            launcher::RowAction::ShowInFolder => {
+                if let launcher::RowKind::File { path } = &kind {
+                    crate::files::reveal(path);
+                }
+                self.dismiss_launcher(cx);
+            }
+            launcher::RowAction::CopyPath => {
+                let text = match &kind {
+                    launcher::RowKind::File { path } => path.display().to_string(),
+                    launcher::RowKind::App { exec } => exec.join(" "),
+                    launcher::RowKind::Window { .. } => String::new(),
+                };
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                self.dismiss_launcher(cx);
+            }
+            launcher::RowAction::RunInTerminal => {
+                if let launcher::RowKind::File { path } = &kind {
+                    let dir = path.parent().unwrap_or(path);
+                    crate::files::run_in_terminal(dir);
+                }
+                self.dismiss_launcher(cx);
+            }
+        }
+    }
+
+    fn activate_kind(&mut self, kind: launcher::RowKind, cx: &mut Context<Self>) {
         if let launcher::RowKind::App { .. } = &kind {
-            let name = row.label.clone();
-            self.recents.retain(|n| *n != name);
-            self.recents.insert(0, name);
-            self.recents.truncate(20);
+            let rows = self.filtered_rows();
+            if let Some(row) = rows.get(self.launcher_selected) {
+                let name = row.label.clone();
+                self.recents.retain(|n| *n != name);
+                self.recents.insert(0, name);
+                self.recents.truncate(20);
+            }
         }
         self.dismiss_launcher(cx);
         match kind {

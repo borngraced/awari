@@ -88,11 +88,47 @@ pub struct LauncherRow {
     pub resolved_icon: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RowAction {
+    Open,
+    ShowInFolder,
+    CopyPath,
+    RunInTerminal,
+}
+
+impl RowAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RowAction::Open => "Open",
+            RowAction::ShowInFolder => "Show in Folder",
+            RowAction::CopyPath => "Copy Path",
+            RowAction::RunInTerminal => "Run in Terminal",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum RowKind {
     App { exec: Vec<String> },
     Window { id: u64 },
     File { path: PathBuf },
+}
+
+impl RowKind {
+    /// Actions available for this kind, in display order. Index 0 is the
+    /// default action performed by `Enter`.
+    pub fn actions(&self) -> Vec<RowAction> {
+        match self {
+            RowKind::File { .. } => vec![
+                RowAction::Open,
+                RowAction::ShowInFolder,
+                RowAction::CopyPath,
+                RowAction::RunInTerminal,
+            ],
+            RowKind::App { .. } => vec![RowAction::Open, RowAction::CopyPath],
+            RowKind::Window { .. } => vec![RowAction::Open],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -116,6 +152,11 @@ impl LauncherView {
             category: Category::All,
         }
     }
+}
+
+struct ActionMenu {
+    actions: Vec<RowAction>,
+    index: usize,
 }
 
 pub struct Launcher {
@@ -144,6 +185,9 @@ pub struct Launcher {
     /// must have no periodic wakeups at all.
     blink_gen: Arc<AtomicU64>,
     blink_running: bool,
+    /// Open action menu for the selected row. `Alt+Enter` opens it, arrows
+    /// move the highlight, `Enter` runs the highlighted action, `Esc` closes.
+    action_menu: Option<ActionMenu>,
 }
 
 impl Launcher {
@@ -172,12 +216,16 @@ impl Launcher {
             focused: false,
             blink_gen: Arc::new(AtomicU64::new(0)),
             blink_running: false,
+            action_menu: None,
         }
     }
 
     pub fn apply_view(&mut self, view: LauncherView, cx: &mut Context<Self>) {
         if self.view.query != view.query || self.view.category != view.category {
             self.scrolled_to = None;
+        }
+        if self.view.query != view.query || self.view.selected != view.selected {
+            self.action_menu = None;
         }
         self.view = view;
         self.last_select = Some(self.view.selected);
@@ -1001,6 +1049,38 @@ impl Render for Launcher {
             .border_color(t.border())
             .child(results);
 
+        let action_menu_el = self.action_menu.as_ref().map(|menu| {
+            let index = menu.index;
+            div()
+                .absolute()
+                .left(px(20.))
+                .right(px(20.))
+                .top(px(60.))
+                .flex_col()
+                .gap(px(2.))
+                .p(px(6.))
+                .bg(t.panel())
+                .border_1()
+                .border_color(t.border())
+                .rounded(px(10.))
+                .shadow_lg()
+                .children(menu.actions.iter().enumerate().map(|(i, a)| {
+                    let selected = i == index;
+                    div()
+                        .id(("action", i as u64))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(12.))
+                        .py(px(8.))
+                        .rounded(px(6.))
+                        .bg(if selected { t.select() } else { t.ghost() })
+                        .text_color(t.fg())
+                        .child(div().child(a.label()))
+                        .child(div().child(if i == 0 { "↵" } else { "" }))
+                }))
+        });
+
         let search_focus = self.focus_handle.clone();
         div()
             .id("launcher-root")
@@ -1014,10 +1094,68 @@ impl Render for Launcher {
             .when_some(font_family, |root, family| root.font_family(family))
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 let key = ev.keystroke.key.to_ascii_lowercase();
+                if this.action_menu.is_some() {
+                    cx.stop_propagation();
+                    match key.as_str() {
+                        "escape" | "esc" => {
+                            this.action_menu = None;
+                            cx.notify();
+                        }
+                        "up" | "arrowup" => {
+                            if let Some(m) = this.action_menu.as_mut() {
+                                m.index = m.index.saturating_sub(1);
+                            }
+                            cx.notify();
+                        }
+                        "down" | "arrowdown" => {
+                            if let Some(m) = this.action_menu.as_mut() {
+                                if !m.actions.is_empty() {
+                                    m.index = (m.index + 1).min(m.actions.len() - 1);
+                                }
+                            }
+                            cx.notify();
+                        }
+                        "enter" | "return" => {
+                            let menu = this.action_menu.take();
+                            if let Some(menu) = menu {
+                                if let Some(row) = this.view.rows.get(this.view.selected) {
+                                    let kind = row.kind.clone();
+                                    if let Some(action) = menu.actions.get(menu.index).copied() {
+                                        let shell = this.shell.clone();
+                                        cx.defer(move |cx| {
+                                            let _ = shell.update(cx, |d, cx| {
+                                                d.run_row_action(kind, action, cx);
+                                            });
+                                        });
+                                    }
+                                }
+                            }
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 if matches!(
                     key.as_str(),
                     "escape" | "esc" | "enter" | "return" | "up" | "arrowup" | "down" | "arrowdown"
                 ) {
+                    if ev.keystroke.modifiers.alt
+                        && matches!(key.as_str(), "enter" | "return")
+                    {
+                        cx.stop_propagation();
+                        if let Some(row) = this.view.rows.get(this.view.selected) {
+                            let actions = row.kind.actions();
+                            if !actions.is_empty() {
+                                this.action_menu = Some(ActionMenu {
+                                    actions,
+                                    index: 0,
+                                });
+                                cx.notify();
+                            }
+                        }
+                        return;
+                    }
                     cx.stop_propagation();
                     post(
                         this,
@@ -1058,8 +1196,9 @@ impl Render for Launcher {
                     )
                     .child(
                         div()
-                            .id("launcher-panel")
-                            .w(px(panel_w))
+                        .id("launcher-panel")
+                        .relative()
+                        .w(px(panel_w))
                             .max_w_full()
                             .h_full()
                             .flex()
@@ -1106,10 +1245,24 @@ impl Render for Launcher {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(t.fg())
                                     .overflow_hidden()
-                                    .child(self.query_element()),
+                                .child(self.query_element()),
                             )
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml(px(10.))
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(t.muted())
+                                    .when(
+                                        self.action_menu.is_none()
+                                            && !self.view.rows.is_empty(),
+                                        |el| el.child("Alt ⏎ actions"),
+                                    ),
                             )
                             .when(show_results, |el| el.child(results_body))
+                            .when_some(action_menu_el, |el, menu| el.child(menu))
                             .with_spring(
                                 "launcher-panel",
                                 SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),

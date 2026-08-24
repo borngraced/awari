@@ -5,7 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +40,10 @@ const ROOT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// the added latency hides under continued typing; a keystroke burst costs
 /// one search instead of one per key.
 const QUERY_DEBOUNCE: Duration = Duration::from_millis(20);
+
+/// How often the worker wakes while idle to check for a cache-clear signal.
+/// Small enough that dismiss → reclaim is prompt, large enough to be free.
+const CTRL_POLL: Duration = Duration::from_millis(100);
 
 /// Behavior flags for the file source.
 pub struct FilesOptions {
@@ -93,6 +97,7 @@ fn path_query_dir(raw: &str) -> Option<PathBuf> {
 
 pub struct Files {
     tx: Sender<(u64, String)>,
+    ctrl: Sender<()>,
     seq: u64,
 }
 
@@ -101,13 +106,14 @@ impl Files {
     pub fn spawn(roots: Vec<PathBuf>, opts: FilesOptions) -> (Self, Receiver<(u64, Vec<FileHit>)>) {
         let (qtx, qrx) = std::sync::mpsc::channel::<(u64, String)>();
         let (rtx, rrx) = std::sync::mpsc::channel();
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<()>();
         if !roots.is_empty() {
             thread::Builder::new()
                 .name("awari-files".into())
-                .spawn(move || picker_loop(roots, qrx, rtx, opts))
+                .spawn(move || picker_loop(roots, qrx, rtx, ctrl_rx, opts))
                 .expect("files thread");
         }
-        (Self { tx: qtx, seq: 0 }, rrx)
+        (Self { tx: qtx, ctrl: ctrl_tx, seq: 0 }, rrx)
     }
 
     /// Fire a query; results arrive on the receiver tagged with this seq.
@@ -121,6 +127,12 @@ impl Files {
     pub fn invalidate(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    /// Reclaim file-search memory (per-directory scratch + root indexes).
+    /// Call when the launcher is dismissed so idle RAM returns to baseline.
+    pub fn clear(&self) {
+        let _ = self.ctrl.send(());
     }
 }
 
@@ -137,14 +149,11 @@ fn is_home_root(root: &Path) -> bool {
     }
 }
 
-fn picker_loop(
-    roots: Vec<PathBuf>,
-    qrx: Receiver<(u64, String)>,
-    rtx: Sender<(u64, Vec<FileHit>)>,
-    opts: FilesOptions,
-) {
-    let mut pickers: Vec<SharedFilePicker> = Vec::new();
-    for root in &roots {
+/// Build the persistent per-root `FilePicker`s. Called at startup and again
+/// whenever caches are reclaimed on dismiss, so the index is rebuilt fresh.
+fn build_root_pickers(roots: &[PathBuf]) -> Vec<SharedFilePicker> {
+    let mut pickers = Vec::new();
+    for root in roots {
         let shared = SharedFilePicker::default();
         let frecency = SharedFrecency::default();
         let home = is_home_root(root);
@@ -168,12 +177,39 @@ fn picker_loop(
             Err(e) => tracing::warn!(%e, root = %root.display(), "file index failed"),
         }
     }
+    pickers
+}
+
+fn picker_loop(
+    roots: Vec<PathBuf>,
+    qrx: Receiver<(u64, String)>,
+    rtx: Sender<(u64, Vec<FileHit>)>,
+    ctrl: Receiver<()>,
+    opts: FilesOptions,
+) {
+    let mut pickers = build_root_pickers(&roots);
     tracing::info!(roots = pickers.len(), "file index started");
 
     let parser = QueryParser::default();
     let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
     let mut transient_order: VecDeque<PathBuf> = VecDeque::with_capacity(TRANSIENT_DIR_CAP);
-    while let Ok(first) = qrx.recv() {
+    loop {
+        // Reclaim memory as soon as the launcher is dismissed: drop the
+        // per-directory scratch indexes and rebuild the root indexes from
+        // scratch, returning to a near-baseline "sleeping" footprint.
+        while ctrl.try_recv().is_ok() {
+            tracing::debug!("clearing file caches on dismiss");
+            transient.clear();
+            transient_order.clear();
+            pickers = build_root_pickers(&roots);
+        }
+        // Block for the next query, but wake periodically so a clear signal
+        // isn't starved while the launcher is idle.
+        let first = match qrx.recv_timeout(CTRL_POLL) {
+            Ok(f) => f,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         // Debounce: let a typing burst land, then answer only the newest
         // queued query (coalesce drains everything that arrived).
         thread::sleep(QUERY_DEBOUNCE);
@@ -427,6 +463,72 @@ pub fn activate(path: &Path) {
                 .ok();
         }
         Err(e) => tracing::warn!(%e, path = %path.display(), "xdg-open failed"),
+    }
+}
+
+/// Reveal a path in the file manager by opening its parent directory.
+pub fn reveal(path: &Path) {
+    let parent = path.parent().unwrap_or(path);
+    activate(parent);
+}
+
+/// Resolve the user's preferred terminal emulator: `$TERMINAL`, then probing
+/// for common ones.
+fn resolve_terminal() -> Option<String> {
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if !term.trim().is_empty() {
+            return Some(term.trim().to_string());
+        }
+    }
+    for candidate in [
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "foot",
+        "gnome-terminal",
+        "konsole",
+        "st",
+    ] {
+        if Command::new("which")
+            .arg(candidate)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Build the args to start a shell in `dir` for the given terminal.
+fn terminal_args(term: &str, dir: &Path) -> Vec<String> {
+    let dir = dir.display().to_string();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+    let script = format!("cd {dir:?} && exec {shell}");
+    match term {
+        "gnome-terminal" => vec!["--".to_string(), "sh".to_string(), "-c".to_string(), script],
+        _ => vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), script],
+    }
+}
+
+/// Open a terminal emulator rooted at `dir`.
+pub fn run_in_terminal(dir: &Path) {
+    let Some(term) = resolve_terminal() else {
+        tracing::warn!("no terminal emulator found; set $TERMINAL");
+        return;
+    };
+    if let Err(e) = Command::new(&term)
+        .args(terminal_args(&term, dir))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        tracing::warn!(%e, term, "failed to spawn terminal");
     }
 }
 
