@@ -4,12 +4,11 @@
 
 // ── Theme ─────────────────────────────────────────────────────────────
 // Pick a built-in palette by name (case-insensitive), then override tokens:
-//   classic · catppuccin (default) · gruvbox · gruvbox-light
-//   tokyo-night · nord
-// (`default` and `mocha` also resolve to catppuccin.) Colors accept
-// #RGB, #RRGGBB, or #RRGGBBAA — no url() or named CSS colors.
+//   awari (default) · ash · ember · verdant · paper · mono
+//   tokyonight · catppuccin · gruvbox
+// Colors accept #RGB, #RRGGBB, or #RRGGBBAA — no url() or named CSS colors.
 theme {
-    name "catppuccin"          // preset; omit to define every color by hand
+    name "awari"               // preset; omit to define every color by hand
 
     // font "Inter"             // system family via fontdb; "default"/"" = GPUI system UI font
     // font-size 14             // px; clamped to 8..=64
