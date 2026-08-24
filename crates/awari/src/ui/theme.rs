@@ -1,6 +1,6 @@
 //! Launcher palette. Defaults match the overlay concept; every token is KDL-overridable.
 
-use gpui::{rgb, rgba, Rgba};
+use gpui::{Rgba, rgb, rgba};
 
 /// Packed `0xRRGGBBAA`. Six-digit hex is stored with `AA = FF`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,7 +225,9 @@ pub fn parse_hex(s: &str) -> Option<Color> {
             let r = (n >> 8) & 0xf;
             let g = (n >> 4) & 0xf;
             let b = n & 0xf;
-            Some(Color::rgb((r << 20) | (r << 16) | (g << 12) | (g << 8) | (b << 4) | b))
+            Some(Color::rgb(
+                (r << 20) | (r << 16) | (g << 12) | (g << 8) | (b << 4) | b,
+            ))
         }
         6 => Some(Color::rgb(u32::from_str_radix(s, 16).ok()?)),
         8 => Some(Color::rgba(u32::from_str_radix(s, 16).ok()?)),

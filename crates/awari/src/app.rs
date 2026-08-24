@@ -1,20 +1,19 @@
 //! Overlay launcher daemon. No bar. Process stays alive with no windows.
 
+use std::collections::HashMap;
+use std::fs;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
-use std::sync::mpsc::Receiver;
-use std::collections::HashMap;
-use std::fs;
 
-use gpui::{
-    point, px, size, App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global,
-    QuitMode, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-};
-use awari_compositor::{
-    Compositor, CompositorCommand, CompositorInbox, CompositorMsg,
-};
+use awari_compositor::{Compositor, CompositorCommand, CompositorInbox, CompositorMsg};
 use awari_ipc::ClientRequest;
+use gpui::{
+    App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
+    size,
+};
 
 use crate::config::Config;
 use crate::desktop::DesktopApp;
@@ -280,7 +279,8 @@ impl Daemon {
             let q = self.launcher_query.trim();
             let use_cache = !q.is_empty()
                 && launcher::command_prefix(q).is_none()
-                && self.launcher_category != launcher::Category::Commands;
+                && self.launcher_category != launcher::Category::Commands
+                && crate::math::evaluate(q).is_none();
             let (cached_app, cached_win): (
                 Option<Vec<launcher::LauncherRow>>,
                 Option<Vec<launcher::LauncherRow>>,
@@ -536,21 +536,13 @@ impl Daemon {
                 l.apply_view(LauncherView::closed(theme), cx);
                 l.closing = true;
                 window.set_input_region(Some(&[]));
-                window.set_keyboard_interactivity(
-                    gpui::layer_shell::KeyboardInteractivity::None,
-                );
+                window.set_keyboard_interactivity(gpui::layer_shell::KeyboardInteractivity::None);
                 cx.notify();
             });
         });
     }
 
-    fn launcher_key(
-        &mut self,
-        key: &str,
-        _ch: Option<&str>,
-        shift: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn launcher_key(&mut self, key: &str, _ch: Option<&str>, shift: bool, cx: &mut Context<Self>) {
         let key = key.to_ascii_lowercase();
         // Shift+Up/Down recall past queries without disturbing the live one.
         if shift && matches!(key.as_str(), "up" | "arrowup" | "down" | "arrowdown") {
@@ -679,7 +671,15 @@ impl Daemon {
             return;
         };
         let kind = row.kind.clone();
-        self.run_row_action(kind, launcher::RowAction::Open, cx);
+        // Enter runs the kind's default action (index 0 of `actions()`), which
+        // is `Open` for apps/files/windows, `Run` for commands, and
+        // `CopyResult` for calculator results.
+        let default = kind
+            .actions()
+            .into_iter()
+            .next()
+            .unwrap_or(launcher::RowAction::Open);
+        self.run_row_action(kind, default, cx);
     }
 
     /// Perform `action` on `kind`. Index 0 of `RowKind::actions` is `Open`,
@@ -692,9 +692,7 @@ impl Daemon {
         cx: &mut Context<Self>,
     ) {
         match action {
-            launcher::RowAction::Open | launcher::RowAction::Run => {
-                self.activate_kind(kind, cx)
-            }
+            launcher::RowAction::Open | launcher::RowAction::Run => self.activate_kind(kind, cx),
             launcher::RowAction::ShowInFolder => {
                 if let launcher::RowKind::File { path } = &kind {
                     crate::files::reveal(path);
@@ -707,6 +705,7 @@ impl Daemon {
                     launcher::RowKind::App { exec, .. } => exec.join(" "),
                     launcher::RowKind::Window { .. } => String::new(),
                     launcher::RowKind::Command { command } => command.clone(),
+                    launcher::RowKind::Calc { .. } => String::new(),
                 };
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -720,6 +719,12 @@ impl Daemon {
                 }
                 self.dismiss_launcher(cx);
             }
+            launcher::RowAction::CopyResult => {
+                if let launcher::RowKind::Calc { result } = &kind {
+                    cx.write_to_clipboard(ClipboardItem::new_string(result.clone()));
+                }
+                self.dismiss_launcher(cx);
+            }
         }
     }
 
@@ -730,8 +735,8 @@ impl Daemon {
         if let launcher::RowKind::App { name, .. } = &kind {
             self.recents.retain(|n| n != name);
             self.recents.insert(0, name.clone());
-                self.recents.truncate(20);
-                *self.app_usage.entry(name.clone()).or_insert(0) += 1;
+            self.recents.truncate(20);
+            *self.app_usage.entry(name.clone()).or_insert(0) += 1;
             self.save_usage();
         }
         if let launcher::RowKind::Command { command } = &kind {
@@ -765,6 +770,7 @@ impl Daemon {
                 }
                 launcher::RowKind::File { .. } => unreachable!("handled above"),
                 launcher::RowKind::Command { .. } => {}
+                launcher::RowKind::Calc { .. } => {}
             }
         });
     }

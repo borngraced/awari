@@ -11,7 +11,11 @@ fn main() {
         "/usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0",
         "/usr/lib/libxkbcommon-x11.so.0",
     ];
-    let Some(src) = candidates.iter().copied().find(|p| std::path::Path::new(p).exists()) else {
+    let Some(src) = candidates
+        .iter()
+        .copied()
+        .find(|p| std::path::Path::new(p).exists())
+    else {
         return;
     };
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");

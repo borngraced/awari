@@ -1,6 +1,6 @@
 //! Zed Lucide icons. GPUI tints the SVG alpha mask with `text_color`.
 
-use gpui::{px, svg, Rgba, Styled};
+use gpui::{Rgba, Styled, px, svg};
 
 #[allow(dead_code)]
 pub const ICON_PX: f32 = 14.0;

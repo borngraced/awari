@@ -10,9 +10,7 @@ const ICON_EXTS: [&str; 2] = ["png", "svg"];
 
 /// Theme directories probed in order. 48 first (crisp at 20–22px), then
 /// scalable (vector), then larger rasters.
-const THEME_SUBDIRS: [&str; 6] = [
-    "48x48", "scalable", "32x32", "64x64", "128x128", "256x256",
-];
+const THEME_SUBDIRS: [&str; 6] = ["48x48", "scalable", "32x32", "64x64", "128x128", "256x256"];
 
 /// Resolve `name` against the user's real XDG data dirs, memoized.
 pub fn resolve(name: &str) -> Option<PathBuf> {
@@ -90,10 +88,7 @@ mod tests {
     use std::fs;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "awari-icons-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("awari-icons-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -151,7 +146,10 @@ mod tests {
         );
 
         fs::write(base.join("48x48/apps/app.png"), b"png").unwrap();
-        assert_eq!(resolve_in("app", &[dir]), Some(base.join("48x48/apps/app.png")));
+        assert_eq!(
+            resolve_in("app", &[dir]),
+            Some(base.join("48x48/apps/app.png"))
+        );
     }
 
     #[test]

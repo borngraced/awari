@@ -83,11 +83,7 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
             &mut len,
         )
     };
-    if rc == 0 {
-        Some(cred.uid)
-    } else {
-        None
-    }
+    if rc == 0 { Some(cred.uid) } else { None }
 }
 
 static IPC_RX: Mutex<Option<std::sync::mpsc::Receiver<ClientRequest>>> = Mutex::new(None);

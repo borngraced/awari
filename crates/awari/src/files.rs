@@ -5,15 +5,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::OnceLock;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
 use regex::Regex;
 
 use fff_search::{
-    ContentCacheBudget, FilePicker, FilePickerOptions, FFFMode, FuzzySearchOptions, PaginationArgs,
+    ContentCacheBudget, FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, PaginationArgs,
     QueryParser, SharedFilePicker, SharedFrecency,
 };
 
@@ -120,7 +120,14 @@ impl Files {
                 .spawn(move || picker_loop(roots, qrx, rtx, ctrl_rx, opts))
                 .expect("files thread");
         }
-        (Self { tx: qtx, ctrl: ctrl_tx, seq: 0 }, rrx)
+        (
+            Self {
+                tx: qtx,
+                ctrl: ctrl_tx,
+                seq: 0,
+            },
+            rrx,
+        )
     }
 
     /// Fire a query; results arrive on the receiver tagged with this seq.
@@ -246,7 +253,14 @@ fn picker_loop(
             transient.clear();
             transient_order.clear();
         }
-        let hits = search_all(&pickers, &mut transient, &mut transient_order, &parser, &raw, &opts);
+        let hits = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            &raw,
+            &opts,
+        );
         prev_raw = raw;
         if rtx.send((seq, hits)).is_err() {
             return;
@@ -494,7 +508,13 @@ fn search_all(
         } else {
             term
         };
-        merged.push(search_one(shared, parser, &t_fff, &t_re, opts.index_lockfiles));
+        merged.push(search_one(
+            shared,
+            parser,
+            &t_fff,
+            &t_re,
+            opts.index_lockfiles,
+        ));
     }
     let cap = PER_ROOT_ROWS.saturating_mul(merged.len().max(1));
     merge_round_robin(&merged, cap)
@@ -564,8 +584,7 @@ fn search_one(
                 path: item.absolute_path(p, &base),
             })
             .filter(|h| {
-                (index_lockfiles || !is_lockfile(&h.path))
-                    && re.is_match(&h.path.to_string_lossy())
+                (index_lockfiles || !is_lockfile(&h.path)) && re.is_match(&h.path.to_string_lossy())
             })
             .take(PER_ROOT_ROWS)
             .collect();
@@ -676,8 +695,18 @@ pub(crate) fn resolve_terminal() -> Option<String> {
 /// Build the args to run `script` via `sh -c` in the given terminal.
 fn terminal_args(term: &str, script: &str) -> Vec<String> {
     match term {
-        "gnome-terminal" => vec!["--".to_string(), "sh".to_string(), "-c".to_string(), script.to_string()],
-        _ => vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), script.to_string()],
+        "gnome-terminal" => vec![
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+        ],
+        _ => vec![
+            "-e".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+        ],
     }
 }
 
@@ -906,7 +935,11 @@ mod tests {
             }
         }
         std::thread::sleep(Duration::from_millis(500));
-        eprintln!("after path phase: rss = {} KB (delta {} KB)", rss_kb(), rss_kb() - pbase);
+        eprintln!(
+            "after path phase: rss = {} KB (delta {} KB)",
+            rss_kb(),
+            rss_kb() - pbase
+        );
         files.clear();
         std::thread::sleep(Duration::from_millis(500));
         eprintln!("after clear: rss = {} KB", rss_kb());

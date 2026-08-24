@@ -1,13 +1,12 @@
 //! Overlay finder: search, chips, list/grid. Clean, text-focused layout.
 
-use gpui::{
-    div, img, px, AnyElement, AnimationExt, App, Context, FocusHandle,
-    Focusable, FontWeight, Image, ImageFormat, Rgba, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled,
-    StyledImage, StyledText, HighlightStyle,
-    UniformListScrollHandle, WeakEntity, Window, uniform_list,
-};
 use gpui::prelude::*;
+use gpui::{
+    AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    Image, ImageFormat, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
+    Render, Rgba, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage, StyledText,
+    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
+};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -72,12 +71,26 @@ impl Category {
 #[derive(Clone)]
 pub enum LauncherCmd {
     Dismiss,
-    Key { key: String, ch: Option<String>, shift: bool },
-    SetQuery { query: String },
-    Activate { index: usize },
-    Select { index: usize },
-    SetCategory { category: Category },
-    OpenToRender { ms: u64 },
+    Key {
+        key: String,
+        ch: Option<String>,
+        shift: bool,
+    },
+    SetQuery {
+        query: String,
+    },
+    Activate {
+        index: usize,
+    },
+    Select {
+        index: usize,
+    },
+    SetCategory {
+        category: Category,
+    },
+    OpenToRender {
+        ms: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -94,6 +107,7 @@ pub enum RowAction {
     CopyPath,
     RunInTerminal,
     Run,
+    CopyResult,
 }
 
 impl RowAction {
@@ -104,18 +118,32 @@ impl RowAction {
             RowAction::CopyPath => "Copy Path",
             RowAction::RunInTerminal => "Run in Terminal",
             RowAction::Run => "Run",
+            RowAction::CopyResult => "Copy Result",
         }
     }
 }
 
 #[derive(Clone)]
 pub enum RowKind {
-    App { name: String, exec: Vec<String> },
-    Window { id: u64 },
-    File { path: PathBuf },
+    App {
+        name: String,
+        exec: Vec<String>,
+    },
+    Window {
+        id: u64,
+    },
+    File {
+        path: PathBuf,
+    },
     /// A shell command to run in a terminal (from `>` command mode or the
     /// no-match fallback).
-    Command { command: String },
+    Command {
+        command: String,
+    },
+    /// A calculator result; `Enter` copies the value to the clipboard.
+    Calc {
+        result: String,
+    },
 }
 
 impl RowKind {
@@ -132,6 +160,7 @@ impl RowKind {
             RowKind::App { .. } => vec![RowAction::Open, RowAction::CopyPath],
             RowKind::Window { .. } => vec![RowAction::Open],
             RowKind::Command { .. } => vec![RowAction::Run, RowAction::CopyPath],
+            RowKind::Calc { .. } => vec![RowAction::CopyResult],
         }
     }
 }
@@ -240,6 +269,8 @@ impl Launcher {
         }
         if self.view.query != view.query || self.view.selected != view.selected {
             self.action_menu = None;
+        }
+        if self.view.query != view.query {
             self.accepted = None;
         }
         self.view = view;
@@ -308,7 +339,11 @@ impl Launcher {
                 if c == 0 {
                     return None;
                 }
-                let prev = q[..c].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                let prev = q[..c]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 q.replace_range(prev..c, "");
                 c = prev;
             }
@@ -316,14 +351,26 @@ impl Launcher {
                 if c >= q.len() {
                     return None;
                 }
-                let next = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
+                let next = q[c..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| c + i)
+                    .unwrap_or(q.len());
                 q.replace_range(c..next, "");
             }
             "arrowleft" | "left" => {
-                c = q[..c].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                c = q[..c]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
             }
             "arrowright" | "right" => {
-                c = q[c..].char_indices().nth(1).map(|(i, _)| c + i).unwrap_or(q.len());
+                c = q[c..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| c + i)
+                    .unwrap_or(q.len());
             }
             "home" => c = 0,
             "end" => c = q.len(),
@@ -376,21 +423,25 @@ impl Launcher {
             .accepted
             .as_ref()
             .filter(|(aq, _)| aq == q && c == q.len() && token_len == 0)
-            .map(|(_, off)| *off.min(&c));
+            .map(|(_, off)| *off);
         let s_accent_len = if token_len > 0 {
             token_len.saturating_sub(c)
         } else if let Some(off) = accepted_off {
-            c - off
+            (c - off).min(suffix.len())
         } else {
             0
-        }
-        .min(suffix.len());
+        };
         let (s_accent, s_norm) = suffix.split_at(s_accent_len);
-        let ghost = if token_len == 0 && c == q.len() {
-            self.view
-                .rows
-                .first()
-                .and_then(|r| ghost_suffix(q, &r.label))
+        // Ghost preview hides once its own accept is on screen. Calculator
+        // results are shown verbatim, so they must not spawn a ghost suffix.
+        let ghost = if token_len == 0 && c == q.len() && accepted_off.is_none() {
+            self.view.rows.first().and_then(|r| {
+                if matches!(r.kind, RowKind::Calc { .. }) {
+                    None
+                } else {
+                    ghost_suffix(q, &r.label)
+                }
+            })
         } else {
             None
         };
@@ -412,9 +463,7 @@ impl Launcher {
             .when(!s_norm.is_empty(), |el| {
                 el.child(div().child(s_norm.to_string()))
             })
-            // Ghost preview hides once its own accept is on screen.
-            .when(ghost.is_some() && accepted_off.is_none(), |el| {
-                let g = ghost.unwrap();
+            .when_some(ghost, |el, g| {
                 el.child(div().text_color(t.faint()).child(g))
             })
             .into_any_element()
@@ -456,6 +505,7 @@ fn row_category(r: &LauncherRow) -> Category {
         // Windows have no dedicated tab; treat them as neutral (no highlight).
         RowKind::Window { .. } => Category::All,
         RowKind::Command { .. } => Category::Commands,
+        RowKind::Calc { .. } => Category::All,
     }
 }
 
@@ -503,12 +553,15 @@ fn ghost_suffix(query: &str, top_label: &str) -> Option<String> {
     let mut matched = 0usize;
     for (off, lc) in top_label.char_indices() {
         match qi.next() {
-            None => return Some(top_label[matched..].to_string()),
+            None => {
+                let rest = &top_label[matched..];
+                return if rest.is_empty() { None } else { Some(rest.to_string()) };
+            }
             Some(qc) => {
-                if !qc
-                    .to_lowercase()
-                    .eq(lc.to_lowercase())
-                {
+                let hit = qc == lc
+                    || (qc.is_ascii() && lc.is_ascii() && qc.eq_ignore_ascii_case(&lc))
+                    || qc.to_lowercase().eq(lc.to_lowercase());
+                if !hit {
                     return None;
                 }
                 matched = off + lc.len_utf8();
@@ -518,8 +571,45 @@ fn ghost_suffix(query: &str, top_label: &str) -> Option<String> {
     None
 }
 
-/// Expand an `o:` path argument: `~` → `$HOME`, absolute `/…` as-is, and a
-/// bare name (no `~`/`/`) resolved relative to `$HOME`.
+/// What a Tab keypress should do, decided purely from view state.
+#[derive(Debug)]
+enum TabOutcome {
+    /// Inline ghost accept: `completed` is the full query, `accepted_off` the
+    /// byte offset where the accent-highlighted suffix starts.
+    Inline {
+        completed: String,
+        accepted_off: usize,
+    },
+    /// Legacy row completion (selected row's path / label / command / result).
+    Row(String),
+}
+
+fn tab_completion(query: &str, rows: &[LauncherRow], selected: usize) -> Option<TabOutcome> {
+    if let Some(r) = rows.first() {
+        // Calc results never ghost (the result text is not a completion).
+        if !query.is_empty()
+            && command_prefix(query).is_none()
+            && !matches!(r.kind, RowKind::Calc { .. })
+        {
+            if ghost_suffix(query, &r.label).is_some() {
+                return Some(TabOutcome::Inline {
+                    accepted_off: query.len(),
+                    completed: r.label.clone(),
+                });
+            }
+        }
+    }
+    rows.get(selected).and_then(|row| {
+        let completion = match &row.kind {
+            RowKind::File { path } => path.display().to_string(),
+            RowKind::App { .. } | RowKind::Window { .. } => row.label.clone(),
+            RowKind::Command { command } => command.clone(),
+            RowKind::Calc { result } => result.clone(),
+        };
+        (!completion.is_empty()).then_some(TabOutcome::Row(completion))
+    })
+}
+
 fn expand_open_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -678,9 +768,8 @@ pub fn score_app_window(
         apps.iter()
             .filter_map(|app| {
                 if !apps_only {
-                    let ident_hits_window = |probe: &str| {
-                        visible_app_ids.iter().any(|v| *v == probe)
-                    };
+                    let ident_hits_window =
+                        |probe: &str| visible_app_ids.iter().any(|v| *v == probe);
                     if ident_hits_window(&app.name_lc)
                         || ident_hits_window(app.app_id_lc.as_deref().unwrap_or(""))
                     {
@@ -719,9 +808,7 @@ pub fn score_app_window(
         app_scored.sort_by(|a, b| {
             let ra = recent_pos.get(a.1.name.as_str()).copied();
             let rb = recent_pos.get(b.1.name.as_str()).copied();
-            let r = ra
-                .unwrap_or(usize::MAX)
-                .cmp(&rb.unwrap_or(usize::MAX));
+            let r = ra.unwrap_or(usize::MAX).cmp(&rb.unwrap_or(usize::MAX));
             if r != std::cmp::Ordering::Equal {
                 return r;
             }
@@ -778,18 +865,8 @@ pub fn filter_rows(
     total_max: usize,
 ) -> Vec<LauncherRow> {
     filter_rows_cached(
-        query,
-        apps,
-        windows,
-        files,
-        recents,
-        app_usage,
-        app_icons,
-        category,
-        file_max,
-        total_max,
-        None,
-        None,
+        query, apps, windows, files, recents, app_usage, app_icons, category, file_max, total_max,
+        None, None,
     )
 }
 
@@ -823,7 +900,9 @@ pub fn filter_rows_cached(
                     Vec::new()
                 } else {
                     vec![LauncherRow {
-                        kind: RowKind::Command { command: cmd.to_string() },
+                        kind: RowKind::Command {
+                            command: cmd.to_string(),
+                        },
                         label: format!("Run “{}” in terminal", cmd),
                         resolved_icon: None,
                     }]
@@ -833,6 +912,19 @@ pub fn filter_rows_cached(
                 return open_path_rows(q.strip_prefix("o:").unwrap(), file_max);
             }
             _ => {}
+        }
+    }
+    // Calculator mode: a query that parses as arithmetic shows its result as
+    // the sole row. Only in the All view, so category tabs still behave.
+    if category == Category::All {
+        if let Some(result) = crate::math::evaluate(q) {
+            return vec![LauncherRow {
+                kind: RowKind::Calc {
+                    result: result.clone(),
+                },
+                label: format!("{} = {}", q.trim(), result),
+                resolved_icon: None,
+            }];
         }
     }
     if category == Category::Commands {
@@ -910,7 +1002,9 @@ pub fn filter_rows_cached(
     // shell command, mirroring the `>` command-mode trigger.
     if out.is_empty() && !empty && !crate::files::is_path_shaped(q) {
         out.push(LauncherRow {
-            kind: RowKind::Command { command: q.to_string() },
+            kind: RowKind::Command {
+                command: q.to_string(),
+            },
             label: format!("Run “{}” in terminal", q),
             resolved_icon: None,
         });
@@ -943,16 +1037,13 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: &Theme, size: f32, radius: f3
         .items_center()
         .justify_center()
         .rounded(px(radius))
-        .bg(if selected {
-            t.hover()
-        } else {
-            t.surface()
-        });
+        .bg(if selected { t.hover() } else { t.surface() });
     match &row.kind {
-        RowKind::File { .. } => tile.child(Icon::File.element_px(
-            if selected { t.fg() } else { t.muted() },
-            size * 0.58,
-        )),
+        RowKind::File { .. } => tile
+            .child(Icon::File.element_px(if selected { t.fg() } else { t.muted() }, size * 0.58)),
+        RowKind::Calc { .. } => tile.child(
+            Icon::Command.element_px(if selected { t.fg() } else { t.muted() }, size * 0.58),
+        ),
         _ => match &row.resolved_icon {
             Some(path) => tile.overflow_hidden().child(
                 img(path.clone())
@@ -1006,6 +1097,8 @@ fn row_subtitle(row: &LauncherRow) -> String {
         RowKind::App { exec, .. } => exec.join(" "),
         RowKind::Window { .. } => "Window".into(),
         RowKind::Command { command } => command.clone(),
+        // The label already shows "expr = result"; a subtitle would repeat it.
+        RowKind::Calc { .. } => String::new(),
     }
 }
 
@@ -1020,11 +1113,7 @@ impl Launcher {
             return;
         }
         self.scrolled_to = Some(sel);
-        let ix = if grid {
-            sel / GRID_COLS
-        } else {
-            sel
-        };
+        let ix = if grid { sel / GRID_COLS } else { sel };
         self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
     }
 
@@ -1260,12 +1349,8 @@ impl Render for Launcher {
                     cx.processor(move |this, range: Range<usize>, _, cx| {
                         range
                             .map(|row_i| {
-                                let mut row = div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap(px(10.))
-                                    .p(px(8.))
-                                    .w_full();
+                                let mut row =
+                                    div().flex().flex_row().gap(px(10.)).p(px(8.)).w_full();
                                 for col in 0..GRID_COLS {
                                     let i = row_i * GRID_COLS + col;
                                     row = row.child(this.tile(i, &t_grid, cx));
@@ -1296,11 +1381,7 @@ impl Render for Launcher {
             );
         }
 
-        let mut cat_icons = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(14.));
+        let mut cat_icons = div().flex().flex_none().items_center().gap(px(14.));
         let this = cx.entity();
         let files_enabled = self.view.files_enabled;
         for c in Category::all() {
@@ -1445,17 +1526,12 @@ impl Render for Launcher {
                     key.as_str(),
                     "escape" | "esc" | "enter" | "return" | "up" | "arrowup" | "down" | "arrowdown"
                 ) {
-                    if ev.keystroke.modifiers.alt
-                        && matches!(key.as_str(), "enter" | "return")
-                    {
+                    if ev.keystroke.modifiers.alt && matches!(key.as_str(), "enter" | "return") {
                         cx.stop_propagation();
                         if let Some(row) = this.view.rows.get(this.view.selected) {
                             let actions = row.kind.actions();
                             if !actions.is_empty() {
-                                this.action_menu = Some(ActionMenu {
-                                    actions,
-                                    index: 0,
-                                });
+                                this.action_menu = Some(ActionMenu { actions, index: 0 });
                                 cx.notify();
                             }
                         }
@@ -1475,38 +1551,30 @@ impl Render for Launcher {
                 }
                 if key == "tab" {
                     cx.stop_propagation();
-                    // Inline ghost first: complete from the top row's label
-                    // and keep its suffix accent-marked until the next edit.
-                    let q = this.view.query.clone();
-                    if let Some(sugg) =
-                        this.view.rows.first().and_then(|r| ghost_suffix(&q, &r.label))
-                    {
-                        let off = q.len();
-                        let mut completed = q;
-                        completed.push_str(&sugg);
-                        this.cursor = completed.len();
-                        this.accepted = Some((completed.clone(), off));
-                        post(this, cx, LauncherCmd::SetQuery { query: completed });
-                        return;
-                    }
-                    if let Some(row) = this.view.rows.get(this.view.selected) {
-                        let completion = match &row.kind {
-                            RowKind::File { path } => path.display().to_string(),
-                            RowKind::App { .. } | RowKind::Window { .. } => row.label.clone(),
-                            RowKind::Command { command } => command.clone(),
-                        };
-                        if !completion.is_empty() {
+                    match tab_completion(&this.view.query, &this.view.rows, this.view.selected) {
+                        Some(TabOutcome::Inline {
+                            completed,
+                            accepted_off,
+                        }) => {
+                            this.cursor = completed.len();
+                            this.accepted = Some((completed.clone(), accepted_off));
+                            this.view.query = completed.clone();
+                            post(this, cx, LauncherCmd::SetQuery { query: completed });
+                        }
+                        Some(TabOutcome::Row(completion)) => {
                             this.cursor = completion.len();
                             this.accepted = None;
                             post(this, cx, LauncherCmd::SetQuery { query: completion });
                         }
+                        None => {}
                     }
                     return;
                 }
                 if let Some(query) = this.edit(&ev.keystroke) {
                     cx.stop_propagation();
-                    post(this, cx, LauncherCmd::SetQuery { query: query });
+                    post(this, cx, LauncherCmd::SetQuery { query });
                 }
+                cx.notify();
             }))
             .child(
                 div()
@@ -1532,9 +1600,9 @@ impl Render for Launcher {
                     )
                     .child(
                         div()
-                        .id("launcher-panel")
-                        .relative()
-                        .w(px(panel_w))
+                            .id("launcher-panel")
+                            .relative()
+                            .w(px(panel_w))
                             .max_w_full()
                             .h_full()
                             .flex()
@@ -1550,7 +1618,7 @@ impl Render for Launcher {
                                 MouseButton::Left,
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                             .child(
+                            .child(
                                 div()
                                     .flex()
                                     .flex_none()
@@ -1559,39 +1627,34 @@ impl Render for Launcher {
                                     .px(px(20.))
                                     .py(px(16.))
                                     .child(
-                                div()
-                                    .h(px(32.))
-                                    .flex()
-                                    .items_center()
-                                    .flex_none()
-                                .child(
-                                    img(Arc::new(Image::from_bytes(
-                                        ImageFormat::Svg,
-                                        AWARI_MARK.to_vec(),
-                                    )))
-                                    .size(px(32.))
-                                    .flex_none(),
-                                ),
-                            )
+                                        div().h(px(32.)).flex().items_center().flex_none().child(
+                                            img(Arc::new(Image::from_bytes(
+                                                ImageFormat::Svg,
+                                                AWARI_MARK.to_vec(),
+                                            )))
+                                            .size(px(32.))
+                                            .flex_none(),
+                                        ),
+                                    )
                                     .child(
-                                div()
-                                    .id("query-wrap")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .mt(px(2.))
-                                    .when_some(t.font.clone(), |el, f| el.font_family(f))
-                                    .text_size(px(24.))
-                                    .line_height(px(24.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(t.fg())
-                                    .overflow_hidden()
-                                    .child(self.query_element())
-                                    .child(div().flex_1().min_w_0())
-                                    .child(cat_icons),
-                            )
+                                        div()
+                                            .id("query-wrap")
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .mt(px(2.))
+                                            .when_some(t.font.clone(), |el, f| el.font_family(f))
+                                            .text_size(px(24.))
+                                            .line_height(px(24.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(t.fg())
+                                            .overflow_hidden()
+                                            .child(self.query_element())
+                                            .child(div().flex_1().min_w_0())
+                                            .child(cat_icons),
+                                    ),
                             )
                             .when(show_results, |el| el.child(results_body))
                             .when_some(action_menu_el, |el, menu| el.child(menu))
@@ -1600,7 +1663,7 @@ impl Render for Launcher {
                                 SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
                                 |el, v| el.mt(px((1.0 - v) * SLIDE)).opacity(v),
                             ),
-                    )
+                    ),
             )
     }
 }
@@ -1644,7 +1707,13 @@ mod tests {
     #[test]
     fn filter_matches_name_case_insensitive() {
         let apps = vec![app("Firefox", None)];
-        let out = rows("fire", &apps, &[(1, "Terminal".into(), None, None)], &[], &[]);
+        let out = rows(
+            "fire",
+            &apps,
+            &[(1, "Terminal".into(), None, None)],
+            &[],
+            &[],
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].label, "Firefox");
     }
@@ -1663,7 +1732,12 @@ mod tests {
         let out = rows(
             "",
             &apps,
-            &[(7, "Mozilla Firefox".into(), Some("firefox".into()), Some("firefox".into()))],
+            &[(
+                7,
+                "Mozilla Firefox".into(),
+                Some("firefox".into()),
+                Some("firefox".into()),
+            )],
             &[],
             &[],
         );
@@ -1767,6 +1841,42 @@ mod tests {
     }
 
     #[test]
+    fn calculator_shows_result_in_all_view() {
+        let out = filter_rows(
+            "2 + 2",
+            &[],
+            &[],
+            &[],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            Category::All,
+            50,
+            30,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "2 + 2 = 4");
+        assert!(matches!(out[0].kind, RowKind::Calc { .. }));
+    }
+
+    #[test]
+    fn calculator_only_in_all_view() {
+        let out = filter_rows(
+            "2 + 2",
+            &[],
+            &[],
+            &[],
+            &[],
+            &Default::default(),
+            &Default::default(),
+            Category::Apps,
+            50,
+            30,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn open_path_lists_real_entries() {
         let dir = std::env::temp_dir().join(format!("awari_o_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -1777,9 +1887,10 @@ mod tests {
         assert!(names.iter().any(|n| *n == "alpha.txt"), "{names:?}");
         assert!(names.iter().any(|n| *n == "beta.log"), "{names:?}");
         // An existing directory also offers a direct "Open <dir>" row.
-        assert!(out
-            .iter()
-            .any(|r| r.label == format!("Open “{}”", dir.display())));
+        assert!(
+            out.iter()
+                .any(|r| r.label == format!("Open “{}”", dir.display()))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1853,5 +1964,92 @@ mod open_path_tests {
         assert_eq!(ghost_suffix("é", "Émigré").as_deref(), Some("migré"));
         // Multi-byte query that fully consumes the label → nothing to add.
         assert_eq!(ghost_suffix("émigré", "Émigré"), None);
+    }
+
+    fn lrow(kind: RowKind, label: &str) -> LauncherRow {
+        LauncherRow {
+            kind,
+            label: label.into(),
+            resolved_icon: None,
+        }
+    }
+
+    #[test]
+    fn tab_inline_completes_top_row() {
+        let rows = vec![lrow(
+            RowKind::App {
+                name: "GoLand".into(),
+                exec: vec![],
+            },
+            "GoLand",
+        )];
+        match tab_completion("go", &rows, 0) {
+            Some(TabOutcome::Inline {
+                completed,
+                accepted_off,
+            }) => {
+                assert_eq!(completed, "GoLand");
+                assert_eq!(accepted_off, 2);
+            }
+            other => panic!("expected Inline, got {other:?}"),
+        }
+        assert!(tab_completion("", &rows, 0).is_some());
+    }
+
+    #[test]
+    fn tab_command_mode_skips_ghost() {
+        let rows = vec![lrow(
+            RowKind::Command {
+                command: "foo --bar".into(),
+            },
+            "foo",
+        )];
+        match tab_completion(">fo", &rows, 0) {
+            Some(TabOutcome::Row(c)) => assert_eq!(c, "foo --bar"),
+            other => panic!("expected Row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_calc_row_never_ghosts() {
+        let rows = vec![lrow(
+            RowKind::Calc {
+                result: "42".into(),
+            },
+            "1+1 = 42",
+        )];
+        match tab_completion("1+", &rows, 0) {
+            Some(TabOutcome::Inline { .. }) => panic!("calc must not ghost"),
+            Some(TabOutcome::Row(c)) => assert_eq!(c, "42"),
+            None => panic!("expected selected-row completion"),
+        }
+    }
+
+    #[test]
+    fn tab_falls_back_to_selected_file_path() {
+        let rows = vec![
+            lrow(
+                RowKind::File {
+                    path: PathBuf::from("/tmp/a b.txt"),
+                },
+                "a b.txt",
+            ),
+            lrow(
+                RowKind::App {
+                    name: "Zed".into(),
+                    exec: vec![],
+                },
+                "Zed",
+            ),
+        ];
+        match tab_completion("zed", &rows, 0) {
+            Some(TabOutcome::Row(p)) => assert_eq!(p, "/tmp/a b.txt"),
+            other => panic!("expected File path, got {other:?}"),
+        }
+        assert!(matches!(
+            tab_completion("zzz", &rows, 1),
+            Some(TabOutcome::Row(_))
+        ));
+        assert!(tab_completion("zzz", &rows, 9).is_none());
     }
 }

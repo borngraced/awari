@@ -23,7 +23,12 @@ pub enum ExecError {
 
 /// Parse `Exec=` per the Desktop Entry Spec. No shell.
 /// `%F`/`%U` → reject. `%f`/`%u` omitted (no file picked). `%%` → `%`.
-pub fn parse_exec(exec: &str, name: &str, desktop_path: &str, icon: Option<&str>) -> Result<Vec<String>, ExecError> {
+pub fn parse_exec(
+    exec: &str,
+    name: &str,
+    desktop_path: &str,
+    icon: Option<&str>,
+) -> Result<Vec<String>, ExecError> {
     let exec = exec.trim();
     if exec.is_empty() {
         return Err(ExecError::Empty);
@@ -32,8 +37,16 @@ pub fn parse_exec(exec: &str, name: &str, desktop_path: &str, icon: Option<&str>
     let tokens = split_exec(exec)?;
     let mut out = Vec::new();
     for tok in tokens {
-        if tok == "%f" || tok == "%u" || tok == "%F" || tok == "%U" || tok == "%d"
-            || tok == "%D" || tok == "%n" || tok == "%N" || tok == "%v" || tok == "%m"
+        if tok == "%f"
+            || tok == "%u"
+            || tok == "%F"
+            || tok == "%U"
+            || tok == "%d"
+            || tok == "%D"
+            || tok == "%n"
+            || tok == "%N"
+            || tok == "%v"
+            || tok == "%m"
         {
             continue;
         }
@@ -209,7 +222,8 @@ fn try_exec_ok(cmd: &str) -> bool {
     let Ok(path) = std::env::var("PATH") else {
         return true;
     };
-    path.split(':').any(|dir| Path::new(dir).join(cmd).is_file())
+    path.split(':')
+        .any(|dir| Path::new(dir).join(cmd).is_file())
 }
 
 pub fn scan_applications() -> Vec<DesktopApp> {
@@ -219,7 +233,8 @@ pub fn scan_applications() -> Vec<DesktopApp> {
     } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
-    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     for d in data_dirs.split(':') {
         if !d.is_empty() {
             dirs.push(PathBuf::from(d).join("applications"));
@@ -316,16 +331,20 @@ mod tests {
     #[test]
     fn skips_hidden_and_nondisplay() {
         let p = Path::new("/tmp/x.desktop");
-        assert!(parse_desktop_entry(
-            "[Desktop Entry]\nType=Application\nName=X\nExec=x\nHidden=true\n",
-            p
-        )
-        .is_none());
-        assert!(parse_desktop_entry(
-            "[Desktop Entry]\nType=Application\nName=X\nExec=x\nNoDisplay=true\n",
-            p
-        )
-        .is_none());
+        assert!(
+            parse_desktop_entry(
+                "[Desktop Entry]\nType=Application\nName=X\nExec=x\nHidden=true\n",
+                p
+            )
+            .is_none()
+        );
+        assert!(
+            parse_desktop_entry(
+                "[Desktop Entry]\nType=Application\nName=X\nExec=x\nNoDisplay=true\n",
+                p
+            )
+            .is_none()
+        );
     }
 
     #[test]

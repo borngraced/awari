@@ -9,13 +9,14 @@ mod files;
 mod icons;
 mod lock;
 mod matchq;
+mod math;
 mod surfaces;
 mod ui;
 
 use std::sync::{Arc, Mutex};
 
-use gpui_platform::application;
 use awari_compositor::connect;
+use gpui_platform::application;
 
 use crate::lock::Stats;
 use crate::surfaces::SurfaceRole;
@@ -49,7 +50,10 @@ fn main() {
     }
 
     let cfg = config::load();
-    tracing::info!(ns = SurfaceRole::Launcher.namespace(), "gpui launcher daemon");
+    tracing::info!(
+        ns = SurfaceRole::Launcher.namespace(),
+        "gpui launcher daemon"
+    );
 
     application().run(move |cx| {
         gpui_base::init(cx);

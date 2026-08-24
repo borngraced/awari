@@ -356,11 +356,18 @@ fn xdg_user_dirs() -> Vec<PathBuf> {
         Some(h) => h,
         None => return Vec::new(),
     };
-    ["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"]
-        .into_iter()
-        .map(|n| home.join(n))
-        .filter(|p| p.is_dir())
-        .collect()
+    [
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Music",
+        "Pictures",
+        "Videos",
+    ]
+    .into_iter()
+    .map(|n| home.join(n))
+    .filter(|p| p.is_dir())
+    .collect()
 }
 
 #[cfg(test)]
@@ -370,7 +377,13 @@ mod tests {
     #[test]
     fn empty_is_defaults() {
         let c = parse("");
-        assert_eq!(c.motion, MotionConfig { reduced: false, duration_ms: 140 });
+        assert_eq!(
+            c.motion,
+            MotionConfig {
+                reduced: false,
+                duration_ms: 140
+            }
+        );
         assert_eq!(c.theme, Theme::default());
         assert!(c.files.roots.is_empty());
         assert!(c.sources.files);
@@ -430,7 +443,12 @@ mod tests {
         let c = parse("files { roots \"/\" \"~/Documents\" \"/var/tmp\" }");
         assert!(c.files.roots.iter().all(|p| p.as_os_str() != "/"));
         assert!(c.files.roots.iter().any(|p| p.ends_with("Documents")));
-        assert!(c.files.roots.iter().any(|p| p == &PathBuf::from("/var/tmp")));
+        assert!(
+            c.files
+                .roots
+                .iter()
+                .any(|p| p == &PathBuf::from("/var/tmp"))
+        );
     }
 
     #[test]
