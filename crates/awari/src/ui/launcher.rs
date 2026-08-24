@@ -95,6 +95,7 @@ pub enum RowAction {
     ShowInFolder,
     CopyPath,
     RunInTerminal,
+    Run,
 }
 
 impl RowAction {
@@ -104,6 +105,7 @@ impl RowAction {
             RowAction::ShowInFolder => "Show in Folder",
             RowAction::CopyPath => "Copy Path",
             RowAction::RunInTerminal => "Run in Terminal",
+            RowAction::Run => "Run",
         }
     }
 }
@@ -113,6 +115,9 @@ pub enum RowKind {
     App { exec: Vec<String> },
     Window { id: u64 },
     File { path: PathBuf },
+    /// A shell command to run in a terminal (from `>` command mode or the
+    /// no-match fallback).
+    Command { command: String },
 }
 
 impl RowKind {
@@ -128,6 +133,7 @@ impl RowKind {
             ],
             RowKind::App { .. } => vec![RowAction::Open, RowAction::CopyPath],
             RowKind::Window { .. } => vec![RowAction::Open],
+            RowKind::Command { .. } => vec![RowAction::Run, RowAction::CopyPath],
         }
     }
 }
@@ -397,6 +403,7 @@ fn row_category(r: &LauncherRow) -> Category {
         RowKind::File { .. } => Category::Files,
         // Windows have no dedicated tab; treat them as neutral (no highlight).
         RowKind::Window { .. } => Category::All,
+        RowKind::Command { .. } => Category::Commands,
     }
 }
 
@@ -422,11 +429,24 @@ pub fn filter_rows(
     app_usage: &HashMap<String, u64>,
     category: Category,
 ) -> Vec<LauncherRow> {
+    let q = query.trim();
+    // Trigger: a leading '>' enters command mode — the rest is a shell command.
+    if let Some(cmd) = q.strip_prefix('>') {
+        let cmd = cmd.trim();
+        return if cmd.is_empty() {
+            Vec::new()
+        } else {
+            vec![LauncherRow {
+                kind: RowKind::Command { command: cmd.to_string() },
+                label: format!("Run “{}” in terminal", cmd),
+                resolved_icon: None,
+            }]
+        };
+    }
     if category == Category::Commands {
         return Vec::new();
     }
     // Score folds case internally; keep the raw trimmed query.
-    let q = query.trim();
     let empty = q.is_empty();
     let apps_only = category == Category::Apps;
     let files_only = category == Category::Files;
@@ -601,6 +621,15 @@ pub fn filter_rows(
         }
         push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
     }
+    // Fallback: nothing matched a non-path query -> offer to run it as a
+    // shell command, mirroring the `>` command-mode trigger.
+    if out.is_empty() && !empty && !crate::files::is_path_shaped(q) {
+        out.push(LauncherRow {
+            kind: RowKind::Command { command: q.to_string() },
+            label: format!("Run “{}” in terminal", q),
+            resolved_icon: None,
+        });
+    }
     out
 }
 
@@ -691,6 +720,7 @@ fn row_subtitle(row: &LauncherRow) -> String {
         RowKind::File { path } => path.display().to_string(),
         RowKind::App { exec } => exec.join(" "),
         RowKind::Window { .. } => "Window".into(),
+        RowKind::Command { command } => command.clone(),
     }
 }
 
@@ -1187,6 +1217,7 @@ impl Render for Launcher {
                         let completion = match &row.kind {
                             RowKind::File { path } => path.display().to_string(),
                             RowKind::App { .. } | RowKind::Window { .. } => row.label.clone(),
+                            RowKind::Command { command } => command.clone(),
                         };
                         if !completion.is_empty() {
                             this.cursor = completion.len();

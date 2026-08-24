@@ -587,7 +587,9 @@ impl Daemon {
         cx: &mut Context<Self>,
     ) {
         match action {
-            launcher::RowAction::Open => self.activate_kind(kind, cx),
+            launcher::RowAction::Open | launcher::RowAction::Run => {
+                self.activate_kind(kind, cx)
+            }
             launcher::RowAction::ShowInFolder => {
                 if let launcher::RowKind::File { path } = &kind {
                     crate::files::reveal(path);
@@ -599,6 +601,7 @@ impl Daemon {
                     launcher::RowKind::File { path } => path.display().to_string(),
                     launcher::RowKind::App { exec } => exec.join(" "),
                     launcher::RowKind::Window { .. } => String::new(),
+                    launcher::RowKind::Command { command } => command.clone(),
                 };
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -628,6 +631,12 @@ impl Daemon {
                 self.save_usage();
             }
         }
+        // A shell command: spawn it in the terminal and close the launcher.
+        if let launcher::RowKind::Command { command } = &kind {
+            crate::files::run_command(command);
+            self.dismiss_launcher(cx);
+            return;
+        }
         self.dismiss_launcher(cx);
         match kind {
             launcher::RowKind::File { path } => {
@@ -649,6 +658,7 @@ impl Daemon {
                     let _ = niri.apply(CompositorCommand::FocusWindow { id });
                 }
                 launcher::RowKind::File { .. } => unreachable!("handled above"),
+                launcher::RowKind::Command { .. } => {}
             }
         });
     }

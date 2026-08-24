@@ -504,25 +504,22 @@ fn resolve_terminal() -> Option<String> {
     None
 }
 
-/// Build the args to start a shell in `dir` for the given terminal.
-fn terminal_args(term: &str, dir: &Path) -> Vec<String> {
-    let dir = dir.display().to_string();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-    let script = format!("cd {dir:?} && exec {shell}");
+/// Build the args to run `script` via `sh -c` in the given terminal.
+fn terminal_args(term: &str, script: &str) -> Vec<String> {
     match term {
-        "gnome-terminal" => vec!["--".to_string(), "sh".to_string(), "-c".to_string(), script],
-        _ => vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), script],
+        "gnome-terminal" => vec!["--".to_string(), "sh".to_string(), "-c".to_string(), script.to_string()],
+        _ => vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), script.to_string()],
     }
 }
 
-/// Open a terminal emulator rooted at `dir`.
-pub fn run_in_terminal(dir: &Path) {
+/// Spawn `script` inside the user's terminal emulator.
+fn run_script(script: &str) {
     let Some(term) = resolve_terminal() else {
         tracing::warn!("no terminal emulator found; set $TERMINAL");
         return;
     };
     if let Err(e) = Command::new(&term)
-        .args(terminal_args(&term, dir))
+        .args(terminal_args(&term, script))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -530,6 +527,19 @@ pub fn run_in_terminal(dir: &Path) {
     {
         tracing::warn!(%e, term, "failed to spawn terminal");
     }
+}
+
+/// Open a terminal emulator rooted at `dir`.
+pub fn run_in_terminal(dir: &Path) {
+    let dir = dir.display().to_string();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+    run_script(&format!("cd {dir:?} && exec {shell}"));
+}
+
+/// Open a terminal, run `command`, then drop to an interactive shell so the
+/// user can inspect the output.
+pub fn run_command(command: &str) {
+    run_script(&format!("{command} ; exec \"$SHELL\""));
 }
 
 #[cfg(test)]
