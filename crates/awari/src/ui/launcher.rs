@@ -1,10 +1,10 @@
 //! Overlay finder: search, chips, list/grid, preview. Mock layout.
 
 use gpui::{
-    div, img, px, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Render,
-    ScrollStrategy, Styled, StyledImage, Subscription, UniformListScrollHandle, WeakEntity,
-    Window, uniform_list,
+    div, img, px, AnyElement, Animation, AnimationExt, App, AppContext, Context, Entity,
+    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, ObjectFit,
+    ParentElement, Render, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
+    Subscription, UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use std::ops::Range;
@@ -24,6 +24,9 @@ const PANEL_H: f32 = 560.0;
 const ROW_CAP: usize = 10;
 const FILE_ROWS: usize = 8;
 const GRID_COLS: usize = 4;
+const SLIDE: f32 = 22.0;
+const PANEL_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
+const SCRIM_SPRING: SpringConfig = SpringConfig::new(320.0, 34.0, 1.0);
 const ICON_LIST: f32 = 26.0;
 const ICON_GRID: f32 = 42.0;
 
@@ -106,6 +109,7 @@ pub struct Launcher {
     scroll: UniformListScrollHandle,
     scrolled_to: Option<usize>,
     open_started: Option<Instant>,
+    pub(crate) closing: bool,
     _input_sub: Subscription,
 }
 
@@ -137,6 +141,7 @@ impl Launcher {
             scroll: UniformListScrollHandle::new(),
             scrolled_to: None,
             open_started: None,
+            closing: false,
             _input_sub,
         }
     }
@@ -146,6 +151,9 @@ impl Launcher {
             self.scrolled_to = None;
         }
         self.view = view;
+        if self.view.open {
+            self.closing = false;
+        }
     }
 
     pub fn arm_open_timer(&mut self, started: Instant) {
@@ -189,7 +197,7 @@ pub fn layer_opts() -> gpui::layer_shell::LayerShellOptions {
         exclusive_zone: Some(px(0.)),
         exclusive_edge: None,
         margin: None,
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        keyboard_interactivity: KeyboardInteractivity::None,
     }
 }
 
@@ -579,11 +587,13 @@ fn preview_bits(row: &LauncherRow) -> (String, String, String) {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.view.open {
+        let animating = self.view.open || self.closing;
+        if !animating {
             window.set_input_region(Some(&[]));
             return div().id("launcher-root").w_full().h_full();
         }
-        window.set_input_region(None);
+        window.set_input_region(if self.view.open { None } else { Some(&[]) });
+        let target = if self.view.open { 1.0f32 } else { 0.0 };
         self.focus_search(window, cx);
         self.input.update(cx, |state, _| {
             state.set_editor_style(editor_style(self.view.theme));
@@ -794,6 +804,11 @@ impl Render for Launcher {
                         cx.listener(|this, _, _, cx| {
                             post(this, cx, LauncherCmd::Dismiss);
                         }),
+                    )
+                    .with_spring(
+                        "launcher-scrim",
+                        SpringAnimation::new(SCRIM_SPRING).to(target).from(0.0),
+                        |el, v| el.opacity(v),
                     ),
             )
             .child(
@@ -892,6 +907,11 @@ impl Render for Launcher {
                                     .child(keycap(t, "esc"))
                                     .child("close"),
                             ),
+                    )
+                    .with_spring(
+                        "launcher-panel",
+                        SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
+                        |el, v| el.mt(px((1.0 - v) * SLIDE)).opacity(v),
                     ),
             )
     }

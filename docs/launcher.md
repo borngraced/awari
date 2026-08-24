@@ -12,13 +12,13 @@ The 3-second demo is: Super, type, the right window or app or file, first pixel 
 
 ## What it is
 
-A long-lived process that owns one Wayland overlay. Closed, the overlay is unmapped and the process sleeps. Open, it has exclusive keyboard, a filter field, and a short ranked list. Super does not start a GUI. niri binds `spawn "awari" "toggle-launcher"`; that argv is a unix-socket client that writes one JSON line to `$XDG_RUNTIME_DIR/awari/ipc.sock` and exits. The overlay is already in the daemon.
+A long-lived process that owns one Wayland overlay. Closed, the overlay stays mapped but empty (transparent, input region empty, keyboard released) and the process sleeps. Open, it has exclusive keyboard, a filter field, and a short ranked list. Super does not start a GUI. niri binds `spawn "awari" "toggle-launcher"`; that argv is a unix-socket client that writes one JSON line to `$XDG_RUNTIME_DIR/awari/ipc.sock` and exits. The overlay is already in the daemon.
 
 This is the only surface. There is no exclusive zone, no HUD, no filmstrip, no OSD, no notification daemon, no tray, no peek. Those were shell. They are out.
 
-GPUI is the right toolkit for this and was the wrong toolkit for a 32px sleeping bar. The frame clock may paint while the overlay is mapped. It must not paint while the overlay is unmapped. Unmap is how Exclusive is released and how idle is won.
+GPUI is the right toolkit for this and was the wrong toolkit for a 32px sleeping bar. The frame clock may paint while the overlay is open. It must not paint while closed: a static, damage-free surface commits nothing, so the compositor has no new frame and the GPU stays idle. Idle is won by never damaging the closed surface, not by unmapping.
 
-Mechanically: upstream gpui has no hide/unmap, so we carry one — `patches/gpui-set-visible.patch` (run `scripts/setup-gpui.sh`; see Cargo.toml `[patch]`) adds `Window::set_visible(bool)` for layer-shell surfaces. Closed = null-buffer commit: unmapped, keyboard released, renderer alive, frame loop parked. Open = re-assert geometry + empty commit to provoke a fresh configure, present only after ack (niri clears pending geometry on unmap; presenting before the new configure is a fatal protocol error). Measured on the first resident build: reopen **1–9 ms** vs 652 ms cold. `Stats.launcher_open_to_first_commit_ms` (`awari dump-stats`) keeps the gate honest; the opacity-0 fallback stays documented but is not needed.
+Mechanically: upstream gpui has no runtime keyboard-interactivity toggle for layer-shell surfaces, so we carry one — `patches/gpui-set-visible.patch` (run `scripts/setup-gpui.sh`; see Cargo.toml `[patch]`) adds `Window::set_keyboard_interactivity(KeyboardInteractivity)` (no-op default; the Wayland layer-shell impl forwards to `zwlr_layer_surface_v1.set_keyboard_interactivity` and commits). The surface is **never unmapped**: closed = mapped-but-empty (transparent, input region empty, keyboard `None`); open = exclusive keyboard + content. There is no unmap/remap configure dance and therefore no "must ack configure before attach" protocol hazard. Reopen costs one content redraw + one interactivity request. `Stats.launcher_open_to_first_commit_ms` (`awari dump-stats`) keeps the gate honest; the opacity-0 fallback stays documented but is not needed.
 
 ## Process
 
@@ -70,7 +70,7 @@ No calculator, no clipboard history, no free-form shell, no web search. A **comm
 
 ## Surface
 
-Layer `overlay`, namespace `awari:launcher`, `exclusive_zone = 0`, full-output so fullscreen does not cover it. Keyboard Exclusive while mapped; None (by unmap) when closed. Scrim click dismisses; the panel swallows clicks. Input region empty when closed if the surface is somehow still mapped.
+Layer `overlay`, namespace `awari:launcher`, `exclusive_zone = 0`, full-output so fullscreen does not cover it. Keyboard Exclusive while open; `None` (via `set_keyboard_interactivity`, not unmap) while closed. The surface stays mapped when closed: transparent, input region empty so clicks pass through, and no damage so it paints nothing. Scrim click dismisses; the panel swallows clicks.
 
 Centered panel, one search row, one list. Icons from the freedesktop name or path already on the desktop entry / window app_id; letter tile if missing. No preview pane in v1 (FFF can do it; the overlay should not). Reduced-motion: duration 0.
 
@@ -78,9 +78,9 @@ niri `spawn-at-startup "awari"` and `Mod+D { spawn "awari" "toggle-launcher"; }`
 
 ## Budgets
 
-Closed daemon: `pidstat` on the process **>1% for 10s** is a fail. RSS well under 100MB after icon warm **and** the FFF index on the default roots has settled. Measure that; do not assume `$HOME` is free. If it fails, shrink roots. The watcher must not wake the GPU while the overlay is unmapped.
+Closed daemon: `pidstat` on the process **>1% for 10s** is a fail. RSS well under 100MB after icon warm **and** the FFF index on the default roots has settled. Measure that; do not assume `$HOME` is free. If it fails, shrink roots. The watcher must not wake the GPU while the overlay is closed.
 
-Open: IPC read → damage p99 **< 2ms**. First presented pixel **≤ next vsync** after that damage. Do not pack niri spawn + present into 16ms. Do not keep the GPU awake after unmap.
+Open: IPC read → damage p99 **< 2ms**. First presented pixel **≤ next vsync** after that damage. Do not pack niri spawn + present into 16ms. Do not keep the GPU awake after close.
 
 ## Config
 

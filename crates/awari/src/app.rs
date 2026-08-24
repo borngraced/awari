@@ -56,6 +56,13 @@ impl Daemon {
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
         let daemon = cx.new(|cx| Self::new(cx, niri, stats, cfg));
+        // Prewarm: build the overlay now (wgpu device, shaders, fonts) so
+        // the first Super press costs a frame instead of full stack init.
+        // The null-buffer hide is queued before any configure roundtrip
+        // completes, so the surface never maps and never grabs the keyboard.
+        // Overlay builds here once; it stays mapped-but-empty (transparent,
+        // keyboard None, no input region) so wgpu/fonts warm at boot.
+        daemon.update(cx, |d, cx| d.ensure_launcher(cx));
         cx.set_global(Keep(daemon));
     }
 
@@ -316,10 +323,20 @@ impl Daemon {
             self.files_seq = self.files_tx.invalidate();
             let started = Instant::now();
             self.ensure_launcher(cx);
-            if let Some(h) = &self.launcher {
-                let _ = h.update(cx, |l, window, _| {
-                    l.arm_open_timer(started);
-                    window.set_visible(true);
+            if let Some(h) = self.launcher.clone() {
+                let generation = self.launcher_gen;
+                let shell = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let current = shell.upgrade().map(|d| d.read(cx).launcher_gen);
+                    if current != Some(generation) {
+                        return;
+                    }
+                    let _ = h.update(cx, |l, window, _| {
+                        l.arm_open_timer(started);
+                        window.set_keyboard_interactivity(
+                            gpui::layer_shell::KeyboardInteractivity::Exclusive,
+                        );
+                    });
                 });
             }
             self.sync_launcher(cx);
@@ -343,9 +360,14 @@ impl Daemon {
             if current != Some(generation) {
                 return;
             }
-            let _ = h.update(cx, |l, window, _| {
+            let _ = h.update(cx, |l, window, cx| {
                 l.apply_view(LauncherView::closed(theme));
-                window.set_visible(false);
+                l.closing = true;
+                window.set_input_region(Some(&[]));
+                window.set_keyboard_interactivity(
+                    gpui::layer_shell::KeyboardInteractivity::None,
+                );
+                cx.notify();
             });
         });
     }

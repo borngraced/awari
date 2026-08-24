@@ -1,43 +1,44 @@
 diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
-index ab4b500..fffd63e 100644
+index ab4b500..15e115a 100644
 --- a/crates/gpui/src/platform.rs
 +++ b/crates/gpui/src/platform.rs
-@@ -846,6 +846,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+@@ -846,6 +846,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
      fn zoom(&self);
      fn toggle_fullscreen(&self);
      fn is_fullscreen(&self) -> bool;
-+    /// Show or hide the window without tearing it down.
++    /// Adjust layer-shell keyboard focus policy at runtime.
 +    ///
-+    /// No-op by default. Implemented for Wayland layer-shell surfaces:
-+    /// hiding commits a null buffer, which unmaps the surface and makes the
-+    /// compositor release keyboard focus; showing schedules a frame whose
-+    /// present remaps it. The role and renderer stay alive either way.
-+    fn set_visible(&self, _visible: bool) {}
++    /// No-op by default. Implemented for Wayland layer-shell surfaces so an
++    /// always-mapped overlay can take Exclusive focus while open and release
++    /// it (None) when dismissed.
++    fn set_keyboard_interactivity(&self, _interactivity: crate::layer_shell::KeyboardInteractivity) {}
      fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
          None
      }
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index 50d3d91..6e7b185 100644
+index 50d3d91..549a06c 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
-@@ -2029,6 +2029,15 @@ impl Window {
-         self.removed = true;
+@@ -2035,6 +2035,17 @@ impl Window {
+             .and_then(|id| FocusHandle::for_id(id, &cx.focus_handles))
      }
  
-+    /// Show or hide this window without destroying it.
++    /// Adjust the layer-shell keyboard focus policy at runtime.
 +    ///
-+    /// No-op except for Wayland layer-shell surfaces, where `false` unmaps
-+    /// the surface (releasing compositor keyboard focus) and `true` schedules
-+    /// a frame that remaps it. The renderer stays alive either way.
-+    pub fn set_visible(&self, visible: bool) {
-+        self.platform_window.set_visible(visible);
++    /// No-op except for Wayland layer-shell surfaces. Lets an always-mapped
++    /// overlay take `Exclusive` focus while open and release it with `None`.
++    pub fn set_keyboard_interactivity(
++        &self,
++        interactivity: crate::layer_shell::KeyboardInteractivity,
++    ) {
++        self.platform_window.set_keyboard_interactivity(interactivity);
 +    }
 +
-     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
-     pub fn focused(&self, cx: &App) -> Option<FocusHandle> {
-         self.focus
+     /// While focus-lost listeners are being dispatched, returns the closest ancestor of the
+     /// previously focused element that can still receive focus, making it a suitable target
+     /// for focus restoration. Returns `None` at all other times, or when no such ancestor exists.
 diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
-index eb84b7f..dc67c85 100644
+index eb84b7f..f28dbeb 100644
 --- a/crates/gpui_linux/src/linux/wayland/window.rs
 +++ b/crates/gpui_linux/src/linux/wayland/window.rs
 @@ -38,7 +38,7 @@ use gpui::{
@@ -45,112 +46,25 @@ index eb84b7f..dc67c85 100644
      Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
      WindowControls, WindowDecorations, WindowKind, WindowParams,
 -    layer_shell::{Anchor, LayerShellNotSupportedError},
-+    layer_shell::{Anchor, LayerShellNotSupportedError, LayerShellOptions},
++    layer_shell::{Anchor, KeyboardInteractivity, LayerShellNotSupportedError},
      popup::PopupOptions,
      px, size,
  };
-@@ -190,6 +190,8 @@ impl WaylandSurfaceState {
-             }
- 
-             return Ok(WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState {
-+                options: options.clone(),
-+                hidden: false,
-                 layer_surface,
-                 anchor: options.anchor,
-             }));
-@@ -300,6 +302,8 @@ pub struct WaylandXdgSurfaceState {
- }
- 
- pub struct WaylandLayerSurfaceState {
-+    options: LayerShellOptions,
-+    hidden: bool,
-     layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
-     anchor: Anchor,
- }
-@@ -1829,6 +1833,73 @@ impl PlatformWindow for WaylandWindow {
+@@ -1829,6 +1829,17 @@ impl PlatformWindow for WaylandWindow {
          }
      }
  
-+    fn set_visible(&self, visible: bool) {
-+        let mut state = self.borrow_mut();
-+        let size = state.bounds.size;
-+        let surface = state.surface.clone();
-+        let globals = state.globals.clone();
-+
-+        let action = match &mut state.surface_state {
-+            WaylandSurfaceState::LayerShell(ls) => {
-+                if ls.hidden == !visible {
-+                    return;
-+                }
-+                ls.hidden = !visible;
-+                Some((ls.options.clone(), ls.layer_surface.clone()))
-+            }
-+            _ => return,
-+        };
-+        drop(state);
-+
-+        let Some((options, layer_surface)) = action else {
-+            return;
-+        };
-+
-+        if !visible {
-+            // Null-buffer commit unmaps the surface; the compositor then
-+            // releases exclusive keyboard focus. Pausing the frame loop
-+            // keeps gpui from presenting into an unmapped surface.
-+            surface.attach(None, 0, 0);
-+            surface.commit();
-+            self.0.frame_loop.set(FrameLoop::Unconfigured);
-+            return;
++    fn set_keyboard_interactivity(&self, interactivity: KeyboardInteractivity) {
++        let state = self.borrow();
++        if let WaylandSurfaceState::LayerShell(ls) = &state.surface_state {
++            ls.layer_surface
++                .set_keyboard_interactivity(super::layer_shell::wayland_keyboard_interactivity(
++                    interactivity,
++                ));
++            state.surface.commit();
 +        }
-+
-+        // The compositor clears pending geometry when a surface unmaps, so
-+        // re-assert everything and commit (without a buffer) to provoke a
-+        // fresh configure. Presenting before that configure is acked is a
-+        // fatal protocol error, hence the frame loop reset below.
-+        let Some(layer_shell) = globals.layer_shell.as_ref() else {
-+            return;
-+        };
-+        let _ = layer_shell;
-+        layer_surface.set_size(f32::from(size.width) as u32, f32::from(size.height) as u32);
-+        layer_surface.set_anchor(super::layer_shell::wayland_anchor(options.anchor));
-+        layer_surface.set_keyboard_interactivity(super::layer_shell::wayland_keyboard_interactivity(
-+            options.keyboard_interactivity,
-+        ));
-+        if let Some(margin) = options.margin {
-+            layer_surface.set_margin(
-+                f32::from(margin.0) as i32,
-+                f32::from(margin.1) as i32,
-+                f32::from(margin.2) as i32,
-+                f32::from(margin.3) as i32,
-+            );
-+        }
-+        if let Some(exclusive_zone) = options.exclusive_zone {
-+            layer_surface.set_exclusive_zone(f32::from(exclusive_zone) as i32);
-+        }
-+        if let Some(exclusive_edge) = options.exclusive_edge {
-+            WaylandSurfaceState::apply_exclusive_edge(
-+                &layer_surface,
-+                options.anchor,
-+                exclusive_edge,
-+            );
-+        }
-+        surface.commit();
-+        self.0.frame_loop.set(FrameLoop::Unconfigured);
 +    }
 +
      fn zoom(&self) {
          let state = self.borrow();
          if let Some(toplevel) = state.surface_state.toplevel() {
-@@ -1899,6 +1970,12 @@ impl PlatformWindow for WaylandWindow {
-     }
- 
-     fn draw(&self, scene: &Scene) {
-+        {
-+            let state = self.borrow();
-+            if matches!(&state.surface_state, WaylandSurfaceState::LayerShell(ls) if ls.hidden) {
-+                return;
-+            }
-+        }
-         let mut state = self.borrow_mut();
- 
-         if state.renderer.device_lost() {
