@@ -1109,6 +1109,14 @@ impl Launcher {
 
     fn keep_selected_visible(&mut self, grid: bool) {
         let sel = self.view.selected;
+        // Pointer-driven selection (sel == hovered) must not auto-scroll, or
+        // wheel scrolling fights itself: the content slides under a stationary
+        // cursor, the newly-hovered tile re-selects, and we'd snap back every
+        // frame. Only keyboard navigation scrolls the selection into view.
+        if self.hovered == Some(sel) {
+            self.scrolled_to = Some(sel);
+            return;
+        }
         if self.scrolled_to == Some(sel) {
             return;
         }
