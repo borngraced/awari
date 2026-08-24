@@ -438,7 +438,7 @@ fn push_capped(
 /// regex mode (handled in the files source), while `>` and `o:` are inline
 /// command modes that replace the result list here. Returned as the literal
 /// token so callers color it and branch on it from one source of truth.
-fn command_prefix(q: &str) -> Option<&'static str> {
+pub fn command_prefix(q: &str) -> Option<&'static str> {
     if q.starts_with("r:") {
         Some("r:")
     } else if q.starts_with("o:") {
@@ -562,56 +562,26 @@ fn read_dir_matching(dir: &Path, frag: &str) -> Option<Vec<PathBuf>> {
     Some(scored.into_iter().map(|(_, p)| p).collect())
 }
 
-pub fn filter_rows(
+/// Score and rank the app and window rows for `query`. This is the expensive
+/// part of filtering (`matchq` over every app/window plus a sort); it depends
+/// only on the query, the app/window lists, recents, and usage — never on file
+/// hits. The Daemon caches the result by `(query, source_gen, category)` so the
+/// re-render that fires when file search returns can reuse it instead of
+/// re-scoring the whole list.
+pub fn score_app_window(
     query: &str,
     apps: &[DesktopApp],
     windows: &[(u64, String, Option<String>, Option<String>)],
-    files: &[FileHit],
     recents: &[String],
     app_usage: &HashMap<String, u64>,
     app_icons: &HashMap<String, String>,
     category: Category,
-    file_max: usize,
-    total_max: usize,
-) -> Vec<LauncherRow> {
+) -> (Vec<LauncherRow>, Vec<LauncherRow>) {
     let q = query.trim();
-    // Inline command modes replace the result list. `r:` falls through to the
-    // normal path (it only flips file search to regex mode, handled below).
-    if let Some(prefix) = command_prefix(q) {
-        match prefix {
-            ">" => {
-                let cmd = q.strip_prefix('>').unwrap().trim();
-                return if cmd.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![LauncherRow {
-                        kind: RowKind::Command { command: cmd.to_string() },
-                        label: format!("Run “{}” in terminal", cmd),
-                        resolved_icon: None,
-                    }]
-                };
-            }
-            "o:" => {
-                return open_path_rows(q.strip_prefix("o:").unwrap(), file_max);
-            }
-            _ => {}
-        }
-    }
-    if category == Category::Commands {
-        return Vec::new();
-    }
-    // Score folds case internally; keep the raw trimmed query.
     let empty = q.is_empty();
     let apps_only = category == Category::Apps;
     let files_only = category == Category::Files;
-    let ranked_cap = if apps_only || files_only {
-        None
-    } else {
-        Some(total_max)
-    };
 
-    // Score indices/refs first and only materialize LauncherRows (with their
-    // String/Vec clones) for rows that survive sorting and the cap.
     let mut win_scored: Vec<(i64, usize)> = if files_only || apps_only {
         Vec::new()
     } else {
@@ -723,6 +693,108 @@ pub fn filter_rows(
             resolved_icon: app.icon.as_deref().and_then(crate::icons::resolve),
         }
     };
+
+    let app_rows: Vec<LauncherRow> = app_scored.into_iter().map(|(_, a)| app_row(a)).collect();
+    let win_rows: Vec<LauncherRow> = win_scored.into_iter().map(|(_, ix)| win_row(ix)).collect();
+    (app_rows, win_rows)
+}
+
+/// Thin wrapper kept for tests: scores app/window rows inline (no cache).
+#[cfg(test)]
+pub fn filter_rows(
+    query: &str,
+    apps: &[DesktopApp],
+    windows: &[(u64, String, Option<String>, Option<String>)],
+    files: &[FileHit],
+    recents: &[String],
+    app_usage: &HashMap<String, u64>,
+    app_icons: &HashMap<String, String>,
+    category: Category,
+    file_max: usize,
+    total_max: usize,
+) -> Vec<LauncherRow> {
+    filter_rows_cached(
+        query,
+        apps,
+        windows,
+        files,
+        recents,
+        app_usage,
+        app_icons,
+        category,
+        file_max,
+        total_max,
+        None,
+        None,
+    )
+}
+
+/// Like [`filter_rows`], but reuses pre-scored app/window rows when the caller
+/// supplies them (the Daemon caches these by `query` + `source_gen`). This is
+/// the expensive part — `matchq` scoring + a sort over every app/window — so
+/// skipping it on the re-render that fires when file results arrive avoids a
+/// redundant full re-score on every keystroke.
+pub fn filter_rows_cached(
+    query: &str,
+    apps: &[DesktopApp],
+    windows: &[(u64, String, Option<String>, Option<String>)],
+    files: &[FileHit],
+    recents: &[String],
+    app_usage: &HashMap<String, u64>,
+    app_icons: &HashMap<String, String>,
+    category: Category,
+    file_max: usize,
+    total_max: usize,
+    cached_app_rows: Option<&[LauncherRow]>,
+    cached_win_rows: Option<&[LauncherRow]>,
+) -> Vec<LauncherRow> {
+    let q = query.trim();
+    // Inline command modes replace the result list. `r:` falls through to the
+    // normal path (it only flips file search to regex mode, handled below).
+    if let Some(prefix) = command_prefix(q) {
+        match prefix {
+            ">" => {
+                let cmd = q.strip_prefix('>').unwrap().trim();
+                return if cmd.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LauncherRow {
+                        kind: RowKind::Command { command: cmd.to_string() },
+                        label: format!("Run “{}” in terminal", cmd),
+                        resolved_icon: None,
+                    }]
+                };
+            }
+            "o:" => {
+                return open_path_rows(q.strip_prefix("o:").unwrap(), file_max);
+            }
+            _ => {}
+        }
+    }
+    if category == Category::Commands {
+        return Vec::new();
+    }
+    // Score folds case internally; keep the raw trimmed query.
+    let empty = q.is_empty();
+    let apps_only = category == Category::Apps;
+    let files_only = category == Category::Files;
+    let ranked_cap = if apps_only || files_only {
+        None
+    } else {
+        Some(total_max)
+    };
+
+    // App/window scoring (`matchq` over every app/window + a sort) is the
+    // expensive part. Reuse the caller-supplied cached rows when available;
+    // otherwise score now. The Daemon caches these by `query` + `source_gen`,
+    // so the re-render that fires when file results arrive reuses them instead
+    // of re-scoring the whole app/window list.
+    let (app_rows, win_rows): (Vec<LauncherRow>, Vec<LauncherRow>) =
+        match (cached_app_rows, cached_win_rows) {
+            (Some(a), Some(w)) if !empty => (a.to_vec(), w.to_vec()),
+            _ => score_app_window(q, apps, windows, recents, app_usage, app_icons, category),
+        };
+
     let file_row = |hit: &FileHit| -> LauncherRow {
         LauncherRow {
             kind: RowKind::File {
@@ -745,11 +817,7 @@ pub fn filter_rows(
         return out;
     }
     if apps_only {
-        push_capped(
-            &mut out,
-            ranked_cap,
-            app_scored.iter().map(|&(_, a)| app_row(a)),
-        );
+        push_capped(&mut out, ranked_cap, app_rows.into_iter());
         return out;
     }
 
@@ -760,19 +828,11 @@ pub fn filter_rows(
             ranked_cap,
             files.iter().take(file_max).map(file_row),
         );
-        push_capped(
-            &mut out,
-            ranked_cap,
-            app_scored.iter().map(|&(_, a)| app_row(a)),
-        );
-        push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
+        push_capped(&mut out, ranked_cap, app_rows.into_iter());
+        push_capped(&mut out, ranked_cap, win_rows.into_iter());
     } else {
         // Apps are the primary action: rank above files and windows.
-        push_capped(
-            &mut out,
-            ranked_cap,
-            app_scored.iter().map(|&(_, a)| app_row(a)),
-        );
+        push_capped(&mut out, ranked_cap, app_rows.into_iter());
         if !empty {
             push_capped(
                 &mut out,
@@ -780,7 +840,7 @@ pub fn filter_rows(
                 files.iter().take(file_max).map(file_row),
             );
         }
-        push_capped(&mut out, ranked_cap, (0..win_scored.len()).map(win_row));
+        push_capped(&mut out, ranked_cap, win_rows.into_iter());
     }
     // Fallback: nothing matched a non-path query -> offer to run it as a
     // shell command, mirroring the `>` command-mode trigger.

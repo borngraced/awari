@@ -74,6 +74,16 @@ pub struct Daemon {
     /// and other non-query changes to avoid re-scoring on every keystroke.
     last_rows: Option<Vec<launcher::LauncherRow>>,
     last_rows_key: Option<(String, launcher::Category, u64, u64, u64)>,
+    /// Pre-scored app/window rows, keyed by `(query, source_gen, category)`.
+    /// Reused on the re-render that fires when file results arrive so the
+    /// expensive `matchq` scoring + sort doesn't run twice per keystroke.
+    appwin_cache: Option<(
+        String,
+        launcher::Category,
+        u64,
+        Vec<launcher::LauncherRow>,
+        Vec<launcher::LauncherRow>,
+    )>,
 }
 
 impl Daemon {
@@ -141,6 +151,7 @@ impl Daemon {
             source_gen: 0,
             last_rows: None,
             last_rows_key: None,
+            appwin_cache: None,
         };
         spawn_compositor_pump(cx, inbox);
         spawn_ipc(cx);
@@ -206,7 +217,11 @@ impl Daemon {
         }
     }
 
-    fn filtered_rows(&self) -> Vec<launcher::LauncherRow> {
+    fn filtered_rows(
+        &self,
+        cached_app: Option<&[launcher::LauncherRow]>,
+        cached_win: Option<&[launcher::LauncherRow]>,
+    ) -> Vec<launcher::LauncherRow> {
         let apps = if self.cfg.sources.apps {
             self.apps.as_slice()
         } else {
@@ -223,7 +238,7 @@ impl Daemon {
         } else {
             &[]
         };
-        launcher::filter_rows(
+        launcher::filter_rows_cached(
             &self.launcher_query,
             apps,
             windows,
@@ -234,6 +249,8 @@ impl Daemon {
             self.launcher_category,
             self.cfg.files.max_results,
             self.cfg.max_results,
+            cached_app,
+            cached_win,
         )
     }
 
@@ -253,7 +270,50 @@ impl Daemon {
         let rows = if self.last_rows_key.as_ref() == Some(&key) {
             self.last_rows.clone().unwrap()
         } else {
-            let rows = self.filtered_rows();
+            // Reuse pre-scored app/window rows when the query + source list are
+            // unchanged. This skips the expensive `matchq` scoring on the
+            // re-render that fires when file results arrive.
+            let q = self.launcher_query.trim();
+            let use_cache = !q.is_empty()
+                && launcher::command_prefix(q).is_none()
+                && self.launcher_category != launcher::Category::Commands;
+            let (cached_app, cached_win): (
+                Option<Vec<launcher::LauncherRow>>,
+                Option<Vec<launcher::LauncherRow>>,
+            ) = if use_cache {
+                match &self.appwin_cache {
+                    Some((cq, ccat, cgen, ca, cw))
+                        if *cq == q
+                            && *ccat == self.launcher_category
+                            && *cgen == self.source_gen =>
+                    {
+                        (Some(ca.clone()), Some(cw.clone()))
+                    }
+                    _ => {
+                        let (a, w) = launcher::score_app_window(
+                            q,
+                            &self.apps,
+                            &self.windows_list,
+                            &self.recents,
+                            &self.app_usage,
+                            &self.app_icons,
+                            self.launcher_category,
+                        );
+                        self.appwin_cache = Some((
+                            q.to_string(),
+                            self.launcher_category,
+                            self.source_gen,
+                            a.clone(),
+                            w.clone(),
+                        ));
+                        (Some(a), Some(w))
+                    }
+                }
+            } else {
+                self.appwin_cache = None;
+                (None, None)
+            };
+            let rows = self.filtered_rows(cached_app.as_deref(), cached_win.as_deref());
             self.last_rows = Some(rows.clone());
             self.last_rows_key = Some(key);
             rows
@@ -559,7 +619,7 @@ impl Daemon {
     }
 
     fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
-        let rows = self.filtered_rows();
+        let rows = self.filtered_rows(None, None);
         let Some(row) = rows.get(self.launcher_selected) else {
             return;
         };
