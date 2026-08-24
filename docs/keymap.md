@@ -93,12 +93,11 @@ files {
 ```kdl
 sources {
     windows true
-    apps true
     files true
 }
-```
 
-Toggle each result source independently.
+Toggle the window and file sources independently. Apps are always
+indexed and cannot be disabled.
 
 ### top-level
 
@@ -149,7 +148,6 @@ files {
 }
 sources {
     windows true
-    apps true
     files true
 }
 max-results 40

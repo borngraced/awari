@@ -27,7 +27,6 @@ pub struct FilesConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourcesConfig {
     pub windows: bool,
-    pub apps: bool,
     pub files: bool,
 }
 
@@ -65,7 +64,6 @@ impl Default for SourcesConfig {
     fn default() -> Self {
         Self {
             windows: true,
-            apps: true,
             files: true,
         }
     }
@@ -314,7 +312,6 @@ fn parse_sources_body(body: &str, s: &mut SourcesConfig) {
         let val = tokens[i + 1].trim_matches('"');
         match key {
             "windows" => s.windows = is_true(val),
-            "apps" => s.apps = is_true(val),
             "files" => s.files = is_true(val),
             _ => {
                 i += 1;
@@ -330,7 +327,7 @@ fn is_true(val: &str) -> bool {
 }
 
 fn looks_like_key(s: &str) -> bool {
-    matches!(s, "windows" | "apps" | "files" | "reduced" | "accent")
+    matches!(s, "windows" | "files" | "reduced" | "accent")
 }
 
 fn expand_root(raw: &str) -> Option<PathBuf> {
@@ -441,7 +438,6 @@ mod tests {
         let c = parse("sources { files true windows false }");
         assert!(c.sources.files);
         assert!(!c.sources.windows);
-        assert!(c.sources.apps);
     }
 
     #[test]

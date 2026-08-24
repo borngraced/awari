@@ -112,9 +112,9 @@ files {
 
 sources {
   windows true
-  apps    true
   files   true
 }
+// apps is always indexed and cannot be disabled
 
 motion {
   reduced     false            // disable animations

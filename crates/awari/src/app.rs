@@ -63,7 +63,7 @@ pub struct Daemon {
     history_live: Option<String>,
     /// Launch counts per app name; boosts repeated picks in ranking.
     app_usage: HashMap<String, u64>,
-    files_tx: crate::files::Files,
+    files_tx: Option<crate::files::Files>,
     files_seq: u64,
     file_hits_gen: u64,
     file_hits: Vec<FileHit>,
@@ -118,18 +118,18 @@ impl Daemon {
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
     ) -> Self {
-        let roots = if cfg.sources.files {
-            cfg.files.resolved_roots()
+        let (files_tx, files_rx) = if cfg.sources.files {
+            let (tx, rx) = crate::files::Files::spawn(
+                cfg.files.resolved_roots(),
+                crate::files::FilesOptions {
+                    index_lockfiles: cfg.files.index_lockfiles,
+                    regex: cfg.files.regex,
+                },
+            );
+            (Some(tx), Some(rx))
         } else {
-            Vec::new()
+            (None, None)
         };
-        let (files_tx, files_rx) = crate::files::Files::spawn(
-            roots,
-            crate::files::FilesOptions {
-                index_lockfiles: cfg.files.index_lockfiles,
-                regex: cfg.files.regex,
-            },
-        );
         let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
         let mut daemon = Self {
             compositor,
@@ -161,7 +161,9 @@ impl Daemon {
         };
         spawn_compositor_pump(cx, inbox);
         spawn_ipc(cx);
-        spawn_files_pump(cx, files_rx);
+        if let Some(files_rx) = files_rx {
+            spawn_files_pump(cx, files_rx);
+        }
         spawn_apps_pump(cx, apps_rx);
         // Scan `.desktop` files off the bootstrap path so the overlay prewarm
         // (wgpu device, shaders, fonts) runs first; apps swap in when ready.
@@ -228,11 +230,7 @@ impl Daemon {
         cached_app: Option<&[launcher::LauncherRow]>,
         cached_win: Option<&[launcher::LauncherRow]>,
     ) -> Vec<launcher::LauncherRow> {
-        let apps = if self.cfg.sources.apps {
-            self.apps.as_slice()
-        } else {
-            &[]
-        };
+        let apps = self.apps.as_slice();
         let empty_windows: &[(u64, String, Option<String>, Option<String>)] = &[];
         let windows = if self.cfg.sources.windows {
             self.windows_list.as_slice()
@@ -475,7 +473,9 @@ impl Daemon {
             self.launcher_category = launcher::Category::All;
             self.file_hits.clear();
             self.file_hits_gen += 1;
-            self.files_seq = self.files_tx.invalidate();
+            if let Some(ft) = &mut self.files_tx {
+                self.files_seq = ft.invalidate();
+            }
             let started = Instant::now();
             self.ensure_launcher_display(cx);
             if let Some(h) = self.launcher.clone() {
@@ -505,7 +505,9 @@ impl Daemon {
         // Return file-search RAM to a near-baseline "sleeping" footprint:
         // drop the per-directory scratch indexes and rebuild the root
         // indexes from scratch. The next open re-indexes on demand.
-        self.files_tx.clear();
+        if let Some(ft) = &self.files_tx {
+            ft.clear();
+        }
         // Remember the query just used so Shift+Up can recall it next time.
         let q = self.launcher_query.trim().to_string();
         if !q.is_empty() {
@@ -661,10 +663,12 @@ impl Daemon {
     fn refresh_file_hits(&mut self) {
         self.file_hits.clear();
         self.file_hits_gen += 1;
-        if self.cfg.sources.files && !self.launcher_query.trim().is_empty() {
-            self.files_seq = self.files_tx.query(&self.launcher_query);
-        } else {
-            self.files_seq = self.files_tx.invalidate();
+        if let Some(ft) = &mut self.files_tx {
+            if !self.launcher_query.trim().is_empty() {
+                self.files_seq = ft.query(&self.launcher_query);
+            } else {
+                self.files_seq = ft.invalidate();
+            }
         }
     }
 
