@@ -194,6 +194,12 @@ fn parse_theme_body(body: &str, t: &mut Theme) {
                 }
                 i += 2;
             }
+            "name" => {
+                if let Some(p) = theme::Theme::preset(val) {
+                    *t = p;
+                }
+                i += 2;
+            }
             _ => {
                 if let Some(c) = theme::parse_hex(val) {
                     match key {
@@ -351,6 +357,16 @@ mod tests {
         assert_eq!(c.theme.accent, theme::Color::rgb(0xff00aa));
         assert_eq!(c.theme.text, theme::Color::rgb(0xeeeeee));
         assert_eq!(c.theme.panel, Theme::default().panel);
+    }
+
+    #[test]
+    fn theme_preset_name_and_override() {
+        let c = parse(r##"theme { name "gruvbox" accent "#ff0000" }"##);
+        assert_eq!(c.theme.panel, Theme::gruvbox().panel);
+        assert_eq!(c.theme.accent, theme::Color::rgb(0xff0000));
+        // Unknown preset name is ignored, leaving the default theme intact.
+        let d = parse(r#"theme { name "nope" }"#);
+        assert_eq!(d.theme, Theme::default());
     }
 
     #[test]

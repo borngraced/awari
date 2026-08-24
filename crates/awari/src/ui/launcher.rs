@@ -929,10 +929,16 @@ impl Render for Launcher {
                                 20.0,
                             ))
                             .child(
+                                // Albert-style query row: the wrapper carries
+                                // font/size/weight so the editor's inherited
+                                // TextStyle picks them up.
                                 div()
+                                    .id("query-wrap")
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(18.))
+                                    .when_some(t.font.clone(), |el, f| el.font_family(f))
+                                    .text_size(px(22.))
+                                    .font_weight(FontWeight::BOLD)
                                     .text_color(t.fg())
                                     .child(Input::new(&self.input)),
                             )

@@ -104,6 +104,53 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Gruvbox (dark) palette. Any token can still be overridden via `theme { … }` in config.
+    pub fn gruvbox() -> Self {
+        Self {
+            accent: Color::rgb(0xfe_80_19),
+            accent_dim: Color::rgba(0xfe_80_19_2e),
+            bg: Color::rgb(0x28_28_28),
+            panel: Color::rgb(0x3c_38_36),
+            raise: Color::rgba(0x50_49_45_ff),
+            border: Color::rgba(0x50_49_45_ff),
+            text: Color::rgb(0xeb_db_b2),
+            text_dim: Color::rgb(0xa8_99_84),
+            text_faint: Color::rgb(0x7c_6f_64),
+            scrim: Color::rgba(0x00_00_00_b3),
+            font: None,
+            font_size: None,
+        }
+    }
+
+    /// Gruvbox (light) palette.
+    pub fn gruvbox_light() -> Self {
+        Self {
+            accent: Color::rgb(0xaf_3a_03),
+            accent_dim: Color::rgba(0xaf_3a_03_2e),
+            bg: Color::rgb(0xfb_f1_c7),
+            panel: Color::rgb(0xeb_db_b2),
+            raise: Color::rgb(0xd5_c4_a1),
+            border: Color::rgb(0xd5_c4_a1),
+            text: Color::rgb(0x3c_38_36),
+            text_dim: Color::rgb(0x7c_6f_64),
+            text_faint: Color::rgb(0x92_83_74),
+            scrim: Color::rgba(0x00_00_00_99),
+            font: None,
+            font_size: None,
+        }
+    }
+
+    /// Look up a built-in named preset (case-insensitive). Unknown names return `None`.
+    pub fn preset(name: &str) -> Option<Theme> {
+        match name.to_ascii_lowercase().as_str() {
+            "gruvbox" => Some(Self::gruvbox()),
+            "gruvbox-light" | "gruvbox_light" => Some(Self::gruvbox_light()),
+            _ => None,
+        }
+    }
+}
+
 /// `#RGB`, `#RRGGBB`, `#RRGGBBAA`. No `url()`, no named CSS colors.
 pub fn parse_hex(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('#');
