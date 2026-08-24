@@ -101,8 +101,6 @@ binds {
 bind = SUPER, D, exec, awari toggle-launcher
 ```
 
-Client commands: `toggle-launcher`, `open-launcher`, `close-launcher`, `ping`.
-
 ## Configuration
 
 KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys are ignored. No exec,
@@ -146,18 +144,24 @@ motion {
 }
 ```
 
-Colors accept `#RGB`, `#RRGGBB`, or `#RRGGBBAA`. Token aliases accepted in
-config: `select`→`accent-dim`, `hover`/`surface`→`raise`, `fg`→`text`,
-`muted`→`text-dim`, `faint`→`text-faint`.
+Colors are hex: `#RGB`, `#RRGGBB`, or `#RRGGBBAA`. In place of the canonical
+token names you can also use these aliases:
+
+| Alias | Sets |
+| --- | --- |
+| `select` | `accent-dim` |
+| `hover`, `surface` | `raise` |
+| `fg` | `text` |
+| `muted` | `text-dim` |
+| `faint` | `text-faint` |
+
+
 
 ## Status
-
-Launcher daemon and overlay only. The bar, map, filmstrip, HUD, and tray
-services are gone.
 
 Rust on a GPUI layer-shell. GPL-3.0-or-later; linking `niri-ipc` makes the
 binary a GPL derivative under niri. No plugins.
 
-Client commands: `toggle-launcher`, `open-launcher`, `close-launcher`, `ping`,
-`dump-stats`. `awari ping` talks to a running daemon over
+Client commands: `toggle-launcher`, `open-launcher`, `close-launcher`,
+`ping`, `dump-stats`. `awari ping` talks to a running daemon over
 `$XDG_RUNTIME_DIR/awari/ipc.sock`.
