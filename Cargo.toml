@@ -5,6 +5,7 @@ members = [
     "crates/awari-compositor",
     "crates/awari-ipc",
 ]
+exclude = [".third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,30 +20,33 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 
-# Build GPUI from the local patched tree: `scripts/setup-gpui.sh` seeds zed
-# at our pinned rev into .third_party/zed and applies
-# patches/gpui-set-visible.patch, which adds Window::set_visible(bool) for
-# layer-shell surfaces (unmap without renderer teardown — how the launcher
-# hides while keeping reopen to a single frame). Upstream has no equivalent
-# yet; see gpui-ce PR #87. The block below is managed by the script.
-# BEGIN-GPUI-PATCH (managed by scripts/setup-gpui.sh)
+# GPUI is built from the vendored, patched zed tree under .third_party/zed.
+# The only local change is patches/gpui-set-visible.patch, which adds
+# Window::set_keyboard_interactivity for layer-shell surfaces (the launcher
+# takes Exclusive focus while open, None when dismissed). Upstream has no
+# equivalent yet; see gpui-ce PR #87. The patched tree is committed directly.
+# Vendored, patched zed GPUI committed under .third_party/zed (see
+# patches/gpui-set-visible.patch for the only local change: it adds
+# Window::set_keyboard_interactivity for layer-shell). The patched tree is
+# committed directly, so a fresh clone builds with no separate remote.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { version = "=0.2.2", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_platform = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_linux = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_wgpu = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_macros = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_apple = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_macos = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_web = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_windows = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-collections = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_shared_string = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-gpui_util = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-sum_tree = { version = "=0.1.0", git = "file:///home/borngraced/dev/reelshell/.third_party/zed", rev = "5ce345047e57c8620e753c57412458a035e1a47c" }
-# END-GPUI-PATCH
+gpui = { version = "=0.2.2", path = ".third_party/zed/crates/gpui" }
+gpui_platform = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_platform" }
+gpui_linux = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_linux" }
+gpui_wgpu = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_wgpu" }
+gpui_macros = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_macros" }
+gpui_apple = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_apple" }
+gpui_macos = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_macos" }
+gpui_web = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_web" }
+gpui_windows = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_windows" }
+collections = { version = "=0.1.0", path = ".third_party/zed/crates/collections" }
+gpui_shared_string = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_shared_string" }
+gpui_util = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_util" }
+sum_tree = { version = "=0.1.0", path = ".third_party/zed/crates/sum_tree" }
 
 [profile.release]
-lto = true
-codegen-units = 8
-strip = true
+opt-level = "z"     # Optimize aggressively for size instead of speed
+lto = true          # Link-Time Optimization (removes dead code across crates)
+codegen-units = 1   # Reduces parallel compilation to maximize LTO optimization
+strip = true        # Automatically strips symbols and debug info
+panic = "abort"     # Removes stack unwinding plumbing (saves significant space)
