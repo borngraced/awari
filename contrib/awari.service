@@ -1,5 +1,5 @@
 [Unit]
-Description=Àwárí — niri overlay launcher
+Description=Àwárí — A blazingly fast launcher for Wayland compositorsr
 PartOf=graphical-session.target
 After=graphical-session.target
 

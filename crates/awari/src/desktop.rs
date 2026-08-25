@@ -144,6 +144,7 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+
         if line.starts_with('[') {
             if in_entry {
                 break;
@@ -151,14 +152,18 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
             in_entry = line.eq_ignore_ascii_case("[Desktop Entry]");
             continue;
         }
+
         if !in_entry {
             continue;
         }
+
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
+
         let k = k.trim();
         let v = v.trim();
+
         match k {
             "Type" => ty = Some(v.to_string()),
             "Name" => name = Some(unescape_desktop(v)),
@@ -176,28 +181,31 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
     if hidden || no_display {
         return None;
     }
+
     if ty.as_deref().is_some_and(|t| t != "Application") {
         return None;
     }
+
     let name = name?;
     let exec = exec?;
     let path_str = path.to_string_lossy();
     let mut argv = parse_exec(&exec, &name, &path_str, icon.as_deref()).ok()?;
+
     if terminal {
-        let Some(term) = crate::files::resolve_terminal() else {
-            return None;
-        };
+        let term = crate::files::resolve_terminal()?;
         let mut wrapped = vec![term, "-e".into()];
         wrapped.append(&mut argv);
         argv = wrapped;
     }
-    if let Some(te) = try_exec {
-        if !try_exec_ok(&te) {
-            return None;
-        }
+
+    if let Some(te) = try_exec
+        && !try_exec_ok(&te)
+    {
+        return None;
     }
     let name_lc = name.to_lowercase();
     let app_id_lc = app_id.as_deref().map(|s| s.to_lowercase());
+
     Some(DesktopApp {
         name,
         exec: Arc::from(argv),
@@ -217,48 +225,59 @@ fn unescape_desktop(s: &str) -> String {
 
 fn try_exec_ok(cmd: &str) -> bool {
     let p = Path::new(cmd);
+
     if p.is_absolute() {
         return p.is_file();
     }
+
     let Ok(path) = std::env::var("PATH") else {
         return true;
     };
+
     path.split(':')
         .any(|dir| Path::new(dir).join(cmd).is_file())
 }
 
 pub fn scan_applications() -> Vec<DesktopApp> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
+        .split(':')
+        .filter_map(|d| {
+            if !d.is_empty() {
+                Some(PathBuf::from(d).join("applications"))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
     if let Some(home) = std::env::var_os("XDG_DATA_HOME") {
         dirs.push(PathBuf::from(home).join("applications"));
     } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
-    let data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    for d in data_dirs.split(':') {
-        if !d.is_empty() {
-            dirs.push(PathBuf::from(d).join("applications"));
-        }
-    }
 
     let mut apps = Vec::new();
     let mut seen = std::collections::HashSet::new();
+
     for dir in dirs {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
+
         for ent in rd.flatten() {
             let path = ent.path();
             if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
                 continue;
             }
+
             let id = path.file_name().map(|s| s.to_os_string());
-            if let Some(id) = &id {
-                if !seen.insert(id.clone()) {
-                    continue;
-                }
+            if let Some(id) = &id
+                && !seen.insert(id.clone())
+            {
+                continue;
             }
+
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -267,7 +286,8 @@ pub fn scan_applications() -> Vec<DesktopApp> {
             }
         }
     }
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    apps.sort_by_key(|a| a.name.to_lowercase());
     apps
 }
 

@@ -1,5 +1,11 @@
 //! Overlay launcher daemon. No bar. Process stays alive with no windows.
 
+use crate::config::Config;
+use crate::desktop::DesktopApp;
+use crate::files::FileHit;
+use crate::lock::Stats;
+use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
+
 use std::collections::HashMap;
 use std::fs;
 use std::sync::mpsc::Receiver;
@@ -7,24 +13,20 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use awari_compositor::{Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached};
+use awari_compositor::{
+    Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
+};
 use awari_ipc::{ClientRequest, notify};
+use gpui::layer_shell::LayerShellNotSupportedError;
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode, Task,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
     size,
 };
-use gpui::layer_shell::LayerShellNotSupportedError;
 
 /// Delay after a dismiss before the surface is torn down, long enough to cover
 /// the fade-out animation so we never cut it short.
 const LAUNCHER_CLOSE_GRACE_MS: u64 = 200;
-
-use crate::config::Config;
-use crate::desktop::DesktopApp;
-use crate::files::FileHit;
-use crate::lock::Stats;
-use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 
 /// Holds the daemon entity so GPUI does not drop it with no windows open.
 struct Keep(#[allow(dead_code)] Entity<Daemon>);
@@ -96,32 +98,46 @@ pub struct Daemon {
     file_hits: Vec<FileHit>,
     /// Cached window list, rebuilt only when niri reports a change (not on
     /// every keystroke), so `filtered_rows` can borrow it without re-cloning
-    /// every title/app_id per character typed. The last element is the
-    /// lowercased app_id, precomputed so matching allocates nothing.
-    windows_list: Vec<(u64, String, Option<String>, Option<String>)>,
+    /// every title/app_id per character typed. `app_id_lc` is precomputed so
+    /// matching allocates nothing.
+    windows_list: Vec<launcher::WindowEntry>,
     /// Bumped whenever the app or window list changes, so cached launcher
     /// rows can be invalidated without re-filtering on every highlight move.
     source_gen: u64,
     /// Last computed rows, reused across highlight moves (Select / arrows)
     /// and other non-query changes to avoid re-scoring on every keystroke.
     last_rows: Option<Arc<[launcher::LauncherRow]>>,
-    last_rows_key: Option<(String, launcher::Category, u64, u64, u64)>,
+    last_rows_key: Option<RowsKey>,
     /// Pre-scored app/window rows, keyed by `(query, source_gen, category)`.
     /// Reused on the re-render that fires when file results arrive so the
     /// expensive `matchq` scoring + sort doesn't run twice per keystroke.
-    appwin_cache: Option<(
-        String,
-        launcher::Category,
-        u64,
-        Arc<[launcher::LauncherRow]>,
-        Arc<[launcher::LauncherRow]>,
-    )>,
+    appwin_cache: Option<AppWinCache>,
+}
+
+/// Cache key for `last_rows`: a row set is reusable when none of these inputs
+/// (which affect ranking) have changed, so a highlight move doesn't re-score.
+struct RowsKey {
+    query: String,
+    category: launcher::Category,
+    files_seq: u64,
+    file_hits_gen: u64,
+    source_gen: u64,
+}
+
+/// Pre-scored app/window rows, reused on the re-render that fires when file
+/// results arrive so `matchq` scoring + sort doesn't run twice per keystroke.
+struct AppWinCache {
+    query: String,
+    category: launcher::Category,
+    source_gen: u64,
+    app_rows: Arc<[launcher::LauncherRow]>,
+    win_rows: Arc<[launcher::LauncherRow]>,
 }
 
 impl Daemon {
     pub fn start(
         cx: &mut App,
-        compositor: Option<Arc<dyn Compositor>>,
+        compositor: Option<Arc<dyn Compositor + 'static>>,
         inbox: Arc<CompositorInbox>,
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
@@ -154,10 +170,10 @@ impl Daemon {
                     if let Some(d) = entity.upgrade() {
                         d.update(cx, |d, cx| match sig {
                             Signal::Open => {
-                            if !d.launcher_open {
-                                d.set_launcher_open(true, cx);
+                                if !d.launcher_open {
+                                    d.set_launcher_open(true, cx);
+                                }
                             }
-                        }
                             Signal::Close => d.dismiss_launcher(cx),
                             Signal::Quit => {
                                 d.quit_after_close = true;
@@ -269,19 +285,19 @@ impl Daemon {
         }
     }
 
-    fn launcher_windows(&self) -> Vec<(u64, String, Option<String>, Option<String>)> {
+    fn launcher_windows(&self) -> Vec<launcher::WindowEntry> {
         match &self.compositor {
             Some(c) => c
                 .windows()
                 .into_iter()
                 .map(|t| {
                     let app_id_lc = t.app_id.as_deref().map(|s| s.to_lowercase());
-                    (
-                        t.id,
-                        t.title.unwrap_or_else(|| format!("#{}", t.id)),
-                        t.app_id,
+                    launcher::WindowEntry {
+                        id: t.id,
+                        title: t.title.unwrap_or_else(|| format!("#{}", t.id)),
+                        app_id: t.app_id,
                         app_id_lc,
-                    )
+                    }
                 })
                 .collect(),
             None => Vec::new(),
@@ -296,7 +312,7 @@ impl Daemon {
         calc: Option<String>,
     ) -> Vec<launcher::LauncherRow> {
         let apps = self.apps.as_slice();
-        let empty_windows: &[(u64, String, Option<String>, Option<String>)] = &[];
+        let empty_windows: &[launcher::WindowEntry] = &[];
         let windows = if self.cfg.sources.windows {
             self.windows_list.as_slice()
         } else {
@@ -307,22 +323,22 @@ impl Daemon {
         } else {
             &[]
         };
-        launcher::filter_rows_cached(
-            &self.launcher_query,
+        launcher::filter_rows_cached(launcher::FilterParams {
+            query: &self.launcher_query,
             apps,
             windows,
             files,
-            &self.recents,
-            &self.app_usage,
-            &self.app_icons,
-            self.launcher_category,
-            self.cfg.files.max_results,
-            self.cfg.max_results,
-            cached_app,
-            cached_win,
+            recents: &self.recents,
+            app_usage: &self.app_usage,
+            app_icons: &self.app_icons,
+            category: self.launcher_category,
+            file_max: self.cfg.files.max_results,
+            total_max: self.cfg.max_results,
+            cached_app_rows: cached_app,
+            cached_win_rows: cached_win,
             prefix,
             calc,
-        )
+        })
     }
 
     fn sync_launcher(&mut self, cx: &mut Context<Self>) {
@@ -332,11 +348,11 @@ impl Daemon {
         // Reuse the last rows when nothing that affects ranking changed, so a
         // highlight move (Select / arrow) doesn't re-score every app/window.
         let rows = if self.last_rows_key.as_ref().is_some_and(|k| {
-            k.0 == self.launcher_query
-                && k.1 == self.launcher_category
-                && k.2 == self.files_seq
-                && k.3 == self.file_hits_gen
-                && k.4 == self.source_gen
+            k.query == self.launcher_query
+                && k.category == self.launcher_category
+                && k.files_seq == self.files_seq
+                && k.file_hits_gen == self.file_hits_gen
+                && k.source_gen == self.source_gen
         }) {
             self.last_rows.clone().unwrap()
         } else {
@@ -350,17 +366,14 @@ impl Daemon {
                 && prefix.is_none()
                 && self.launcher_category != launcher::Category::Commands
                 && calc.is_none();
-            let (cached_app, cached_win): (
-                Option<Arc<[launcher::LauncherRow]>>,
-                Option<Arc<[launcher::LauncherRow]>>,
-            ) = if use_cache {
+            let (cached_app, cached_win) = if use_cache {
                 match &self.appwin_cache {
-                    Some((cq, ccat, cgen, ca, cw))
-                        if *cq == q
-                            && *ccat == self.launcher_category
-                            && *cgen == self.source_gen =>
+                    Some(c)
+                        if c.query == q
+                            && c.category == self.launcher_category
+                            && c.source_gen == self.source_gen =>
                     {
-                        (Some(ca.clone()), Some(cw.clone()))
+                        (Some(c.app_rows.clone()), Some(c.win_rows.clone()))
                     }
                     _ => {
                         let (a, w) = launcher::score_app_window(
@@ -374,13 +387,13 @@ impl Daemon {
                         );
                         let a_arc: Arc<[launcher::LauncherRow]> = Arc::from(a);
                         let w_arc: Arc<[launcher::LauncherRow]> = Arc::from(w);
-                        self.appwin_cache = Some((
-                            q.to_string(),
-                            self.launcher_category,
-                            self.source_gen,
-                            a_arc.clone(),
-                            w_arc.clone(),
-                        ));
+                        self.appwin_cache = Some(AppWinCache {
+                            query: q.to_string(),
+                            category: self.launcher_category,
+                            source_gen: self.source_gen,
+                            app_rows: a_arc.clone(),
+                            win_rows: w_arc.clone(),
+                        });
                         (Some(a_arc), Some(w_arc))
                     }
                 }
@@ -392,13 +405,13 @@ impl Daemon {
                 self.filtered_rows(cached_app.as_deref(), cached_win.as_deref(), prefix, calc);
             let rows: Arc<[launcher::LauncherRow]> = Arc::from(rows_vec);
             self.last_rows = Some(rows.clone());
-            self.last_rows_key = Some((
-                self.launcher_query.clone(),
-                self.launcher_category,
-                self.files_seq,
-                self.file_hits_gen,
-                self.source_gen,
-            ));
+            self.last_rows_key = Some(RowsKey {
+                query: self.launcher_query.clone(),
+                category: self.launcher_category,
+                files_seq: self.files_seq,
+                file_hits_gen: self.file_hits_gen,
+                source_gen: self.source_gen,
+            });
             rows
         };
         if self.launcher_selected >= rows.len() {
@@ -471,9 +484,9 @@ impl Daemon {
                     ..Default::default()
                 },
                 |window, cx| {
-                cx.set_reduce_motion(reduce_motion);
-                cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx))
-            },
+                    cx.set_reduce_motion(reduce_motion);
+                    cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx))
+                },
             ),
             Err(e) => Err(e),
         };
@@ -564,10 +577,10 @@ impl Daemon {
                 let mut s = self.stats.lock().expect("stats");
                 s.launcher_open_to_first_commit_ms = Some(ms);
                 tracing::info!(ms, "launcher open → first render");
-                if !self.keep_alive {
-                    if let Some(cold) = cold_start_ms() {
-                        tracing::info!(ms = cold, "cold start: spawn → first frame");
-                    }
+                if !self.keep_alive
+                    && let Some(cold) = cold_start_ms()
+                {
+                    tracing::info!(ms = cold, "cold start: spawn → first frame");
                 }
             }
         }
@@ -596,7 +609,7 @@ impl Daemon {
             }
             let started = Instant::now();
             self.ensure_launcher_display(cx);
-            if let Some(h) = self.launcher.clone() {
+            if let Some(h) = self.launcher {
                 let generation = self.launcher_gen;
                 let shell = cx.entity().downgrade();
                 cx.defer(move |cx| {
@@ -648,7 +661,7 @@ impl Daemon {
         // tracks the theme's motion duration so the close never cuts the fade
         // short. A reopen during that window cancels the teardown and reuses
         // the still-live surface.
-        let Some(h) = self.launcher.clone() else {
+        let Some(h) = self.launcher else {
             if !self.keep_alive || self.quit_after_close {
                 cx.quit();
             }
@@ -679,7 +692,7 @@ impl Daemon {
                 .timer(Duration::from_millis(grace_ms))
                 .await;
             if let Some(daemon) = this.upgrade() {
-                let _ = daemon.update(cx, |d, cx| {
+                daemon.update(cx, |d, cx| {
                     if d.launcher_open {
                         return;
                     }
@@ -782,10 +795,10 @@ impl Daemon {
         let path = awari_ipc::runtime_dir().join("usage");
         if let Ok(s) = fs::read_to_string(&path) {
             for line in s.lines() {
-                if let Some((name, cnt)) = line.split_once('\t') {
-                    if let Ok(n) = cnt.parse::<u64>() {
-                        self.app_usage.insert(name.to_string(), n);
-                    }
+                if let Some((name, cnt)) = line.split_once('\t')
+                    && let Ok(n) = cnt.parse::<u64>()
+                {
+                    self.app_usage.insert(name.to_string(), n);
                 }
             }
         }
@@ -898,39 +911,31 @@ impl Daemon {
             return;
         }
         self.dismiss_launcher(cx);
-        match kind {
-            launcher::RowKind::File { path } => {
-                crate::files::activate(&path);
-                return;
-            }
-            _ => {}
+        if let launcher::RowKind::File { path } = kind {
+            crate::files::activate(&path);
+            return;
         }
         let compositor = self.compositor.clone();
-        cx.defer(move |_cx| {
-            match kind {
-                launcher::RowKind::App { exec, .. } => {
-                    if let Err(e) = spawn_detached(&exec) {
-                        tracing::warn!(%e, "failed to launch app");
-                    }
+        cx.defer(move |_cx| match kind {
+            launcher::RowKind::App { exec, .. } => {
+                if let Err(e) = spawn_detached(&exec) {
+                    tracing::warn!(%e, "failed to launch app");
                 }
-                launcher::RowKind::Window { id } => {
-                    let Some(compositor) = compositor else {
-                        return;
-                    };
-                    if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
-                        tracing::warn!(%e, "failed to focus window");
-                    }
-                }
-                launcher::RowKind::File { .. } => unreachable!("handled above"),
-                launcher::RowKind::Command { .. } => {}
-                launcher::RowKind::Calc { .. } => {}
             }
+            launcher::RowKind::Window { id } => {
+                let Some(compositor) = compositor else {
+                    return;
+                };
+                if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
+                    tracing::warn!(%e, "failed to focus window");
+                }
+            }
+            launcher::RowKind::File { .. } => unreachable!("handled above"),
+            launcher::RowKind::Command { .. } => {}
+            launcher::RowKind::Calc { .. } => {}
         });
     }
 }
-
-
-
 
 fn spawn_compositor_pump(cx: &mut Context<Daemon>, inbox: Arc<CompositorInbox>) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();

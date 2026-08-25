@@ -91,18 +91,30 @@ pub fn notify(req: ClientRequest) {
         std::thread::Builder::new()
             .name("awari-notify".into())
             .spawn(move || {
+                let mut stream: Option<UnixStream> = None;
                 for req in rx {
-                    let mut stream = match UnixStream::connect(socket_path()) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
                     let mut line = match serde_json::to_string(&req) {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
                     line.push('\n');
-                    let _ = stream.write_all(line.as_bytes());
-                    let _ = stream.flush();
+                    let mut s = match stream.take() {
+                        Some(s) => s,
+                        None => match UnixStream::connect(socket_path()) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        },
+                    };
+                    if s.write_all(line.as_bytes())
+                        .and_then(|_| s.flush())
+                        .is_err()
+                    {
+                        // Broken connection (daemon restarted, etc.): drop it and
+                        // reconnect on the next notification. Keeps the
+                        // fire-and-forget ping from allocating a socket per call.
+                        continue;
+                    }
+                    stream = Some(s);
                 }
             })
             .expect("notify pump thread");

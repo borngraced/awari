@@ -15,16 +15,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use smithay_client_toolkit::reexports::client as wl;
-use wl::protocol::wl_output::{self, WlOutput};
-use wl::protocol::wl_registry::{self, WlRegistry};
-use wl::protocol::wl_seat::{self, WlSeat};
-use wl::backend::ObjectId;
-use wl::{Dispatch, QueueHandle, Proxy};
-use wl::event_created_child;
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{Event as HandleEvent, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{Event as ManagerEvent, ZwlrForeignToplevelManagerV1},
 };
+use wl::backend::ObjectId;
+use wl::event_created_child;
+use wl::protocol::wl_output::{self, WlOutput};
+use wl::protocol::wl_registry::{self, WlRegistry};
+use wl::protocol::wl_seat::{self, WlSeat};
+use wl::{Dispatch, Proxy, QueueHandle};
 
 /// Value of the `activated` flag in the foreign-toplevel `state` array. The
 /// `state` event carries an array of enum values
@@ -260,8 +260,7 @@ impl Compositor for WlrBackend {
                 )
             })
             .collect();
-        // Focused window first (Reverse(bool)), then stable by id so unfocused
-        // rows don't reshuffle.
+
         out.sort_by_key(|(activated, t)| (std::cmp::Reverse(*activated), t.id));
         out.into_iter().map(|(_, t)| t).collect()
     }
@@ -273,6 +272,7 @@ impl Compositor for WlrBackend {
         let info = g.outputs.get(out_id)?;
         let (x, y) = info.geometry?;
         let (width, height) = info.mode?;
+
         Some(OutputRect {
             x,
             y,
@@ -305,34 +305,37 @@ fn connect_wlr() -> Option<(Arc<dyn Compositor>, Arc<CompositorInbox>)> {
     let registry = conn.display().get_registry(&qh, ());
     state._registry = Some(registry);
     queue.roundtrip(&mut state).ok()?;
+
     if state.manager.is_none() {
-        tracing::warn!(
-            "compositor does not advertise wlr-foreign-toplevel; window list disabled"
-        );
+        tracing::warn!("compositor does not advertise wlr-foreign-toplevel; window list disabled");
         return None;
     }
     inbox.push(CompositorMsg::Changed);
 
     let conn = Arc::new(conn);
     let inbox_thread = inbox.clone();
+
     thread::Builder::new()
         .name("awari-wlr".into())
-        .spawn(move || loop {
-            match queue.blocking_dispatch(&mut state) {
-                Ok(_) => {
-                    state.inner.lock().expect("wlr inner").dirty = false;
-                }
-                Err(e) => {
-                    // Connection died: clear the stale snapshot so the UI stops
-                    // offering dead window rows, then stop the pump.
-                    state.inner.lock().expect("wlr inner").toplevels.clear();
-                    inbox_thread.push(CompositorMsg::Changed);
-                    inbox_thread.push(CompositorMsg::Degraded(e.to_string()));
-                    break;
+        .spawn(move || {
+            loop {
+                match queue.blocking_dispatch(&mut state) {
+                    Ok(_) => {
+                        state.inner.lock().expect("wlr inner").dirty = false;
+                    }
+                    Err(e) => {
+                        // Connection died: clear the stale snapshot so the UI stops
+                        // offering dead window rows, then stop the pump.
+                        state.inner.lock().expect("wlr inner").toplevels.clear();
+                        inbox_thread.push(CompositorMsg::Changed);
+                        inbox_thread.push(CompositorMsg::Degraded(e.to_string()));
+                        break;
+                    }
                 }
             }
         })
         .ok()?;
+
     Some((Arc::new(WlrBackend { inner, conn }), inbox))
 }
 
@@ -353,20 +356,26 @@ impl Dispatch<WlRegistry, ()> for WlrState {
             } => {
                 if interface == ZwlrForeignToplevelManagerV1::interface().name {
                     let v = version.min(ZwlrForeignToplevelManagerV1::interface().version);
-                    let manager = registry
-                        .bind::<ZwlrForeignToplevelManagerV1, (), WlrState>(name, v, qh, ());
+                    let manager = registry.bind::<ZwlrForeignToplevelManagerV1, (), WlrState>(
+                        name,
+                        v,
+                        qh,
+                        (),
+                    );
                     st.manager = Some(manager);
                     st.manager_name = Some(name);
                 } else if interface == WlSeat::interface().name {
                     let v = version.min(WlSeat::interface().version);
                     let seat = registry.bind::<WlSeat, (), WlrState>(name, v, qh, ());
                     let mut g = st.inner.lock().expect("wlr inner");
+
                     if g.seat.is_none() {
                         g.seat = Some(seat);
                     }
                 } else if interface == WlOutput::interface().name {
                     let v = version.min(WlOutput::interface().version);
                     let output = registry.bind::<WlOutput, (), WlrState>(name, v, qh, ());
+
                     st.inner
                         .lock()
                         .expect("wlr inner")
@@ -374,14 +383,13 @@ impl Dispatch<WlRegistry, ()> for WlrState {
                         .insert(output.id(), OutputInfo::default());
                 }
             }
-            wl_registry::Event::GlobalRemove { name } => {
-                if st.manager_name == Some(name) {
-                    st.manager_name = None;
-                    st.inner.lock().expect("wlr inner").toplevels.clear();
-                    st.inbox.push(CompositorMsg::Changed);
-                    st.inbox
-                        .push(CompositorMsg::Degraded("foreign-toplevel global retracted".into()));
-                }
+            wl_registry::Event::GlobalRemove { name } if st.manager_name == Some(name) => {
+                st.manager_name = None;
+                st.inner.lock().expect("wlr inner").toplevels.clear();
+                st.inbox.push(CompositorMsg::Changed);
+                st.inbox.push(CompositorMsg::Degraded(
+                    "foreign-toplevel global retracted".into(),
+                ));
             }
             _ => {}
         }
@@ -505,7 +513,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlrState {
                 st.mark_dirty();
             }
             HandleEvent::State { state: ws } => {
-                let activated = ws.chunks_exact(4).any(|c| {
+                let activated = ws.as_chunks::<4>().0.iter().any(|c| {
                     u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == STATE_ACTIVATED as u32
                 });
                 if let Some(t) = st.inner.lock().expect("wlr inner").toplevels.get_mut(&oid) {
@@ -521,10 +529,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WlrState {
             HandleEvent::OutputEnter { output } => {
                 let out_id = output.id();
                 let mut g = st.inner.lock().expect("wlr inner");
-                if let Some(t) = g.toplevels.get_mut(&oid) {
-                    if !t.outputs.contains(&out_id) {
-                        t.outputs.push(out_id);
-                    }
+                if let Some(t) = g.toplevels.get_mut(&oid)
+                    && !t.outputs.contains(&out_id)
+                {
+                    t.outputs.push(out_id);
                 }
                 drop(g);
                 st.mark_dirty();

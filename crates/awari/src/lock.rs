@@ -41,6 +41,7 @@ pub fn acquire() -> Result<IpcServer, LockError> {
     let lock_path = dir.join("daemon.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;
@@ -66,7 +67,10 @@ pub fn acquire() -> Result<IpcServer, LockError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(IpcServer { listener, _lock: lock_file })
+    Ok(IpcServer {
+        listener,
+        _lock: lock_file,
+    })
 }
 
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
@@ -149,13 +153,12 @@ fn handle_client(
 }
 
 fn rss_bytes() -> u64 {
-    if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
-        if let Some(pages) = s.split_whitespace().nth(1) {
-            if let Ok(n) = pages.parse::<u64>() {
-                let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
-                return n * page;
-            }
-        }
+    if let Ok(s) = std::fs::read_to_string("/proc/self/statm")
+        && let Some(pages) = s.split_whitespace().nth(1)
+        && let Ok(n) = pages.parse::<u64>()
+    {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+        return n * page;
     }
     0
 }

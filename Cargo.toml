@@ -44,7 +44,7 @@ gpui_util = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_util" }
 sum_tree = { version = "=0.1.0", path = ".third_party/zed/crates/sum_tree" }
 
 [profile.release]
-opt-level = "z"     # Optimize aggressively for size instead of speed
+opt-level = 3       # Optimize for runtime speed; launcher latency matters more than binary size
 lto = true          # Link-Time Optimization (removes dead code across crates)
 codegen-units = 1   # Reduces parallel compilation to maximize LTO optimization
 strip = true        # Automatically strips symbols and debug info

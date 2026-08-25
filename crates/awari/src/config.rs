@@ -148,10 +148,16 @@ pub fn parse(src: &str) -> Config {
 }
 
 fn strip_comments(src: &str) -> String {
-    src.lines()
-        .map(|line| line.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::with_capacity(src.len());
+    let mut first = true;
+    for line in src.lines() {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(line.split("//").next().unwrap_or(""));
+    }
+    out
 }
 
 fn block_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
@@ -210,10 +216,10 @@ fn parse_theme_body(body: &str, t: &mut Theme) {
                 i += 2;
             }
             "font-size" | "font_size" => {
-                if let Ok(n) = val.parse::<u32>() {
-                    if (8..=64).contains(&n) {
-                        t.font_size = Some(n);
-                    }
+                if let Ok(n) = val.parse::<u32>()
+                    && (8..=64).contains(&n)
+                {
+                    t.font_size = Some(n);
                 }
                 i += 2;
             }
@@ -297,11 +303,11 @@ fn parse_top_level(src: &str, cfg: &mut Config) {
         match tokens[i] {
             "{" => depth += 1,
             "}" => depth = depth.saturating_sub(1),
-                "max_results" | "max-results" if depth == 0 => {
-                if i + 1 < tokens.len() {
-                    if let Ok(n) = tokens[i + 1].parse::<usize>() {
-                        cfg.max_results = n.max(1);
-                    }
+            "max_results" | "max-results" if depth == 0 => {
+                if i + 1 < tokens.len()
+                    && let Ok(n) = tokens[i + 1].parse::<usize>()
+                {
+                    cfg.max_results = n.max(1);
                 }
                 i += 2;
                 continue;
@@ -356,7 +362,7 @@ fn expand_root(raw: &str) -> Option<PathBuf> {
     } else {
         PathBuf::from(raw)
     };
-    if p == PathBuf::from("/") {
+    if p == *"/" {
         return None;
     }
     Some(p)

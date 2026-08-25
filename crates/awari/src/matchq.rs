@@ -8,9 +8,14 @@
 /// ranks below `fire`.
 /// Primary lowercase fold of one char (first char of the full Unicode
 /// fold). Allocation-free; multi-char expansions collapse to their head,
-/// which is fine for ranking app/window labels.
+/// which is fine for ranking app/window labels. ASCII takes the bitmask fast
+/// path so the common case avoids building a `ToLowercase` iterator.
 fn fold(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
 }
 
 pub fn score(haystack: &str, needle: &str) -> Option<i64> {

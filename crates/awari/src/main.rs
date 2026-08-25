@@ -31,7 +31,9 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let daemon_mode = if has_flag(&args, "--no-keep-alive") {
         GpuMode::Drop
     } else {
@@ -40,11 +42,7 @@ fn main() {
     // The first non-flag arg selects the mode; flags (e.g. --no-keep-alive) are
     // detected independently of position, so `awari --no-keep-alive daemon` and
     // `awari daemon --no-keep-alive` behave identically.
-    let cmd = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))
-        .cloned();
+    let cmd = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
     match cmd.as_deref() {
         Some("gui") => gui_main(&args),
         Some("daemon") => shell::run(daemon_mode),
@@ -73,7 +71,11 @@ fn gui_main(args: &[String]) {
         "gpui launcher"
     );
 
-    let gpu_mode = if drop_gpu { GpuMode::Drop } else { GpuMode::KeepAlive };
+    let gpu_mode = if drop_gpu {
+        GpuMode::Drop
+    } else {
+        GpuMode::KeepAlive
+    };
     let start_state = if has_flag(args, "--hidden") {
         StartState::Hidden
     } else {
@@ -85,7 +87,7 @@ fn gui_main(args: &[String]) {
         app::Daemon::start(
             cx,
             match backend {
-                Backend::Wlr(c) => Some(c.clone()),
+                Backend::Wlr(c) => Some(c),
                 Backend::Noop => None,
             },
             inbox,

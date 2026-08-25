@@ -16,7 +16,7 @@ impl Color {
         Self(hex)
     }
 
-    pub fn to_rgba(&self) -> Rgba {
+    pub fn to_rgba(self) -> Rgba {
         let v = self.0;
         if v & 0xff == 0xff {
             rgb(v >> 8)
@@ -298,8 +298,15 @@ mod tests {
     fn presets_resolve_and_default_is_awari() {
         assert_eq!(Theme::default(), Theme::awari());
         for name in [
-            "awari", "ash", "ember", "verdant", "paper", "mono", "tokyonight",
-            "catppuccin", "gruvbox",
+            "awari",
+            "ash",
+            "ember",
+            "verdant",
+            "paper",
+            "mono",
+            "tokyonight",
+            "catppuccin",
+            "gruvbox",
         ] {
             assert!(Theme::preset(name).is_some(), "{name} should resolve");
         }

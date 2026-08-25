@@ -86,7 +86,7 @@ fn data_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, slice};
 
     fn tmpdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("awari-icons-{tag}-{}", std::process::id()));
@@ -121,12 +121,12 @@ mod tests {
         // Only hicolor present → found there.
         let only_theme = hicolor48.join("app.png");
         fs::write(&only_theme, b"png").unwrap();
-        assert_eq!(resolve_in("app", &[dir.clone()]), Some(only_theme));
+        assert_eq!(resolve_in("app", slice::from_ref(&dir)), Some(only_theme));
 
         // pixmaps wins once it exists.
         fs::write(dir.join("pixmaps/app.png"), b"png").unwrap();
         assert_eq!(
-            resolve_in("app", &[dir.clone()]),
+            resolve_in("app", slice::from_ref(&dir)),
             Some(dir.join("pixmaps/app.png"))
         );
     }
@@ -142,7 +142,7 @@ mod tests {
         fs::write(base.join("128x128/apps/app.png"), b"png").unwrap();
         // scalable sits ahead of larger rasters in the probe order.
         assert_eq!(
-            resolve_in("app", &[dir.clone()]),
+            resolve_in("app", slice::from_ref(&dir)),
             Some(base.join("scalable/apps/app.svg"))
         );
 

@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
@@ -60,7 +61,7 @@ pub struct FilesOptions {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileHit {
-    pub path: PathBuf,
+    pub path: Arc<Path>,
 }
 
 /// `~`, `/`, `.`, or any path separator — files win ranking for these.
@@ -213,6 +214,7 @@ fn picker_loop(
     opts: FilesOptions,
 ) {
     let pickers = build_root_pickers(&roots);
+    let mut regex_caches = RegexCaches::default();
     tracing::info!(roots = pickers.len(), "file index started");
 
     let parser = QueryParser::default();
@@ -269,6 +271,7 @@ fn picker_loop(
             &parser,
             &raw,
             &opts,
+            &mut regex_caches,
         );
         prev_raw = raw;
         if rtx.send((seq, hits)).is_err() {
@@ -277,9 +280,22 @@ fn picker_loop(
     }
 }
 
-/// Resolve whether `raw` is a regex query and compile it. The `r:` prefix
-/// forces regex mode per-query; otherwise only the `files.regex` config does.
-fn resolve_regex(raw: &str, global_regex: bool) -> (String, Option<Regex>) {
+/// Resolve whether `raw` is a regex query and compile it, memoizing the last
+/// compiled pattern so identical re-queries within a session skip
+/// recompilation. The `r:` prefix forces regex mode per-query; otherwise only
+/// the `files.regex` config does. The compile otherwise runs on every
+/// keystroke in regex mode.
+#[derive(Default)]
+struct RegexCaches {
+    main: Option<(String, Regex)>,
+    term: Option<(String, Regex)>,
+}
+
+fn resolve_regex(
+    cache: &mut Option<(String, Regex)>,
+    raw: &str,
+    global_regex: bool,
+) -> (String, Option<Regex>) {
     let (pattern, want) = if let Some(p) = raw.strip_prefix("r:") {
         (p.to_string(), true)
     } else if global_regex {
@@ -288,12 +304,22 @@ fn resolve_regex(raw: &str, global_regex: bool) -> (String, Option<Regex>) {
         (raw.to_string(), false)
     };
     if !want {
+        *cache = None;
         return (pattern, None);
     }
+    if let Some((prev, re)) = cache
+        && *prev == pattern
+    {
+        return (pattern, Some(re.clone()));
+    }
     match Regex::new(&pattern) {
-        Ok(re) => (pattern, Some(re)),
+        Ok(re) => {
+            *cache = Some((pattern.clone(), re.clone()));
+            (pattern, Some(re))
+        }
         Err(e) => {
             tracing::debug!(%e, "regex compile failed; ignoring regex filter");
+            *cache = None;
             (pattern, None)
         }
     }
@@ -334,12 +360,19 @@ fn is_word_boundary(c: char) -> bool {
 /// is not a subsequence of `haystack`. Case-insensitive.
 pub fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
     let needle: Vec<char> = needle.chars().collect();
-    let haystack: Vec<char> = haystack.chars().collect();
+    subsequence_score_chars(&needle, haystack)
+}
+
+/// Core of [`subsequence_score`] with the needle precomputed as `&[char]` so
+/// the hot file-search path builds it once and reuses it across every hit.
+/// The haystack is scanned char-by-char with a one-char lookback instead of
+/// materializing a `Vec<char>`, so no per-call heap allocation for it.
+fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
     let n = needle.len();
-    let m = haystack.len();
     if n == 0 {
         return Some(0);
     }
+    let m = haystack.chars().count();
     if n > m {
         return None;
     }
@@ -351,15 +384,18 @@ pub fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
         let mut cur = vec![i32::MIN; m + 1];
         let mut best_prev_excl = i32::MIN; // max prev[k] for k < j-1 (gapped path)
         let nc = needle[i - 1].to_ascii_lowercase();
-        for j in 1..=m {
+        let mut prev_c: Option<char> = None;
+        let mut j = 0;
+        for c in haystack.chars() {
+            j += 1;
             // Skip this haystack char: carry forward the best ending at <= j-1.
             cur[j] = cur[j - 1];
-            let hc = haystack[j - 1].to_ascii_lowercase();
+            let hc = c.to_ascii_lowercase();
             if nc == hc {
-                let boundary = j == 1 || is_word_boundary(haystack[j - 2]);
+                let boundary = j == 1 || prev_c.is_some_and(is_word_boundary);
                 let bonus = if boundary {
                     SCORE_WORD
-                } else if haystack[j - 1].is_ascii_uppercase() {
+                } else if c.is_ascii_uppercase() {
                     SCORE_CAPITAL
                 } else {
                     SCORE_DOT
@@ -390,15 +426,16 @@ pub fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
             if prev[j - 1] != i32::MIN && prev[j - 1] > best_prev_excl {
                 best_prev_excl = prev[j - 1];
             }
+            prev_c = Some(c);
         }
         prev = cur;
     }
     // Only a full match (the final row) counts; partial matches from earlier
     // rows must not leak through as the score.
-    for j in 1..=m {
-        if prev[j] != i32::MIN {
+    for (j, pv) in prev.iter().copied().enumerate().skip(1).take(m) {
+        if pv != i32::MIN {
             let trail = (m - j) as i32 * SCORE_TRAIL;
-            let sc = prev[j] - trail;
+            let sc = pv - trail;
             if sc > best {
                 best = sc;
             }
@@ -458,8 +495,9 @@ fn search_all(
     parser: &QueryParser<fff_search::FileSearchConfig>,
     raw: &str,
     opts: &FilesOptions,
+    regex_caches: &mut RegexCaches,
 ) -> Vec<FileHit> {
-    let (pattern, regex) = resolve_regex(raw, opts.regex);
+    let (pattern, regex) = resolve_regex(&mut regex_caches.main, raw, opts.regex);
     let fff_query = if regex.is_some() {
         regex_hint(&pattern)
     } else {
@@ -476,10 +514,10 @@ fn search_all(
         // LRU eviction: keep at most TRANSIENT_DIR_CAP per-directory indexes.
         if let Some(pos) = transient_order.iter().position(|p| *p == dir) {
             transient_order.remove(pos);
-        } else if transient_order.len() >= TRANSIENT_DIR_CAP {
-            if let Some(old) = transient_order.pop_front() {
-                transient.remove(&old);
-            }
+        } else if transient_order.len() >= TRANSIENT_DIR_CAP
+            && let Some(old) = transient_order.pop_front()
+        {
+            transient.remove(&old);
         }
         transient_order.push_back(dir.clone());
         let shared = transient.entry(dir.clone()).or_insert_with(|| {
@@ -506,7 +544,7 @@ fn search_all(
             );
             shared
         });
-        let (t_pat, t_re) = resolve_regex(&term, opts.regex);
+        let (t_pat, t_re) = resolve_regex(&mut regex_caches.term, &term, opts.regex);
         let t_fff = if t_re.is_some() {
             regex_hint(&t_pat)
         } else {
@@ -564,6 +602,7 @@ fn search_one(
     };
     let query = parser.parse(fff_query);
     let q_lc = fff_query.to_lowercase();
+    let needle_chars: Vec<char> = q_lc.chars().collect();
     let fff_limit = PER_ROOT_ROWS * 2;
     let results = p.fuzzy_search(
         &query,
@@ -585,7 +624,7 @@ fn search_one(
             .items
             .iter()
             .map(|item| FileHit {
-                path: item.absolute_path(p, &base),
+                path: Arc::from(item.absolute_path(p, &base)),
             })
             .filter(|h| {
                 (index_lockfiles || !is_lockfile(&h.path)) && re.is_match(&h.path.to_string_lossy())
@@ -599,7 +638,7 @@ fn search_one(
         .items
         .iter()
         .map(|item| FileHit {
-            path: item.absolute_path(p, &base),
+            path: Arc::from(item.absolute_path(p, &base)),
         })
         .filter(|h| index_lockfiles || !is_lockfile(&h.path))
         .filter_map(|h| {
@@ -609,8 +648,8 @@ fn search_one(
                 .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            let s_path = subsequence_score(&q_lc, &p_lc);
-            let s_name = subsequence_score(&q_lc, &name_lc);
+            let s_path = subsequence_score_chars(&needle_chars, &p_lc);
+            let s_name = subsequence_score_chars(&needle_chars, &name_lc);
             let score = match (s_path, s_name) {
                 (Some(a), Some(b)) => a.max(b),
                 (Some(a), None) => a,
@@ -620,11 +659,15 @@ fn search_one(
             Some((score, h))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let k = PER_ROOT_ROWS;
+    if scored.len() > k {
+        scored.select_nth_unstable_by_key(k, |a| std::cmp::Reverse(a.0));
+        scored.truncate(k);
+    }
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored
         .into_iter()
         .map(|(_, h)| h)
-        .take(PER_ROOT_ROWS)
         .collect()
 }
 
@@ -663,14 +706,12 @@ pub(crate) fn resolve_terminal() -> Option<String> {
     static CACHED: OnceLock<Option<String>> = OnceLock::new();
     CACHED
         .get_or_init(|| {
-            if let Ok(term) = std::env::var("TERMINAL") {
-                if !term.trim().is_empty() {
-                    return Some(term.trim().to_string());
-                }
+            if let Ok(term) = std::env::var("TERMINAL")
+                && !term.trim().is_empty()
+            {
+                return Some(term.trim().to_string());
             }
-            let Some(paths) = std::env::var("PATH").ok() else {
-                return None;
-            };
+            let paths = std::env::var("PATH").ok()?;
             for candidate in [
                 "alacritty",
                 "kitty",
@@ -762,7 +803,7 @@ mod tests {
         names
             .iter()
             .map(|n| FileHit {
-                path: PathBuf::from(n),
+                path: Arc::from(PathBuf::from(n)),
             })
             .collect()
     }
@@ -802,16 +843,17 @@ mod tests {
 
     #[test]
     fn regex_resolution() {
+        let mut cache = None;
         // `r:` prefix forces regex and strips the prefix.
-        let (pat, re) = resolve_regex("r:foo", false);
+        let (pat, re) = resolve_regex(&mut cache, "r:foo", false);
         assert_eq!(pat, "foo");
         assert!(re.is_some());
         // No prefix and global off → plain fuzzy (no regex).
-        assert!(resolve_regex("foo", false).1.is_none());
+        assert!(resolve_regex(&mut cache, "foo", false).1.is_none());
         // Global on → regex even without prefix.
-        assert!(resolve_regex("foo", true).1.is_some());
+        assert!(resolve_regex(&mut cache, "foo", true).1.is_some());
         // Invalid pattern → falls back to no regex rather than panicking.
-        assert!(resolve_regex("r:[", false).1.is_none());
+        assert!(resolve_regex(&mut cache, "r:[", false).1.is_none());
     }
 
     #[test]
@@ -822,7 +864,7 @@ mod tests {
 
     #[test]
     fn path_query_dir_resolves_existing_directory() {
-        let base = std::env::temp_dir().join(format!("awari_pathq_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("awari_pathq_existing_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         // Trailing slash: browse the directory's contents (empty fragment).
         let got = path_query_dir(&format!("{}/", base.display()));
@@ -846,7 +888,7 @@ mod tests {
 
     #[test]
     fn path_query_dir_resolves_parent_for_partial() {
-        let base = std::env::temp_dir().join(format!("awari_pathq_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("awari_pathq_partial_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let got = path_query_dir(&format!("{}/aw", base.display()));
         let _ = std::fs::remove_dir_all(&base);
