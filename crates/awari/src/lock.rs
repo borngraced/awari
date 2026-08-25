@@ -12,6 +12,7 @@ use awari_ipc::{ClientReply, ClientRequest, SOCKET_NAME};
 
 pub struct IpcServer {
     pub listener: UnixListener,
+    _lock: std::fs::File,
 }
 
 #[derive(Default)]
@@ -37,43 +38,35 @@ pub fn acquire() -> Result<IpcServer, LockError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    let path = dir.join(SOCKET_NAME);
-    match UnixStream::connect(&path) {
-        Ok(stream) => match ping_stream(stream) {
-            Ok(ClientReply::Ok) => {
+    let lock_path = dir.join("daemon.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    unsafe {
+        libc::fcntl(lock_file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EAGAIN) => {
                 return Err(LockError::AlreadyRunning);
             }
-            Ok(_) | Err(_) => {
-                let _ = std::fs::remove_file(&path);
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-            let _ = std::fs::remove_file(&path);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(%e, "connect ipc.sock");
-            let _ = std::fs::remove_file(&path);
+            _ => return Err(LockError::Io(err)),
         }
     }
+    let path = dir.join(SOCKET_NAME);
+    let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(IpcServer { listener })
-}
-
-fn ping_stream(mut stream: UnixStream) -> Result<ClientReply, LockError> {
-    let mut line = serde_json::to_string(&ClientRequest::Ping)?;
-    line.push('\n');
-    stream.write_all(line.as_bytes())?;
-    stream.flush()?;
-    let mut reader = BufReader::new(stream);
-    let mut reply = String::new();
-    reader.read_line(&mut reply)?;
-    serde_json::from_str(reply.trim()).map_err(LockError::from)
+    Ok(IpcServer { listener, _lock: lock_file })
 }
 
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
