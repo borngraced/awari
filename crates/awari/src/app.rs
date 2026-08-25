@@ -402,6 +402,7 @@ impl Daemon {
         }
         let shell = cx.entity().downgrade();
         let theme = self.cfg.theme.clone();
+        let reduce_motion = self.cfg.motion.reduced;
         let bounds = Bounds {
             origin: point(px(0.), px(0.)),
             size: size(px(1920.), px(launcher::LAUNCHER_H)),
@@ -416,7 +417,10 @@ impl Daemon {
                 display_id: self.launcher_display,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx)),
+            |window, cx| {
+                cx.set_reduce_motion(reduce_motion);
+                cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx))
+            },
         );
         // Compositors without `wlr-layer-shell` (e.g. GNOME/Mutter) can't host
         // the overlay; fall back to a regular window so apps/files/commands
@@ -433,7 +437,10 @@ impl Daemon {
                     display_id: self.launcher_display,
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx)),
+                |window, cx| {
+                cx.set_reduce_motion(reduce_motion);
+                cx.new(|cx| Launcher::new(shell.clone(), theme.clone(), window, cx))
+            },
             ),
             Err(e) => Err(e),
         };

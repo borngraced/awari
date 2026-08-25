@@ -4,8 +4,9 @@ use gpui::prelude::*;
 use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     Image, ImageFormat, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
-    Render, Rgba, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage, StyledText,
-    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list, Point, Pixels,
+    Render, Rgba, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
+    StyledText, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list, Point,
+    Pixels,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -25,11 +26,12 @@ pub const LAUNCHER_W: f32 = 600.0;
 pub const LAUNCHER_H: f32 = 1080.0;
 const PANEL_H: f32 = 560.0;
 const GRID_COLS: usize = 4;
-const SLIDE: f32 = 22.0;
-const PANEL_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
-const HEIGHT_SPRING: SpringConfig = SpringConfig::new(380.0, 30.0, 1.0);
+const SLIDE: f32 = 10.0;
+// Critically-damped springs (zeta ~= 1.05): snappy ease-out, no overshoot/bounce.
+const PANEL_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
+const HEIGHT_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
 const SEARCH_H: f32 = 68.0;
-const ITEM_HOVER_SPRING: SpringConfig = SpringConfig::new(420.0, 34.0, 1.0);
+const ITEM_HOVER_SPRING: SpringConfig = SpringConfig::new(600.0, 52.0, 1.0);
 
 fn mix(a: &Rgba, b: &Rgba, t: f32) -> Rgba {
     let t = t.clamp(0.0, 1.0);
@@ -1576,6 +1578,11 @@ impl Render for Launcher {
                         .child(div().child(a.label()))
                         .child(div().child(if i == 0 { "↵" } else { "" }))
                 }))
+                .with_spring(
+                    "action-menu",
+                    SpringAnimation::new(PANEL_SPRING).to(1.0).from(0.0),
+                    |el, v| el.opacity(v).mt(px((1.0 - v) * 6.0)),
+                )
         });
 
         let results_body = div()
@@ -1600,6 +1607,12 @@ impl Render for Launcher {
             .justify_center()
             .w_full()
             .h_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    post(this, cx, LauncherCmd::Dismiss);
+                }),
+            )
             .when_some(font_family, |root, family| root.font_family(family))
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 let key = ev.keystroke.key.to_ascii_lowercase();
@@ -1699,18 +1712,6 @@ impl Render for Launcher {
                 }
                 cx.notify();
             }))
-            .child(
-                div()
-                    .id("launcher-scrim")
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            post(this, cx, LauncherCmd::Dismiss);
-                        }),
-                    ),
-            )
             .child(
                 div()
                     .id("launcher-panel-wrap")
