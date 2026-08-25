@@ -177,6 +177,17 @@ pub struct LauncherView {
     pub files_enabled: bool,
 }
 
+fn action_menu_top(row_top: Pixels, item_h: Pixels, menu_h: Pixels, viewport: Pixels) -> Pixels {
+    let gap = px(6.);
+    if row_top + item_h + gap + menu_h <= viewport {
+        row_top + item_h + gap
+    } else if row_top - gap - menu_h >= px(0.) {
+        row_top - gap - menu_h
+    } else {
+        px(0.)
+    }
+}
+
 impl LauncherView {
     pub fn closed(theme: Theme) -> Self {
         Self {
@@ -1514,23 +1525,34 @@ impl Render for Launcher {
             );
         }
 
-        let results_body = div()
-            .flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .border_t_1()
-            .border_color(t.border())
-            .child(results);
-
         let action_menu_el = self.action_menu.as_ref().map(|menu| {
             let index = menu.index;
+            // Anchor the menu to the selected row: open below it, or above when
+            // there isn't room, so it never covers the highlighted item.
+            let (item_h, scroll_y, viewport_h) = {
+                let s = self.scroll.0.borrow();
+                let item_h = s
+                    .base_handle
+                    .bounds_for_item(0)
+                    .map(|b| b.size.height)
+                    .unwrap_or(px(56.));
+                let scroll_y = s.base_handle.offset().y;
+                let viewport_h = s.base_handle.bounds().size.height;
+                (item_h, scroll_y, viewport_h)
+            };
+            let visual_ix = if browsing_grid {
+                self.view.selected / GRID_COLS
+            } else {
+                self.view.selected
+            };
+            let row_top = item_h * (visual_ix as f32) + scroll_y; // selected row's top, relative to the list
+            let menu_h = px(36.) * (menu.actions.len() as f32) + px(12.);
+            let top = action_menu_top(row_top, item_h, menu_h, viewport_h);
             div()
                 .absolute()
                 .left(px(20.))
                 .right(px(20.))
-                .top(px(60.))
+                .top(top)
                 .flex_col()
                 .gap(px(2.))
                 .p(px(6.))
@@ -1555,6 +1577,18 @@ impl Render for Launcher {
                         .child(div().child(if i == 0 { "↵" } else { "" }))
                 }))
         });
+
+        let results_body = div()
+            .relative()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(t.border())
+            .child(results)
+            .when_some(action_menu_el, |el, menu| el.child(menu));
 
         let search_focus = self.focus_handle.clone();
         div()
@@ -1746,7 +1780,6 @@ impl Render for Launcher {
                                     ),
                             )
                             .when(show_results, |el| el.child(results_body))
-                            .when_some(action_menu_el, |el, menu| el.child(menu))
                             .with_spring(
                                 "launcher-panel",
                                 SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),

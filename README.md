@@ -4,13 +4,18 @@
 
 # Àwárí
 
-A blazingly fast launcher for Wayland — toggle it in ~2.78 ms. Hit Super, type,
-and get a ranked list of windows, apps, and files, powered by
-[fff-search](https://github.com/dmtrKovalenko/fff): an in-process, frecency-ranked
-index, not a subprocess per keystroke. A tiny, GPU-free shell stays resident and
-drives a GPU overlay on demand, so opening costs a fraction of a second.
+A blazingly fast launcher for Wayland compositors like niri and Hyprland, triggered in just 2.78 ms. Hit Super,
+type, and instantly get a ranked list of windows, apps, and files. Awari is
+powered by [fff-search](https://github.com/dmtrKovalenko/fff): an in-process,
+frecency-ranked index that doesn't waste CPU cycles spawning subprocesses on
+every keystroke.
 
-The name is Yoruba for "a finding, a discovery".
+By separating a tiny, GPU-free background daemon from a warm GPU overlay, Awari
+pops onto your screen in an unnoticeable ~19 ms while maintaining a lean idle
+footprint. For ultra-low-spec hardware, it can easily drop down to a pure
+on-demand mode to free up every megabyte of RAM.
+
+The name Awari is Yoruba for "a discovery."
 
 ![Àwárí launcher overview](docs/overview.png)
 
