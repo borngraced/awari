@@ -4,8 +4,7 @@
 
 # Àwárí
 
-A blazingly fast launcher for Wayland compositors like niri and Hyprland, triggered in just 2.78 ms. Hit Super,
-type, and instantly get a ranked list of windows, apps, and files. Awari is
+A blazingly fast launcher for Wayland compositors like niri and Hyprland, triggered in just 2.78 ms. Awari is
 powered by [fff-search](https://github.com/dmtrKovalenko/fff): an in-process,
 frecency-ranked index that doesn't waste CPU cycles spawning subprocesses on
 every keystroke.
@@ -187,6 +186,8 @@ sources {
   windows true
   files   true
 }
+
+keep-alive true              // GPU overlay stays resident between uses (default); false = exits on dismiss
 // apps is always indexed and cannot be disabled
 
 motion {
