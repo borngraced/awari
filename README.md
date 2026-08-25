@@ -4,12 +4,11 @@
 
 # Àwárí
 
-Àwárí is a blazingly fast launcher for Wayland (toggle it in ~2.78 ms). Hit Super, type, and get a ranked list of the
-windows, apps, and files you're after, powered by
-[fff-search](https://github.com/dmtrKovalenko/fff), an in-process,
-frecency-ranked index, not a subprocess spawned per keystroke. Àwárí stays
-resident as a tiny, GPU-free shell and drives a GPU overlay on demand, so opening
-costs a fraction of a second rather than a full app boot.
+A blazingly fast launcher for Wayland — toggle it in ~2.78 ms. Hit Super, type,
+and get a ranked list of windows, apps, and files, powered by
+[fff-search](https://github.com/dmtrKovalenko/fff): an in-process, frecency-ranked
+index, not a subprocess per keystroke. A tiny, GPU-free shell stays resident and
+drives a GPU overlay on demand, so opening costs a fraction of a second.
 
 The name is Yoruba for "a finding, a discovery".
 
@@ -54,91 +53,57 @@ The name is Yoruba for "a finding, a discovery".
 
 ## Motivation
 
-Most launchers are slow in ways you learn to live with. They fork a search tool
-on every keystroke (fd, fzf, rg) and pay for it in process startups and parsing.
-Or they're a web view that spins up a runtime just to draw a text field. Files
-tend to be an afterthought stuck onto an app menu.
-
-Àwárí goes the other way. File search runs in-process through fff-search, pinned
-and ranked, so there's no subprocess per character. A lightweight, GPU-free shell
-stays resident and drives the overlay on demand; pressing Super sends a socket
-message that opens it and takes the keyboard within a fraction of a second.
-Windows, apps, and files all go into one ranking, so you get whichever you meant.
-By default the overlay is kept alive (hidden) between uses for instant re-opens,
-holding ~tens of MB while idle; with `keep-alive = false` (or the daemon flag
-`--no-keep-alive`) it exits on dismiss so only the tiny shell stays up, at the
-cost of a ~100 ms rebuild on the next open.
+Most launchers fork a search tool every keystroke (fd, fzf, rg) or spin up a web
+runtime just to draw a box, with files as an afterthought. Àwárí runs file search
+in-process via fff-search and ranks windows, apps, and files together, so there's
+no subprocess per character and you get whichever you meant. A resident, GPU-free
+shell opens the overlay with a socket message; by default it's kept alive (hidden)
+for instant re-opens (~19 ms, ~77 MB idle), or torn down with `keep-alive = false`
+/ `--no-keep-alive` (~100 ms rebuild, 8.5 MB idle).
 
 ## Usage
 
-Bind a key in your compositor to `awari toggle-launcher` (for example
-Super+Space), then press it to open the overlay. Typing filters the list and the
-top match stays selected. `Enter` activates the selected result and closes;
-`Escape` or a click on the background dismisses without selecting. `Up` and
-`Down` move the selection.
-
-`Tab` completes the query: it ghosts in the selected match, or fills the box
-with the selected row's full value. `Shift`+`Up`/`Down` recalls previous
-queries.
-
-`Alt`+`Enter` opens a per-row action menu. The items depend on the result:
-Open, Show in Folder, Copy Path, Run in Terminal, and Run.
+Bind a key to `awari toggle-launcher` and press it to open. Type to filter; the
+top match stays selected. `Enter` activates and closes; `Escape` or a background
+click dismisses; `Up`/`Down` move the selection. `Tab` ghost-completes the
+selected match (or fills the box); `Shift`+`Up`/`Down` recall past queries.
+`Alt`+`Enter` opens a per-row menu (Open, Show in Folder, Copy Path, Run in
+Terminal, Run).
 
 Query modes:
-- A path-shaped query (starting with `~`, `/`, or `.`, or containing `/`)
-  browses the filesystem, files first, then apps and windows. Constraints like
-  `*.pdf` and `!node_modules/` apply, and `../` moves up a directory.
-- `o:<path>` opens a path and lists its real entries as you type.
-- `r:<regex>` filters files by regular expression.
-- `> <command>` runs the rest as a shell command in a terminal.
+- Path-shaped (`~`, `/`, `.`, or contains `/`) browses the filesystem; `*.pdf`,
+  `!node_modules/` constrain, `../` goes up.
+- `o:<path>` lists a path's entries as you type.
+- `r:<regex>` filters files by regex.
+- `> <command>` runs a shell command in a terminal.
 - An arithmetic query shows its result; `Enter` copies it.
 
 Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
-## How it stays fast
-
-- File search is in-process via fff-search (0.10.5), not a spawned fd/fzf/rg.
-- A lightweight, GPU-free shell stays resident and drives a layer-shell overlay
-  on demand; once open, typing is one redraw plus a keyboard-interactivity
-  request, not a new spawn.
-- fff does fuzzy path matching, frecency, and git-status tagging. Our own
-  `matchq` ranks windows and apps without allocating per keystroke.
-- IPC read to damage is under 2 ms p99. The first paint after a cold open is
-  bounded by process and GPU init (sub-150 ms in practice); reduced-motion sets
-  the animation duration to zero.
-
 ## Features
 
-- **Lightweight**: A tiny, GPU-free background daemon stays resident at just a few MB. By default, the heavy GPU overlay is kept alive but hidden between uses for instant re-opens (~19 ms), holding roughly 77 MB while idle. If you prefer to save every megabyte of RAM, set `keep-alive = false` (or run with `--no-keep-alive`) to completely tear down the GPU stack on dismiss, dropping your idle footprint to just 8.5 MB.
-- **On-demand**: searches run in-process via fff-search and rank by frecency, with no per-keystroke subprocess overhead. The toggle command returns in ~2.78 ms, so the overlay opens in a fraction of a second when cold and instantly when kept alive.
-- **One suggestion, not a list**: inline ghost-text completion; the full alternates list only shows on ↓.
-- **Wayland-native**: one binary for any Wayland compositor. The overlay uses `wlr-layer-shell` (niri, Hyprland, sway, and other wlroots-family compositors like river and labwc); on compositors without it, like GNOME/Mutter, it falls back to a normal window for apps, files, and commands.
-- **Unified results**: windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
-- **Empty query**: shows recent apps first, then open windows (no file dump).
-- **Query prefixes**: `>` runs a shell command in a terminal, `o:<path>` opens a path and lists its real entries as you type (`~` and paths relative to `$HOME` both work), `r:<regex>` filters files by regular expression.
-- **Path navigation**: path-shaped queries (starting with `~`, `/`, `.`, or containing `/`) browse the filesystem; constraints like `*.pdf` and `!node_modules/` apply.
-- **Calculator**: an arithmetic query shows the result inline, and Enter copies it.
-- **Smart completion**: `Tab` autocompletes with the selected result's full value; `Shift`+`↑`/`↓` recalls previous queries.
-- **Action menu**: `Alt`+`Enter` opens a per-row menu: Open, Show in Folder, Copy Path, Run in Terminal, Run.
-- **Category chips**: clickable All, Apps, Files, Commands, Windows.
-- **Theming**: KDL with hex color tokens (no CSS, no remote fetches); nine built-in presets, per-token overrides, and aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); configurable font and size.
-- **Lockfiles hidden**: `Cargo.lock`, `package-lock.json`, and `*.lock` are skipped by default.
-- **Monitor-aware**: the overlay opens on the focused output.
-
-## Memory
-
-The resident shell is idle when the overlay is closed (a few MB, the GPU process
-having exited); sustained CPU above about 1% is a bug. Memory
-is bounded too. Per-directory file indexes are capped with LRU eviction and each
-picker's cache is finite, so browsing through many folders doesn't pile up
-indexes.
+- **Lightweight**: GPU-free resident daemon; overlay kept alive hidden (~19 ms
+  re-open, ~77 MB idle) or dropped entirely (8.5 MB idle, ~100 ms rebuild).
+- **In-process search**: fff-search ranks by frecency with no per-keystroke
+  subprocess; `matchq` scores windows/apps without per-keystroke allocation.
+  IPC read-to-damage is under 2 ms p99.
+- **Bounded**: LRU-capped per-directory indexes; idle CPU ~0 (sustained >1% is a bug).
+- **One suggestion**: inline ghost-text completion; full alternates only on ↓.
+- **Wayland-native**: one binary for any Wayland compositor. Overlay uses
+  `wlr-layer-shell` (niri, Hyprland, sway, river, labwc); on GNOME/Mutter it
+  falls back to a normal window for apps/files/commands.
+- **Unified results**: windows (focus), apps (`.desktop`), and files in one
+  fuzzy/frecency list. Apps always indexed; files and windows toggleable.
+- **Query power**: `>` commands, `o:<path>` browse, `r:<regex>`, arithmetic,
+  path navigation with constraints.
+- **Theming**: KDL hex tokens (no CSS/fetch); nine presets, per-token overrides,
+  aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); font/size.
+- **Action menu, category chips, calculator, monitor-aware**, lockfiles hidden.
 
 ## Build
 
-Linux with a Wayland compositor. Best on niri, Hyprland, and sway, plus other
-wlroots-family compositors (river, labwc, and others) that provide
-`wlr-layer-shell`;
-on GNOME/Mutter it falls back to a normal window for apps, files, and commands.
+Linux + Wayland compositor (best on niri, Hyprland, sway, river, labwc via
+`wlr-layer-shell`; GNOME/Mutter falls back to a window).
 
 ```sh
 # Debian/Ubuntu
@@ -153,28 +118,19 @@ awari ping
 
 ## Install
 
-`awari` is not published to crates.io, because it depends on a vendored, patched
-GPUI committed under `.third_party/zed` (a local `[patch]` can't be published).
-Install it from the git repo instead:
+`awari` isn't on crates.io — it depends on a vendored, patched GPUI under
+`.third_party/zed` (a local `[patch]` can't be published). Install from git:
 
 ```sh
 cargo install --git https://github.com/borngraced/awari awari
 ```
 
-This compiles GPUI from source, so it needs the Wayland/NixKB/EGL dev libraries
-listed in [Build](#build). The result is a single `awari` binary that also runs
-the GPU overlay (it re-executes itself as `awari gui`), so the one install is
-complete. Then start it as a resident service (below) and bind a key.
-
-Run `awari` as a resident user service so the overlay is always one key away:
+This builds GPUI from source, so the [Build](#build) dev libraries are required.
+Then run it as a resident service and bind a key.
 
 ```sh
 systemctl --user enable --now ~/.config/systemd/user/awari.service
 ```
-
-(See `contrib/awari.service` for the unit.)
-
-Then bind a key in your compositor to toggle the overlay.
 
 **niri** (`~/.config/niri/config.kdl`):
 
@@ -188,20 +144,20 @@ binds {
 **Hyprland** (`~/.config/hypr/hyprland.conf`):
 
 ```ini
+exec-once = awari
 bind = SUPER, D, exec, awari toggle-launcher
 ```
 
 ## Configuration
 
-KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys are ignored. No exec,
-scripts, or shell interpolation. Every block and token is optional, so anything
-omitted keeps its default. The complete, copy-pasteable file is
-`contrib/config.kdl`.
+KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys ignored; no
+exec/scripts/shell interpolation; every block/token optional. Copy-pasteable
+full file: `contrib/config.kdl`.
 
 ```kdl
 theme {
-  name "catppuccin"            // preset: classic · catppuccin (default) · gruvbox
-                              //          gruvbox-light · tokyo-night · nord
+  name "catppuccin"            // presets: awari (default) · ash · ember · verdant
+                               //          paper · mono · tokyonight · catppuccin · gruvbox
   // font "Inter"             // system family; "default"/"" = GPUI system UI font
   // font-size 14             // px, clamped to 8..=64
   accent      "#cba6f7"       // = select
