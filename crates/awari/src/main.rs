@@ -16,9 +16,10 @@ mod ui;
 
 use std::sync::{Arc, Mutex};
 
-use awari_compositor::connect;
+use awari_compositor::{Backend, connect};
 use gpui_platform::application;
 
+use crate::app::{GpuMode, StartState};
 use crate::lock::Stats;
 use crate::surfaces::SurfaceRole;
 
@@ -30,8 +31,12 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let no_keep_alive = has_flag(&args, "--no-keep-alive");
+    let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+    let daemon_mode = if has_flag(&args, "--no-keep-alive") {
+        GpuMode::Drop
+    } else {
+        GpuMode::KeepAlive
+    };
     // The first non-flag arg selects the mode; flags (e.g. --no-keep-alive) are
     // detected independently of position, so `awari --no-keep-alive daemon` and
     // `awari daemon --no-keep-alive` behave identically.
@@ -42,9 +47,9 @@ fn main() {
         .cloned();
     match cmd.as_deref() {
         Some("gui") => gui_main(&args),
-        Some("daemon") => shell::run(no_keep_alive),
+        Some("daemon") => shell::run(daemon_mode),
         Some(other) => std::process::exit(argv::client_main(other)),
-        None => shell::run(no_keep_alive),
+        None => shell::run(daemon_mode),
     }
 }
 
@@ -53,34 +58,41 @@ fn gui_main(args: &[String]) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let (compositor, inbox, wlr_connected) = connect();
-    if !wlr_connected {
+    let (backend, inbox) = connect();
+    if matches!(backend, Backend::Noop) {
         tracing::warn!(
             "compositor did not advertise wlr-foreign-toplevel; window switching disabled (apps/files/commands still work)"
         );
     }
 
     let cfg = config::load();
-    let drop = has_flag(args, "--no-keep-alive");
+    let drop_gpu = has_flag(args, "--no-keep-alive");
     tracing::info!(
         ns = SurfaceRole::Launcher.namespace(),
-        mode = if drop { "drop" } else { "keep-alive" },
+        mode = if drop_gpu { "drop" } else { "keep-alive" },
         "gpui launcher"
     );
 
-    let keep_alive = !drop;
-    let open = !has_flag(args, "--hidden");
+    let gpu_mode = if drop_gpu { GpuMode::Drop } else { GpuMode::KeepAlive };
+    let start_state = if has_flag(args, "--hidden") {
+        StartState::Hidden
+    } else {
+        StartState::Open
+    };
 
     application().run(move |cx| {
         gpui_base::init(cx);
         app::Daemon::start(
             cx,
-            Some(compositor),
+            match backend {
+                Backend::Wlr(c) => Some(c.clone()),
+                Backend::Noop => None,
+            },
             inbox,
             Arc::new(Mutex::new(Stats::default())),
             cfg,
-            open,
-            keep_alive,
+            start_state,
+            gpu_mode,
         );
     });
 }

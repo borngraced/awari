@@ -35,7 +35,6 @@ const STATE_ACTIVATED: u8 = 2;
 #[derive(Clone, Debug)]
 pub enum CompositorCommand {
     FocusWindow { id: u64 },
-    Spawn { command: Vec<String> },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +48,7 @@ pub enum CompositorError {
 }
 
 /// A single open toplevel window, normalized across compositors.
+#[derive(Clone, Debug)]
 pub struct Toplevel {
     pub id: u64,
     pub title: Option<String>,
@@ -120,22 +120,31 @@ impl CompositorInbox {
     }
 }
 
-/// Connect to the running compositor. Returns the backend, its inbox, and
-/// whether the wlr-foreign-toplevel global was bound (`false` → no-op backend;
-/// window switching is unavailable but apps/files/commands still work).
-pub fn connect() -> (Arc<dyn Compositor>, Arc<CompositorInbox>, bool) {
+/// Which compositor backend was bound at `connect()` time.
+pub enum Backend {
+    /// `wlr-foreign-toplevel` was available; window switching works.
+    Wlr(Arc<dyn Compositor>),
+    /// No foreign-toplevel global: apps / files / commands still work, but the
+    /// window-switching rows are empty.
+    Noop,
+}
+
+/// Connect to the running compositor. Returns the backend and its inbox. The
+/// backend is `Backend::Noop` when the foreign-toplevel global is absent.
+pub fn connect() -> (Backend, Arc<CompositorInbox>) {
     match connect_wlr() {
-        Some((backend, inbox)) => (backend, inbox, true),
-        None => (Arc::new(NoopCompositor), CompositorInbox::new(), false),
+        Some((backend, inbox)) => (Backend::Wlr(backend), inbox),
+        None => (Backend::Noop, CompositorInbox::new()),
     }
 }
 
 /// Spawn `command` (argv form) detached: a helper thread reaps the child so it
 /// never lingers as a zombie. stdio is nulled because awari runs headless.
-/// Returns `Err(message)` if the program could not be launched.
-fn spawn_detached(command: &[String]) -> Result<(), String> {
+/// App launching is independent of the window-listing backend, so this is
+/// exposed directly rather than routed through `Compositor::apply`.
+pub fn spawn_detached(command: &[String]) -> Result<(), CompositorError> {
     if command.is_empty() {
-        return Err("empty command".into());
+        return Err(CompositorError::Spawn("empty command".into()));
     }
     std::process::Command::new(&command[0])
         .args(&command[1..])
@@ -151,7 +160,7 @@ fn spawn_detached(command: &[String]) -> Result<(), String> {
                 })
                 .ok();
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| CompositorError::Spawn(e.to_string()))
 }
 
 struct WlrInner {
@@ -209,9 +218,6 @@ struct WlrBackend {
 impl Compositor for WlrBackend {
     fn apply(&self, cmd: CompositorCommand) -> Result<(), CompositorError> {
         match cmd {
-            CompositorCommand::Spawn { command } => {
-                spawn_detached(&command).map_err(CompositorError::Spawn)
-            }
             CompositorCommand::FocusWindow { id } => {
                 // Sent synchronously: the request just enqueues on the shared
                 // connection, so it can't stall behind a blocked blocking_dispatch.
@@ -274,25 +280,6 @@ impl Compositor for WlrBackend {
             height,
             scale: info.scale.max(1),
         })
-    }
-}
-
-struct NoopCompositor;
-
-impl Compositor for NoopCompositor {
-    fn apply(&self, cmd: CompositorCommand) -> Result<(), CompositorError> {
-        match cmd {
-            CompositorCommand::Spawn { command } => {
-                spawn_detached(&command).map_err(CompositorError::Spawn)
-            }
-            CompositorCommand::FocusWindow { .. } => Ok(()),
-        }
-    }
-    fn windows(&self) -> Vec<Toplevel> {
-        Vec::new()
-    }
-    fn focused_output(&self) -> Option<OutputRect> {
-        None
     }
 }
 

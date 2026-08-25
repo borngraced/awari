@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use awari_ipc::ClientRequest;
+use awari_ipc::{ClientRequest, runtime_dir};
+use crate::app::GpuMode;
 use crate::config;
 use crate::lock;
 
@@ -24,14 +25,15 @@ const KILL_TIMEOUT_MS: u64 = 900;
 #[cfg(unix)]
 static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
 
-/// `no_keep_alive` is true when the daemon was started with `--no-keep-alive`.
-pub fn run(no_keep_alive: bool) {
+/// `mode` selects keep-alive (`GpuMode::KeepAlive`) or drop (`GpuMode::Drop`)
+/// for the launcher GUI.
+pub fn run(mode: GpuMode) {
     let filter = tracing_subscriber::EnvFilter::try_from_env("AWARI_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cfg = config::load();
-    let keep_alive = !no_keep_alive && cfg.keep_alive;
+    let keep_alive = matches!(mode, GpuMode::KeepAlive) && cfg.keep_alive;
 
     let server = match lock::acquire() {
         Ok(s) => s,
@@ -41,20 +43,13 @@ pub fn run(no_keep_alive: bool) {
         }
     };
     let stats = Arc::new(Mutex::new(lock::Stats::default()));
-    lock::spawn_accept(server.listener, stats.clone());
+    let ipc_rx = lock::spawn_accept(server.listener, stats.clone());
 
     #[cfg(unix)]
     install_daemon_sigterm();
 
     let child = Arc::new(Mutex::new(None::<Child>));
     let visible = Arc::new(AtomicBool::new(false));
-    let ipc_rx = match lock::take_ipc_rx() {
-        Some(rx) => rx,
-        None => {
-            tracing::error!("ipc receiver unavailable");
-            std::process::exit(1);
-        }
-    };
 
     spawn_reaper(child.clone(), visible.clone(), keep_alive);
 
@@ -70,24 +65,24 @@ pub fn run(no_keep_alive: bool) {
 
     for req in ipc_rx {
         match req {
+            // The GUI is the source of truth for visibility: it reports
+            // LauncherShown / LauncherHidden after every real state change, so
+            // the daemon only reads `visible` to decide show vs hide and never
+            // writes it optimistically. Toggle is therefore fire-and-forget.
             ClientRequest::ToggleLauncher => {
                 if keep_alive {
-                    if visible.load(Ordering::SeqCst) {
+                    if visible.load(Ordering::Relaxed) {
                         signal_child(&child, libc::SIGUSR2);
-                        visible.store(false, Ordering::SeqCst);
                     } else {
                         if child.lock().unwrap().is_none() {
                             start_child(&child, keep_alive);
                         }
                         signal_child(&child, libc::SIGUSR1);
-                        visible.store(true, Ordering::SeqCst);
                     }
-                } else if visible.load(Ordering::SeqCst) {
+                } else if visible.load(Ordering::Relaxed) {
                     stop_child(&child);
-                    visible.store(false, Ordering::SeqCst);
                 } else {
                     start_child(&child, keep_alive);
-                    visible.store(true, Ordering::SeqCst);
                 }
             }
             ClientRequest::OpenLauncher => {
@@ -97,21 +92,18 @@ pub fn run(no_keep_alive: bool) {
                 if keep_alive {
                     signal_child(&child, libc::SIGUSR1);
                 }
-                visible.store(true, Ordering::SeqCst);
             }
             ClientRequest::CloseLauncher => {
                 if keep_alive {
                     signal_child(&child, libc::SIGUSR2);
-                    visible.store(false, Ordering::SeqCst);
-                } else if visible.load(Ordering::SeqCst) {
+                } else if visible.load(Ordering::Relaxed) {
                     stop_child(&child);
-                    visible.store(false, Ordering::SeqCst);
                 }
             }
             // The GUI reports its real visibility so an in-GUI dismiss (Escape,
             // background click) keeps the daemon's `visible` flag truthful.
-            ClientRequest::LauncherShown => visible.store(true, Ordering::SeqCst),
-            ClientRequest::LauncherHidden => visible.store(false, Ordering::SeqCst),
+            ClientRequest::LauncherShown => visible.store(true, Ordering::Relaxed),
+            ClientRequest::LauncherHidden => visible.store(false, Ordering::Relaxed),
             _ => {}
         }
     }
@@ -123,13 +115,27 @@ extern "C" fn on_daemon_sigterm(_sig: i32) {
     if pid > 0 {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
-            // Wait for the GUI to actually exit before we do, so it isn't
-            // orphaned mid-teardown. `waitpid` is async-signal-safe.
+            // Best-effort: give the GUI a moment to exit so it isn't orphaned
+            // mid-teardown. Non-blocking poll so a wedged GUI can't pin the
+            // daemon in the handler (SIGTERM is blocked while we're here);
+            // bound it to ~500 ms, then leave regardless. Both `waitpid` and
+            // `nanosleep` are async-signal-safe.
             let mut status: i32 = 0;
-            libc::waitpid(pid, &mut status, 0);
+            let pause = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 10_000_000,
+            };
+            for _ in 0..50 {
+                if libc::waitpid(pid, &mut status, libc::WNOHANG) > 0 {
+                    break;
+                }
+                libc::nanosleep(&pause, std::ptr::null_mut());
+            }
         }
     }
-    std::process::exit(0);
+    // `_exit` (not `process::exit`) skips atexit handlers and stdio flushing,
+    // which are not async-signal-safe to run from a signal handler.
+    unsafe { libc::_exit(0) };
 }
 
 #[cfg(unix)]
@@ -149,20 +155,21 @@ fn spawn_reaper(child: Arc<Mutex<Option<Child>>>, visible: Arc<AtomicBool>, keep
             {
                 let mut g = child.lock().unwrap();
                 if let Some(c) = g.as_mut() {
-                    if c.try_wait().ok().flatten().is_some() {
+                    if matches!(c.try_wait(), Ok(Some(_))) {
                         *g = None;
                         drop(g);
                         if keep_alive {
                             // Keep-alive: maintain a warm GUI, respawn hidden.
                             start_child(&child, keep_alive);
                         } else {
-                            visible.store(false, Ordering::SeqCst);
+                            visible.store(false, Ordering::Relaxed);
                         }
                     }
                 }
             }
             thread::sleep(Duration::from_millis(100));
         })
+        .map_err(|e| tracing::error!(%e, "reaper thread failed to spawn"))
         .ok();
 }
 
@@ -184,12 +191,14 @@ fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
     } else {
         cmd.arg("--no-keep-alive").arg("--open");
     }
-    // Keep the GUI's logs out of the daemon's stdio: append to a file, falling
-    // back to /dev/null if it can't be opened.
+    // Keep the GUI's logs out of the daemon's stdio: append to a file under
+    // the runtime dir (with the rest of our state), falling back to /dev/null
+    // if it can't be opened.
+    let log_path = runtime_dir().join("gui.log");
     let (out, err) = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/awari-gui.log")
+        .open(&log_path)
     {
         Ok(f) => {
             let err = f.try_clone().map(Stdio::from).unwrap_or_else(|_| Stdio::null());
@@ -232,7 +241,7 @@ fn stop_child(child: &Arc<Mutex<Option<Child>>>) {
         .name("awari-kill-watchdog".into())
         .spawn(move || {
             thread::sleep(Duration::from_millis(KILL_TIMEOUT_MS));
-            if c.try_wait().ok().flatten().is_none() {
+            if matches!(c.try_wait(), Ok(None)) {
                 let _ = c.kill();
             }
             // Reap only this child. The shared slot was already taken (freed so
@@ -241,5 +250,6 @@ fn stop_child(child: &Arc<Mutex<Option<Child>>>) {
             // 900 ms window. The reaper handles whichever child is in the slot.
             let _ = c.wait();
         })
+        .map_err(|e| tracing::error!(%e, "kill-watchdog thread failed to spawn"))
         .ok();
 }

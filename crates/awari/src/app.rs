@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use awari_compositor::{Compositor, CompositorCommand, CompositorInbox, CompositorMsg};
+use awari_compositor::{Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached};
 use awari_ipc::{ClientRequest, notify};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode, Task,
@@ -29,6 +29,20 @@ use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 /// Holds the daemon entity so GPUI does not drop it with no windows open.
 struct Keep(#[allow(dead_code)] Entity<Daemon>);
 impl Global for Keep {}
+
+/// Whether the GPU overlay process stays in memory between dismisses
+/// (`KeepAlive`) or exits on dismiss to free the GPU process (`Drop`).
+pub enum GpuMode {
+    KeepAlive,
+    Drop,
+}
+
+/// Whether the launcher opens immediately (`Open`) or starts hidden and waits
+/// for the first toggle (`Hidden`).
+pub enum StartState {
+    Open,
+    Hidden,
+}
 
 pub struct Daemon {
     /// Compositor backend (wlr-foreign-toplevel). `None` when the compositor
@@ -110,8 +124,8 @@ impl Daemon {
         inbox: Arc<CompositorInbox>,
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
-        open: bool,
-        keep_alive: bool,
+        start_state: StartState,
+        gpu_mode: GpuMode,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
         let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, stats, cfg));
@@ -122,9 +136,9 @@ impl Daemon {
         // Overlay builds here once; it stays mapped-but-empty (transparent,
         // keyboard None, no input region) so wgpu/fonts warm at boot.
         daemon.update(cx, |d, cx| {
-            d.keep_alive = keep_alive;
+            d.keep_alive = matches!(gpu_mode, GpuMode::KeepAlive);
             d.ensure_launcher(cx);
-            if open {
+            if matches!(start_state, StartState::Open) {
                 d.set_launcher_open(true, cx);
             }
         });
@@ -205,7 +219,6 @@ impl Daemon {
             appwin_cache: None,
         };
         spawn_compositor_pump(cx, inbox);
-        spawn_ipc(cx);
         if let Some(files_rx) = files_rx {
             spawn_files_pump(cx, files_rx);
         }
@@ -868,16 +881,16 @@ impl Daemon {
         }
         let compositor = self.compositor.clone();
         cx.defer(move |_cx| {
-            let Some(compositor) = compositor else {
-                return;
-            };
             match kind {
                 launcher::RowKind::App { exec, .. } => {
-                    if let Err(e) = compositor.apply(CompositorCommand::Spawn { command: exec }) {
+                    if let Err(e) = spawn_detached(&exec) {
                         tracing::warn!(%e, "failed to launch app");
                     }
                 }
                 launcher::RowKind::Window { id } => {
+                    let Some(compositor) = compositor else {
+                        return;
+                    };
                     if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
                         tracing::warn!(%e, "failed to focus window");
                     }
@@ -888,30 +901,10 @@ impl Daemon {
             }
         });
     }
-
-    fn apply_ipc(&mut self, req: ClientRequest, cx: &mut Context<Self>) -> bool {
-        match req {
-            ClientRequest::ToggleLauncher => {
-                self.set_launcher_open(!self.launcher_open, cx);
-                true
-            }
-            ClientRequest::OpenLauncher => {
-                // Idempotent: re-opening while already open must not re-run the
-                // open path (gen bump, query reset, seq invalidate), which would
-                // wipe a typed query on keybind auto-repeat.
-                if !self.launcher_open {
-                    self.set_launcher_open(true, cx);
-                }
-                true
-            }
-            ClientRequest::CloseLauncher => {
-                self.set_launcher_open(false, cx);
-                true
-            }
-            _ => false,
-        }
-    }
 }
+
+
+
 
 fn spawn_compositor_pump(cx: &mut Context<Daemon>, inbox: Arc<CompositorInbox>) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -932,33 +925,6 @@ fn spawn_compositor_pump(cx: &mut Context<Daemon>, inbox: Arc<CompositorInbox>) 
                 let changed = d.apply_compositor(msgs);
                 if changed && d.launcher_open {
                     d.sync_launcher(cx);
-                    cx.notify();
-                }
-            });
-        }
-    })
-    .detach();
-}
-
-fn spawn_ipc(cx: &mut Context<Daemon>) {
-    let Some(std_rx) = crate::lock::take_ipc_rx() else {
-        return;
-    };
-    let (tx, mut rx) = futures::channel::mpsc::unbounded();
-    thread::Builder::new()
-        .name("awari-ipc-pump".into())
-        .spawn(move || {
-            while let Ok(req) = std_rx.recv() {
-                let _ = tx.unbounded_send(req);
-            }
-        })
-        .ok();
-    cx.spawn(async move |this, cx| {
-        use futures::StreamExt;
-        while let Some(req) = rx.next().await {
-            let _ = this.update(cx, |d, cx| {
-                let changed = d.apply_ipc(req, cx);
-                if changed {
                     cx.notify();
                 }
             });

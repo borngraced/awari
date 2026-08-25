@@ -6,6 +6,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use thiserror::Error;
+
 use awari_ipc::{ClientReply, ClientRequest, SOCKET_NAME};
 
 pub struct IpcServer {
@@ -17,9 +19,19 @@ pub struct Stats {
     pub launcher_open_to_first_commit_ms: Option<u64>,
 }
 
-pub fn acquire() -> Result<IpcServer, String> {
+#[derive(Debug, Error)]
+pub enum LockError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("already running")]
+    AlreadyRunning,
+}
+
+pub fn acquire() -> Result<IpcServer, LockError> {
     let dir = awari_ipc::runtime_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -29,7 +41,7 @@ pub fn acquire() -> Result<IpcServer, String> {
     match UnixStream::connect(&path) {
         Ok(stream) => match ping_stream(stream) {
             Ok(ClientReply::Ok) => {
-                return Err("already running (live daemon on ipc.sock)".into());
+                return Err(LockError::AlreadyRunning);
             }
             Ok(_) | Err(_) => {
                 let _ = std::fs::remove_file(&path);
@@ -44,7 +56,7 @@ pub fn acquire() -> Result<IpcServer, String> {
             let _ = std::fs::remove_file(&path);
         }
     }
-    let listener = UnixListener::bind(&path).map_err(|e| e.to_string())?;
+    let listener = UnixListener::bind(&path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -53,17 +65,15 @@ pub fn acquire() -> Result<IpcServer, String> {
     Ok(IpcServer { listener })
 }
 
-fn ping_stream(mut stream: UnixStream) -> Result<ClientReply, String> {
-    let mut line = serde_json::to_string(&ClientRequest::Ping).map_err(|e| e.to_string())?;
+fn ping_stream(mut stream: UnixStream) -> Result<ClientReply, LockError> {
+    let mut line = serde_json::to_string(&ClientRequest::Ping)?;
     line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
     let mut reader = BufReader::new(stream);
     let mut reply = String::new();
-    reader.read_line(&mut reply).map_err(|e| e.to_string())?;
-    serde_json::from_str(reply.trim()).map_err(|e| e.to_string())
+    reader.read_line(&mut reply)?;
+    serde_json::from_str(reply.trim()).map_err(LockError::from)
 }
 
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
@@ -86,15 +96,11 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     if rc == 0 { Some(cred.uid) } else { None }
 }
 
-static IPC_RX: Mutex<Option<std::sync::mpsc::Receiver<ClientRequest>>> = Mutex::new(None);
-
-pub fn take_ipc_rx() -> Option<std::sync::mpsc::Receiver<ClientRequest>> {
-    IPC_RX.lock().unwrap().take()
-}
-
-pub fn spawn_accept(listener: UnixListener, stats: Arc<Mutex<Stats>>) {
+pub fn spawn_accept(
+    listener: UnixListener,
+    stats: Arc<Mutex<Stats>>,
+) -> std::sync::mpsc::Receiver<ClientRequest> {
     let (tx, rx) = std::sync::mpsc::channel();
-    *IPC_RX.lock().unwrap() = Some(rx);
     thread::Builder::new()
         .name("awari-ipc".into())
         .spawn(move || {
@@ -111,17 +117,18 @@ pub fn spawn_accept(listener: UnixListener, stats: Arc<Mutex<Stats>>) {
             }
         })
         .expect("ipc accept thread");
+    rx
 }
 
 fn handle_client(
     stream: UnixStream,
     stats: &Arc<Mutex<Stats>>,
     cmds: &std::sync::mpsc::Sender<ClientRequest>,
-) -> Result<(), String> {
+) -> Result<(), LockError> {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| e.to_string())?;
-    let req: ClientRequest = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    reader.read_line(&mut line)?;
+    let req: ClientRequest = serde_json::from_str(line.trim())?;
     let reply = match req {
         ClientRequest::Ping => ClientReply::Ok,
         ClientRequest::DumpStats => {
@@ -140,13 +147,11 @@ fn handle_client(
             ClientReply::Ok
         }
     };
-    let mut out = serde_json::to_string(&reply).map_err(|e| e.to_string())?;
+    let mut out = serde_json::to_string(&reply)?;
     out.push('\n');
     let mut stream = reader.into_inner();
-    stream
-        .write_all(out.as_bytes())
-        .map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
+    stream.write_all(out.as_bytes())?;
+    stream.flush()?;
     Ok(())
 }
 
@@ -154,7 +159,8 @@ fn rss_bytes() -> u64 {
     if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
         if let Some(pages) = s.split_whitespace().nth(1) {
             if let Ok(n) = pages.parse::<u64>() {
-                return n * 4096;
+                let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+                return n * page;
             }
         }
     }
