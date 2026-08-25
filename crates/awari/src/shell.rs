@@ -10,7 +10,7 @@
 //!   few-MB shell; re-open rebuilds the interface (~100 ms).
 
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,9 +21,6 @@ use crate::config;
 use crate::lock;
 
 const KILL_TIMEOUT_MS: u64 = 900;
-
-#[cfg(unix)]
-static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
 
 /// `mode` selects keep-alive (`GpuMode::KeepAlive`) or drop (`GpuMode::Drop`)
 /// for the launcher GUI.
@@ -46,7 +43,7 @@ pub fn run(mode: GpuMode) {
     let ipc_rx = lock::spawn_accept(server.listener, stats.clone());
 
     #[cfg(unix)]
-    install_daemon_sigterm();
+    block_signal(libc::SIGTERM);
 
     let child = Arc::new(Mutex::new(None::<Child>));
     let visible = Arc::new(AtomicBool::new(false));
@@ -57,6 +54,9 @@ pub fn run(mode: GpuMode) {
     if keep_alive {
         start_child(&child, keep_alive);
     }
+
+    #[cfg(unix)]
+    spawn_signal_thread(child.clone());
 
     tracing::info!(
         mode = if keep_alive { "keep-alive" } else { "drop" },
@@ -110,42 +110,42 @@ pub fn run(mode: GpuMode) {
 }
 
 #[cfg(unix)]
-extern "C" fn on_daemon_sigterm(_sig: i32) {
-    let pid = CHILD_PID.load(Ordering::Relaxed);
-    if pid > 0 {
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-            // Best-effort: give the GUI a moment to exit so it isn't orphaned
-            // mid-teardown. Non-blocking poll so a wedged GUI can't pin the
-            // daemon in the handler (SIGTERM is blocked while we're here);
-            // bound it to ~500 ms, then leave regardless. Both `waitpid` and
-            // `nanosleep` are async-signal-safe.
-            let mut status: i32 = 0;
-            let pause = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 10_000_000,
-            };
-            for _ in 0..50 {
-                if libc::waitpid(pid, &mut status, libc::WNOHANG) > 0 {
-                    break;
-                }
-                libc::nanosleep(&pause, std::ptr::null_mut());
-            }
-        }
+fn block_signal(sig: i32) {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
-    // `_exit` (not `process::exit`) skips atexit handlers and stdio flushing,
-    // which are not async-signal-safe to run from a signal handler.
-    unsafe { libc::_exit(0) };
 }
 
+/// SIGTERM is blocked process-wide and consumed synchronously here via sigwait,
+/// so shutdown can take the child lock (unsafe from a real signal handler) to
+/// kill the GUI. Because start_child holds that lock across spawn+store, the
+/// child read here always sees the just-forked GUI — never a stale pid that
+/// would let it slip through and become orphaned.
 #[cfg(unix)]
-fn install_daemon_sigterm() {
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_daemon_sigterm as *const () as usize;
-        sa.sa_flags = libc::SA_RESTART;
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-    }
+fn spawn_signal_thread(child: Arc<Mutex<Option<Child>>>) {
+    thread::Builder::new()
+        .name("awari-signal".into())
+        .spawn(move || {
+            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+            }
+            let mut sig: i32 = 0;
+            loop {
+                if unsafe { libc::sigwait(&set, &mut sig) } == 0 && sig == libc::SIGTERM {
+                    if let Some(c) = child.lock().unwrap().as_ref() {
+                        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                    unsafe { libc::_exit(0) };
+                }
+            }
+        })
+        .expect("signal thread");
 }
 
 const REAPER_FAST_FAIL: Duration = Duration::from_secs(2);
@@ -218,16 +218,10 @@ fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
     let mut cmd = Command::new(exe);
     cmd.arg("gui");
     if keep_alive {
-        // Default GUI mode is keep-alive; `--hidden` starts it pre-warmed but
-        // not shown. We don't pass `--keep-alive` (the GUI only parses
-        // `--no-keep-alive` to flip to drop mode), so the flag stays meaningful.
         cmd.arg("--hidden");
     } else {
-        cmd.arg("--no-keep-alive").arg("--open");
+        cmd.arg("--no-keep-alive");
     }
-    // Keep the GUI's logs out of the daemon's stdio: append to a file under
-    // the runtime dir (with the rest of our state), falling back to /dev/null
-    // if it can't be opened.
     let log_path = runtime_dir().join("gui.log");
     let (out, err) = match std::fs::OpenOptions::new()
         .create(true)
@@ -241,11 +235,6 @@ fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
         Err(_) => (Stdio::null(), Stdio::null()),
     };
     cmd.stdout(out).stderr(err);
-    // Block show/hide signals in this thread before spawning so the GUI child
-    // inherits the mask. The GUI unblocks them only after installing its
-    // handlers, which closes the race where a signal sent right after spawn
-    // (daemon toggled during the GUI's boot window) would hit the default
-    // terminate disposition and kill the child before GPUI installs handlers.
     #[cfg(unix)]
     let mut saved_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
     #[cfg(unix)]
@@ -256,20 +245,16 @@ fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
         libc::sigaddset(&mut mask, libc::SIGUSR2);
         libc::pthread_sigmask(libc::SIG_BLOCK, &mask, &mut saved_mask);
     }
-    let result = cmd.spawn();
+    {
+        let mut guard = child.lock().unwrap();
+        match cmd.spawn() {
+            Ok(c) => *guard = Some(c),
+            Err(e) => tracing::error!(%e, "spawn gui"),
+        }
+    }
     #[cfg(unix)]
     unsafe {
         libc::pthread_sigmask(libc::SIG_SETMASK, &saved_mask, std::ptr::null_mut());
-    }
-    match result {
-        Ok(c) => {
-            #[cfg(unix)]
-            CHILD_PID.store(c.id() as i32, Ordering::Relaxed);
-            *child.lock().unwrap() = Some(c);
-        }
-        Err(e) => {
-            tracing::error!(%e, "spawn gui");
-        }
     }
 }
 

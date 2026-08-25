@@ -50,8 +50,9 @@ pub struct Daemon {
     compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
     /// Deferred teardown of the launcher surface after a dismiss. The surface is
-    /// kept alive through the fade-out, then destroyed; a reopen during the
-    /// grace period drops this task and reuses the still-live surface.
+    /// kept alive through the fade-out, then hidden in keep-alive mode (or the
+    /// GUI quits in drop mode); a reopen during the grace period drops this task
+    /// and reuses the still-live surface.
     pending_close: Option<Task<()>>,
     /// When true the GUI stays in memory (hidden) between dismisses for instant
     /// re-opens; when false it quits on dismiss to free the GPU process.

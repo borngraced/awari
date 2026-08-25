@@ -3,6 +3,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::{Mutex, Once};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +16,7 @@ pub enum ClientRequest {
     OpenLauncher,
     CloseLauncher,
     /// Sent by the GUI to the daemon when the overlay actually becomes visible
-    /// (e.g. opened via the Open signal, or at startup with `--open`).
+    /// (e.g. opened via the Open signal, or at startup in open mode).
     LauncherShown,
     /// Sent by the GUI to the daemon when the overlay actually becomes hidden
     /// (e.g. dismissed via Escape/click inside the GUI). Keeps the daemon's
@@ -75,24 +77,39 @@ pub fn ping_live() -> Result<ClientReply, IpcError> {
     send(&socket_path(), &ClientRequest::Ping)
 }
 
+static NOTIFY_PUMP: Once = Once::new();
+static NOTIFY_TX: Mutex<Option<mpsc::Sender<ClientRequest>>> = Mutex::new(None);
+
 /// Fire-and-forget status ping from the GUI back to the daemon (e.g. when the
-/// overlay is actually shown or hidden by an in-GUI action such as Escape). Does
-/// not wait for a reply, so it is safe to call from the UI thread without
-/// blocking it.
+/// overlay is actually shown or hidden by an in-GUI action such as Escape).
+/// Writes are serialized through one pump thread so rapid show/hide pings
+/// can't be reordered on the socket and desync the daemon's `visible` flag.
 pub fn notify(req: ClientRequest) {
-    std::thread::spawn(move || {
-        let mut stream = match UnixStream::connect(socket_path()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut line = match serde_json::to_string(&req) {
-            Ok(l) => l,
-            Err(_) => return,
-        };
-        line.push('\n');
-        let _ = stream.write_all(line.as_bytes());
-        let _ = stream.flush();
+    NOTIFY_PUMP.call_once(|| {
+        let (tx, rx) = mpsc::channel::<ClientRequest>();
+        *NOTIFY_TX.lock().unwrap() = Some(tx);
+        std::thread::Builder::new()
+            .name("awari-notify".into())
+            .spawn(move || {
+                for req in rx {
+                    let mut stream = match UnixStream::connect(socket_path()) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let mut line = match serde_json::to_string(&req) {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    line.push('\n');
+                    let _ = stream.write_all(line.as_bytes());
+                    let _ = stream.flush();
+                }
+            })
+            .expect("notify pump thread");
     });
+    if let Some(tx) = NOTIFY_TX.lock().unwrap().clone() {
+        let _ = tx.send(req);
+    }
 }
 
 #[cfg(test)]
