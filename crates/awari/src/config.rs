@@ -38,6 +38,12 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// Max total rows in the All view (apps + files + windows). Default 30.
     pub max_results: usize,
+    /// Keep the GPU overlay resident (hidden when closed) instead of quitting it
+    /// on every dismiss. When kept alive, re-opens are instant (~tens of MB
+    /// idle); when dropped, the GUI exits on dismiss and only a tiny shell stays
+    /// up (re-open rebuilds the interface, ~100 ms). Default true (keep alive).
+    /// The daemon flag `--no-keep-alive` forces drop mode.
+    pub keep_alive: bool,
 }
 
 impl Default for MotionConfig {
@@ -77,6 +83,7 @@ impl Default for Config {
             files: FilesConfig::default(),
             sources: SourcesConfig::default(),
             max_results: 30,
+            keep_alive: true,
         }
     }
 }
@@ -289,11 +296,18 @@ fn parse_top_level(src: &str, cfg: &mut Config) {
         match tokens[i] {
             "{" => depth += 1,
             "}" => depth = depth.saturating_sub(1),
-            "max_results" | "max-results" if depth == 0 => {
+                "max_results" | "max-results" if depth == 0 => {
                 if i + 1 < tokens.len() {
                     if let Ok(n) = tokens[i + 1].parse::<usize>() {
                         cfg.max_results = n.max(1);
                     }
+                }
+                i += 2;
+                continue;
+            }
+            "keep_alive" | "keep-alive" if depth == 0 => {
+                if i + 1 < tokens.len() {
+                    cfg.keep_alive = is_true(tokens[i + 1]);
                 }
                 i += 2;
                 continue;

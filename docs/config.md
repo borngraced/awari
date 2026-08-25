@@ -111,6 +111,25 @@ max-results 30   // max total rows in the All view (apps + files + windows)
 This caps the combined result list in the default All view. The Files tab uses
 `files.max-results` instead.
 
+### keep-alive
+
+```kdl
+keep-alive true   // default: keep the GPU overlay resident between uses
+```
+
+Controls what happens to the GPU overlay after you dismiss the launcher:
+
+- `keep-alive true` (default): the overlay stays resident, hidden, between
+  dismisses. Re-opens are instant (~19 ms) at the cost of holding the GPU
+  process in memory (~77 MB idle).
+- `keep-alive false`: the overlay process exits on dismiss, leaving only the
+  tiny GPU-free shell (~8.5 MB idle). The next open rebuilds the interface
+  (~100 ms cold start).
+
+The daemon flag `--no-keep-alive` forces drop mode regardless of this setting.
+`awari gui` inherits the mode from how the daemon launched it
+(`--no-keep-alive --open` for drop, `--keep-alive --hidden` for keep-alive).
+
 ### motion
 
 ```kdl

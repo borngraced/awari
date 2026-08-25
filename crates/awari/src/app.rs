@@ -5,16 +5,20 @@ use std::fs;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use awari_compositor::{Compositor, CompositorCommand, CompositorInbox, CompositorMsg};
-use awari_ipc::ClientRequest;
+use awari_ipc::{ClientRequest, notify};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode,
+    App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode, Task,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
     size,
 };
 use gpui::layer_shell::LayerShellNotSupportedError;
+
+/// Delay after a dismiss before the surface is torn down, long enough to cover
+/// the fade-out animation so we never cut it short.
+const LAUNCHER_CLOSE_GRACE_MS: u64 = 200;
 
 use crate::config::Config;
 use crate::desktop::DesktopApp;
@@ -31,6 +35,14 @@ pub struct Daemon {
     /// doesn't advertise foreign-toplevel; apps/files/commands still work.
     compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
+    /// Deferred teardown of the launcher surface after a dismiss. The surface is
+    /// kept alive through the fade-out, then destroyed; a reopen during the
+    /// grace period drops this task and reuses the still-live surface.
+    pending_close: Option<Task<()>>,
+    /// When true the GUI stays resident (hidden) between dismisses for instant
+    /// re-opens; when false it quits on dismiss to free the GPU process.
+    keep_alive: bool,
+    quit_after_close: bool,
     /// Display the launcher is currently shown on. `None` means "let the
     /// compositor decide" (historically: all outputs). Recomputed on each open
     /// from the focused window's output so the launcher follows the monitor
@@ -98,6 +110,8 @@ impl Daemon {
         inbox: Arc<CompositorInbox>,
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
+        open: bool,
+        keep_alive: bool,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
         let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, stats, cfg));
@@ -107,7 +121,35 @@ impl Daemon {
         // completes, so the surface never maps and never grabs the keyboard.
         // Overlay builds here once; it stays mapped-but-empty (transparent,
         // keyboard None, no input region) so wgpu/fonts warm at boot.
-        daemon.update(cx, |d, cx| d.ensure_launcher(cx));
+        daemon.update(cx, |d, cx| {
+            d.keep_alive = keep_alive;
+            d.ensure_launcher(cx);
+            if open {
+                d.set_launcher_open(true, cx);
+            }
+        });
+        #[cfg(unix)]
+        {
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<Signal>();
+            install_signal_handlers(tx);
+            let entity = daemon.downgrade();
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                while let Some(sig) = rx.next().await {
+                    if let Some(d) = entity.upgrade() {
+                        d.update(cx, |d, cx| match sig {
+                            Signal::Open => d.set_launcher_open(true, cx),
+                            Signal::Close => d.dismiss_launcher(cx),
+                            Signal::Quit => {
+                                d.quit_after_close = true;
+                                d.dismiss_launcher(cx);
+                            }
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
         cx.set_global(Keep(daemon));
     }
 
@@ -134,6 +176,9 @@ impl Daemon {
         let mut daemon = Self {
             compositor,
             launcher: None,
+            pending_close: None,
+            keep_alive: true,
+            quit_after_close: false,
             launcher_display: None,
             launcher_open: false,
             launcher_query: String::new(),
@@ -479,6 +524,11 @@ impl Daemon {
                 let mut s = self.stats.lock().expect("stats");
                 s.launcher_open_to_first_commit_ms = Some(ms);
                 tracing::info!(ms, "launcher open → first render");
+                if !self.keep_alive {
+                    if let Some(cold) = cold_start_ms() {
+                        tracing::info!(ms = cold, "cold start: spawn → first frame");
+                    }
+                }
             }
         }
     }
@@ -490,6 +540,12 @@ impl Daemon {
         self.launcher_gen += 1;
         if open {
             self.launcher_open = true;
+            // Tell the daemon the overlay is now actually visible, so its
+            // `visible` flag stays truthful for the next toggle decision.
+            notify(ClientRequest::LauncherShown);
+            // Cancel any in-flight teardown so a reopen during the fade reuses
+            // the live surface instead of removing it out from under us.
+            self.pending_close = None;
             self.launcher_query.clear();
             self.launcher_selected = 0;
             self.launcher_category = launcher::Category::All;
@@ -509,6 +565,7 @@ impl Daemon {
                         return;
                     }
                     let _ = h.update(cx, |l, window, _| {
+                        l.closing = false;
                         l.arm_open_timer(started);
                         window.set_keyboard_interactivity(
                             gpui::layer_shell::KeyboardInteractivity::Exclusive,
@@ -523,7 +580,13 @@ impl Daemon {
     }
 
     fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
+        let cfg_motion_ms = self.cfg.motion.duration_ms as u64;
         self.launcher_open = false;
+        // Tell the daemon the overlay is now actually hidden. This is what keeps
+        // the daemon's `visible` flag in sync when the dismiss is triggered
+        // in-GUI (Escape / background click) rather than by a toggle command;
+        // without it the next toggle sends "close" to an already-hidden overlay.
+        notify(ClientRequest::LauncherHidden);
         // Return file-search RAM to a near-baseline "sleeping" footprint:
         // drop the per-directory scratch indexes and rebuild the root
         // indexes from scratch. The next open re-indexes on demand.
@@ -540,7 +603,11 @@ impl Daemon {
         }
         self.history_cursor = None;
         self.history_live = None;
-        // Resident overlay: the window stays alive for the whole session.
+        // Hide the surface (fade out) but keep it alive through the animation,
+        // then, in drop mode, quit after the fade completes. The grace period
+        // tracks the theme's motion duration so the close never cuts the fade
+        // short. A reopen during that window cancels the teardown and reuses
+        // the still-live surface.
         let Some(h) = self.launcher.clone() else {
             return;
         };
@@ -561,6 +628,25 @@ impl Daemon {
                 cx.notify();
             });
         });
+        let close_task = cx.spawn(async move |this, cx| {
+            // Grace covers the full fade (theme `motion.duration-ms`) so the
+            // drop-mode quit lands after the animation, not mid-fade.
+            let grace_ms = LAUNCHER_CLOSE_GRACE_MS.max(cfg_motion_ms);
+            cx.background_executor()
+                .timer(Duration::from_millis(grace_ms))
+                .await;
+            if let Some(daemon) = this.upgrade() {
+                let _ = daemon.update(cx, |d, cx| {
+                    if d.launcher_open {
+                        return;
+                    }
+                    if !d.keep_alive || d.quit_after_close {
+                        cx.quit();
+                    }
+                });
+            }
+        });
+        self.pending_close = Some(close_task);
     }
 
     fn launcher_key(&mut self, key: &str, _ch: Option<&str>, shift: bool, cx: &mut Context<Self>) {
@@ -950,4 +1036,120 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
         }
     })
     .detach();
+}
+
+/// Cold-start latency for the drop GUI: process spawn (fork/exec +
+/// dynamic linking) through to the first painted frame. Prefers the parent's
+/// spawn timestamp passed via `AWARI_SPAWN_TS` (nanoseconds since the Unix
+/// epoch, set by the harness immediately before spawn), falling back to the
+/// kernel-reported process start time from `/proc` so a direct `awari gui`
+/// still yields a spawn-inclusive number.
+fn cold_start_ms() -> Option<u64> {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let start_ns = if let Ok(ts) = std::env::var("AWARI_SPAWN_TS") {
+        ts.parse::<u128>().ok()?
+    } else {
+        proc_start_ns()?
+    };
+    let ms = now_ns.saturating_sub(start_ns) / 1_000_000;
+    Some(ms as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn proc_start_ns() -> Option<u128> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let after_comm = stat.split_once(')')?.1;
+    let mut it = after_comm.split_whitespace();
+    let starttime_ticks: u64 = it.nth(19)?.parse().ok()?;
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let clk_tck = if clk_tck > 0 { clk_tck as u64 } else { 100 };
+    let btime: u64 = {
+        let s = std::fs::read_to_string("/proc/stat").ok()?;
+        let line = s.lines().find(|l| l.starts_with("btime"))?;
+        line.split_whitespace().nth(1)?.parse().ok()?
+    };
+    let start_secs = btime + starttime_ticks / clk_tck;
+    let rem = starttime_ticks % clk_tck;
+    let nanos = start_secs * 1_000_000_000 + rem * 1_000_000_000 / clk_tck;
+    Some(nanos as u128)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_start_ns() -> Option<u128> {
+    // `/proc` is Linux-only; off-Linux there's no cheap process-start clock, so
+    // the cold-start fallback simply yields nothing (the `AWARI_SPAWN_TS`
+    // harness value is still honored by `cold_start_ms`).
+    None
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Signal {
+    Open,
+    Close,
+    Quit,
+}
+
+#[cfg(unix)]
+static SIGNAL_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+extern "C" fn on_signal(sig: i32) {
+    let token = match sig {
+        libc::SIGUSR1 => b'O',
+        libc::SIGUSR2 => b'C',
+        _ => b'T',
+    };
+    let fd = SIGNAL_WRITE_FD.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe {
+            libc::write(fd, &token as *const u8 as *const libc::c_void, 1);
+        }
+    }
+}
+
+/// Map UNIX signals onto launcher intents via a self-pipe: the handler only
+/// writes a byte (it must not touch GPUI state), a reader thread forwards the
+/// token, and the foreground task runs the matching path — `Open` shows a
+/// hidden resident overlay, `Close` dismisses (hide when kept alive, quit when
+/// dropped), `Quit` dismisses and forces a quit.
+#[cfg(unix)]
+fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0i32; 2];
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return;
+        }
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    SIGNAL_WRITE_FD.store(write_fd, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::thread::Builder::new()
+        .name("awari-sig".into())
+        .spawn(move || {
+            use std::io::Read;
+            let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
+            let mut buf = [0u8; 1];
+            while reader.read(&mut buf).is_ok() {
+                let sig = match buf[0] {
+                    b'O' => Signal::Open,
+                    b'C' => Signal::Close,
+                    _ => Signal::Quit,
+                };
+                if tx.unbounded_send(sig).is_err() {
+                    break;
+                }
+            }
+        });
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_signal as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
 }

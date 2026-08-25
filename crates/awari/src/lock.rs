@@ -133,7 +133,9 @@ fn handle_client(
         }
         ClientRequest::ToggleLauncher
         | ClientRequest::OpenLauncher
-        | ClientRequest::CloseLauncher => {
+        | ClientRequest::CloseLauncher
+        | ClientRequest::LauncherShown
+        | ClientRequest::LauncherHidden => {
             let _ = cmds.send(req);
             ClientReply::Ok
         }

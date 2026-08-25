@@ -13,6 +13,13 @@ pub enum ClientRequest {
     ToggleLauncher,
     OpenLauncher,
     CloseLauncher,
+    /// Sent by the GUI to the daemon when the overlay actually becomes visible
+    /// (e.g. opened via the Open signal, or at startup with `--open`).
+    LauncherShown,
+    /// Sent by the GUI to the daemon when the overlay actually becomes hidden
+    /// (e.g. dismissed via Escape/click inside the GUI). Keeps the daemon's
+    /// `visible` flag truthful even when the close was not daemon-initiated.
+    LauncherHidden,
     Ping,
     DumpStats,
 }
@@ -66,6 +73,26 @@ pub fn send(path: &Path, req: &ClientRequest) -> Result<ClientReply, IpcError> {
 /// Client argv: ping a live daemon. Does not unlink.
 pub fn ping_live() -> Result<ClientReply, IpcError> {
     send(&socket_path(), &ClientRequest::Ping)
+}
+
+/// Fire-and-forget status ping from the GUI back to the daemon (e.g. when the
+/// overlay is actually shown or hidden by an in-GUI action such as Escape). Does
+/// not wait for a reply, so it is safe to call from the UI thread without
+/// blocking it.
+pub fn notify(req: ClientRequest) {
+    std::thread::spawn(move || {
+        let mut stream = match UnixStream::connect(socket_path()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut line = match serde_json::to_string(&req) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        line.push('\n');
+        let _ = stream.write_all(line.as_bytes());
+        let _ = stream.flush();
+    });
 }
 
 #[cfg(test)]

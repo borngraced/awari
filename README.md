@@ -4,13 +4,53 @@
 
 # Àwárí
 
-Àwárí is a launcher for Wayland. Hit Super, type, and get a ranked list of the
-windows, apps, and files you're after, matched by
+Àwárí is a blazingly fast launcher for Wayland (toggle it in ~2.78 ms). Hit Super, type, and get a ranked list of the
+windows, apps, and files you're after, powered by
 [fff-search](https://github.com/dmtrKovalenko/fff), an in-process,
 frecency-ranked index, not a subprocess spawned per keystroke. Àwárí stays
-resident, so the result lands on the next frame, not after some program boots.
+resident as a tiny, GPU-free shell and drives a GPU overlay on demand, so opening
+costs a fraction of a second rather than a full app boot.
 
 The name is Yoruba for "a finding, a discovery".
+
+![Àwárí launcher overview](docs/overview.png)
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/desktop-awari.png" width="380" alt="Àwárí on a desktop"></td>
+    <td><img src="docs/screenshots/desktop-awari-goland.png" width="380" alt="Àwárí over GoLand"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/desktop-awari-rv32.png" width="380" alt="Àwárí desktop view"></td>
+    <td><img src="docs/screenshots/desktop-paper-rv32.png" width="380" alt="Àwárí with the Paper theme"></td>
+  </tr>
+</table>
+
+## More demos
+
+### Themes
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/theme-verdant.png" width="360"><br><sub>Verdant</sub></td>
+    <td align="center"><img src="docs/screenshots/theme-ember.png" width="360"><br><sub>Ember</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/theme-paper.png" width="360"><br><sub>Paper</sub></td>
+    <td align="center"><img src="docs/screenshots/theme-tokyonight.png" width="360"><br><sub>Tokyo Night</sub></td>
+  </tr>
+</table>
+
+### Views
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/view-paper-apps.png" width="360"><br><sub>Apps category</sub></td>
+    <td align="center"><img src="docs/screenshots/view-paper-alt-enter.png" width="360"><br><sub>Alt+Enter action menu</sub></td>
+  </tr>
+</table>
 
 ## Motivation
 
@@ -19,12 +59,15 @@ on every keystroke (fd, fzf, rg) and pay for it in process startups and parsing.
 Or they're a web view that spins up a runtime just to draw a text field. Files
 tend to be an afterthought stuck onto an app menu.
 
-Àwárí goes the other way. File search runs inside the daemon through fff-search,
-pinned and in-process, so there's no subprocess per character. The overlay is
-already up, so pressing Super costs nothing: a socket message opens it and takes
-the keyboard. Windows, apps, and files all go into one ranking, so you get
-whichever you meant. And because it's only a launcher, it stays small: a sleeping
-process when closed and a bounded one while open.
+Àwárí goes the other way. File search runs in-process through fff-search, pinned
+and ranked, so there's no subprocess per character. A lightweight, GPU-free shell
+stays resident and drives the overlay on demand; pressing Super sends a socket
+message that opens it and takes the keyboard within a fraction of a second.
+Windows, apps, and files all go into one ranking, so you get whichever you meant.
+By default the overlay is kept alive (hidden) between uses for instant re-opens,
+holding ~tens of MB while idle; with `keep-alive = false` (or the daemon flag
+`--no-keep-alive`) it exits on dismiss so only the tiny shell stays up, at the
+cost of a ~100 ms rebuild on the next open.
 
 ## Usage
 
@@ -55,17 +98,19 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 ## How it stays fast
 
 - File search is in-process via fff-search (0.10.5), not a spawned fd/fzf/rg.
-- The overlay is one long-lived layer-shell window. Opening is one redraw plus a
-  keyboard-interactivity request, not a compositor spawn.
+- A lightweight, GPU-free shell stays resident and drives a layer-shell overlay
+  on demand; once open, typing is one redraw plus a keyboard-interactivity
+  request, not a new spawn.
 - fff does fuzzy path matching, frecency, and git-status tagging. Our own
   `matchq` ranks windows and apps without allocating per keystroke.
-- IPC read to damage is under 2 ms p99, and the first pixel lands within a
-  vsync after that. Reduced-motion sets the duration to zero.
+- IPC read to damage is under 2 ms p99. The first paint after a cold open is
+  bounded by process and GPU init (sub-150 ms in practice); reduced-motion sets
+  the animation duration to zero.
 
 ## Features
 
-- **Instant**: fff-search runs in-process and frecency-ranked; no per-keystroke subprocess, no cold start.
-- **Resident**: the overlay never boots from scratch, so there's no launch lag to hide.
+- **Lightweight**: A tiny, GPU-free background daemon stays resident at just a few MB. By default, the heavy GPU overlay is kept alive but hidden between uses for instant re-opens (~19 ms), holding roughly 77 MB while idle. If you prefer to save every megabyte of RAM, set `keep-alive = false` (or run with `--no-keep-alive`) to completely tear down the GPU stack on dismiss, dropping your idle footprint to just 8.5 MB.
+- **On-demand**: searches run in-process via fff-search and rank by frecency, with no per-keystroke subprocess overhead. The toggle command returns in ~2.78 ms, so the overlay opens in a fraction of a second when cold and instantly when kept alive.
 - **One suggestion, not a list**: inline ghost-text completion; the full alternates list only shows on ↓.
 - **Wayland-native**: one binary for any Wayland compositor. The overlay uses `wlr-layer-shell` (niri, Hyprland, sway, and other wlroots-family compositors like river and labwc); on compositors without it, like GNOME/Mutter, it falls back to a normal window for apps, files, and commands.
 - **Unified results**: windows (focus), apps (XDG `.desktop`), and files in one fuzzy-, frecency-ranked list. Apps are always indexed; files and windows can be toggled off.
@@ -82,7 +127,8 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
 ## Memory
 
-The closed daemon should be idle; sustained CPU above about 1% is a bug. Memory
+The resident shell is idle when the overlay is closed (a few MB, the GPU process
+having exited); sustained CPU above about 1% is a bug. Memory
 is bounded too. Per-directory file indexes are capped with LRU eviction and each
 picker's cache is finite, so browsing through many folders doesn't pile up
 indexes.
