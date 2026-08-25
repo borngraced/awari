@@ -38,7 +38,7 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// Max total rows in the All view (apps + files + windows). Default 30.
     pub max_results: usize,
-    /// Keep the GPU overlay resident (hidden when closed) instead of quitting it
+    /// Keep the GPU overlay in memory (hidden when closed) instead of quitting it
     /// on every dismiss. When kept alive, re-opens are instant (~tens of MB
     /// idle); when dropped, the GUI exits on dismiss and only a tiny shell stays
     /// up (re-open rebuilds the interface, ~100 ms). Default true (keep alive).

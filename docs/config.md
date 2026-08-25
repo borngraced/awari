@@ -114,12 +114,12 @@ This caps the combined result list in the default All view. The Files tab uses
 ### keep-alive
 
 ```kdl
-keep-alive true   // default: keep the GPU overlay resident between uses
+keep-alive true   // default: keep the GPU overlay in memory between uses
 ```
 
 Controls what happens to the GPU overlay after you dismiss the launcher:
 
-- `keep-alive true` (default): the overlay stays resident, hidden, between
+- `keep-alive true` (default): the overlay stays in memory, hidden, between
   dismisses. Re-opens are instant (~19 ms) at the cost of holding the GPU
   process in memory (~77 MB idle).
 - `keep-alive false`: the overlay process exits on dismiss, leaving only the

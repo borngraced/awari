@@ -60,7 +60,7 @@ The name Awari is Yoruba for "a discovery."
 Most launchers fork a search tool every keystroke (fd, fzf, rg) or spin up a web
 runtime just to draw a box, with files as an afterthought. Àwárí runs file search
 in-process via fff-search and ranks windows, apps, and files together, so there's
-no subprocess per character and you get whichever you meant. A resident, GPU-free
+no subprocess per character and you get whichever you meant. A GPU-free
 shell opens the overlay with a socket message; by default it's kept alive (hidden)
 for instant re-opens (~19 ms, ~77 MB idle), or torn down with `keep-alive = false`
 / `--no-keep-alive` (~100 ms rebuild, 8.5 MB idle).
@@ -86,7 +86,7 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
 ## Features
 
-- **Lightweight**: GPU-free resident daemon; overlay kept alive hidden (~19 ms
+- **Lightweight**: GPU-free background daemon; overlay kept alive hidden (~19 ms
   re-open, ~77 MB idle) or dropped entirely (8.5 MB idle, ~100 ms rebuild).
 - **In-process search**: fff-search ranks by frecency with no per-keystroke
   subprocess; `matchq` scores windows/apps without per-keystroke allocation.
@@ -130,7 +130,7 @@ cargo install --git https://github.com/borngraced/awari awari
 ```
 
 This builds GPUI from source, so the [Build](#build) dev libraries are required.
-Then run it as a resident service and bind a key.
+Then run it as a background service and bind a key.
 
 ```sh
 systemctl --user enable --now ~/.config/systemd/user/awari.service
@@ -187,7 +187,7 @@ sources {
   files   true
 }
 
-keep-alive true              // GPU overlay stays resident between uses (default); false = exits on dismiss
+keep-alive true              // GPU overlay stays in memory between uses (default); false = exits on dismiss
 // apps is always indexed and cannot be disabled
 
 motion {

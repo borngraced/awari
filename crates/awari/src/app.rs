@@ -39,7 +39,7 @@ pub struct Daemon {
     /// kept alive through the fade-out, then destroyed; a reopen during the
     /// grace period drops this task and reuses the still-live surface.
     pending_close: Option<Task<()>>,
-    /// When true the GUI stays resident (hidden) between dismisses for instant
+    /// When true the GUI stays in memory (hidden) between dismisses for instant
     /// re-opens; when false it quits on dismiss to free the GPU process.
     keep_alive: bool,
     quit_after_close: bool,
@@ -478,7 +478,7 @@ impl Daemon {
         Some(best.id())
     }
 
-    /// Ensure the resident launcher overlay exists and is on the monitor of the
+    /// Ensure the launcher overlay exists and is on the monitor of the
     /// focused window. Recreates the surface only when the desired display has
     /// changed, so simply re-opening on the same monitor is a no-op.
     fn ensure_launcher_display(&mut self, cx: &mut Context<Self>) {
@@ -1121,7 +1121,7 @@ extern "C" fn on_signal(sig: i32) {
 /// Map UNIX signals onto launcher intents via a self-pipe: the handler only
 /// writes a byte (it must not touch GPUI state), a reader thread forwards the
 /// token, and the foreground task runs the matching path — `Open` shows a
-/// hidden resident overlay, `Close` dismisses (hide when kept alive, quit when
+/// hidden in-memory overlay, `Close` dismisses (hide when kept alive, quit when
 /// dropped), `Quit` dismisses and forces a quit.
 #[cfg(unix)]
 fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) {
