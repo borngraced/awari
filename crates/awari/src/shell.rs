@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use awari_ipc::{ClientRequest, runtime_dir};
 use crate::app::GpuMode;
@@ -148,32 +148,66 @@ fn install_daemon_sigterm() {
     }
 }
 
+const REAPER_FAST_FAIL: Duration = Duration::from_secs(2);
+const REAPER_MAX_FAST_FAILS: u32 = 5;
+const REAPER_BASE_BACKOFF_MS: u64 = 100;
+const REAPER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 fn spawn_reaper(child: Arc<Mutex<Option<Child>>>, visible: Arc<AtomicBool>, keep_alive: bool) {
     thread::Builder::new()
         .name("awari-reap".into())
-        .spawn(move || loop {
-            {
-                let mut g = child.lock().unwrap();
-                if let Some(c) = g.as_mut() {
-                    if matches!(c.try_wait(), Ok(Some(_))) {
-                        *g = None;
-                        drop(g);
-                        if keep_alive {
-                            // Keep-alive: maintain a warm GUI, respawn hidden.
-                            start_child(&child, keep_alive);
-                        } else {
-                            visible.store(false, Ordering::Relaxed);
+        .spawn(move || {
+            let mut consecutive_failures = 0u32;
+            let mut last_start = Instant::now();
+            loop {
+                {
+                    let mut g = child.lock().unwrap();
+                    if let Some(c) = g.as_mut() {
+                        if matches!(c.try_wait(), Ok(Some(_))) {
+                            let ran_for = last_start.elapsed();
+                            *g = None;
+                            drop(g);
+                            if keep_alive {
+                                consecutive_failures = if ran_for < REAPER_FAST_FAIL {
+                                    consecutive_failures + 1
+                                } else {
+                                    0
+                                };
+                                if consecutive_failures >= REAPER_MAX_FAST_FAILS {
+                                    tracing::error!(
+                                        failures = consecutive_failures,
+                                        "gui crashed on startup repeatedly; \
+                                         disabling keep-alive respawn"
+                                    );
+                                    return;
+                                }
+                                let factor = 2u32.saturating_pow(consecutive_failures);
+                                let backoff_ms = REAPER_BASE_BACKOFF_MS
+                                    .checked_mul(u64::from(factor))
+                                    .unwrap_or(30_000);
+                                let backoff =
+                                    Duration::from_millis(backoff_ms).min(REAPER_MAX_BACKOFF);
+                                thread::sleep(backoff);
+                                last_start = Instant::now();
+                                start_child(&child, keep_alive);
+                            } else {
+                                visible.store(false, Ordering::Relaxed);
+                            }
+                            continue;
                         }
                     }
                 }
+                thread::sleep(Duration::from_millis(100));
             }
-            thread::sleep(Duration::from_millis(100));
         })
         .map_err(|e| tracing::error!(%e, "reaper thread failed to spawn"))
         .ok();
 }
 
 fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
+    if child.lock().unwrap().is_some() {
+        return;
+    }
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -207,7 +241,27 @@ fn start_child(child: &Arc<Mutex<Option<Child>>>, keep_alive: bool) {
         Err(_) => (Stdio::null(), Stdio::null()),
     };
     cmd.stdout(out).stderr(err);
-    match cmd.spawn() {
+    // Block show/hide signals in this thread before spawning so the GUI child
+    // inherits the mask. The GUI unblocks them only after installing its
+    // handlers, which closes the race where a signal sent right after spawn
+    // (daemon toggled during the GUI's boot window) would hit the default
+    // terminate disposition and kill the child before GPUI installs handlers.
+    #[cfg(unix)]
+    let mut saved_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    #[cfg(unix)]
+    unsafe {
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        libc::sigaddset(&mut mask, libc::SIGUSR1);
+        libc::sigaddset(&mut mask, libc::SIGUSR2);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &mask, &mut saved_mask);
+    }
+    let result = cmd.spawn();
+    #[cfg(unix)]
+    unsafe {
+        libc::pthread_sigmask(libc::SIG_SETMASK, &saved_mask, std::ptr::null_mut());
+    }
+    match result {
         Ok(c) => {
             #[cfg(unix)]
             CHILD_PID.store(c.id() as i32, Ordering::Relaxed);
@@ -229,26 +283,31 @@ fn signal_child(child: &Arc<Mutex<Option<Child>>>, sig: i32) {
 }
 
 fn stop_child(child: &Arc<Mutex<Option<Child>>>) {
-    let mut c = match child.lock().unwrap().take() {
-        Some(c) => c,
-        None => return,
+    let pid = child.lock().unwrap().as_ref().map(|c| c.id());
+    let Some(pid) = pid else {
+        return;
     };
     #[cfg(unix)]
     unsafe {
-        libc::kill(c.id() as i32, libc::SIGTERM);
+        libc::kill(pid as i32, libc::SIGTERM);
     }
+    let slot = child.clone();
     thread::Builder::new()
         .name("awari-kill-watchdog".into())
         .spawn(move || {
             thread::sleep(Duration::from_millis(KILL_TIMEOUT_MS));
-            if matches!(c.try_wait(), Ok(None)) {
-                let _ = c.kill();
+            let mut guard = slot.lock().unwrap();
+            let alive = guard
+                .as_mut()
+                .map(|c| matches!(c.try_wait(), Ok(None)))
+                .unwrap_or(false);
+            if alive {
+                if let Some(mut c) = guard.take() {
+                    drop(guard);
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
             }
-            // Reap only this child. The shared slot was already taken (freed so
-            // a new spawn can reuse it) and `visible` is owned by the caller;
-            // writing either here would clobber a child spawned during the
-            // 900 ms window. The reaper handles whichever child is in the slot.
-            let _ = c.wait();
         })
         .map_err(|e| tracing::error!(%e, "kill-watchdog thread failed to spawn"))
         .ok();

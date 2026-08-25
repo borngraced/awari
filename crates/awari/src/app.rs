@@ -152,7 +152,11 @@ impl Daemon {
                 while let Some(sig) = rx.next().await {
                     if let Some(d) = entity.upgrade() {
                         d.update(cx, |d, cx| match sig {
-                            Signal::Open => d.set_launcher_open(true, cx),
+                            Signal::Open => {
+                            if !d.launcher_open {
+                                d.set_launcher_open(true, cx);
+                            }
+                        }
                             Signal::Close => d.dismiss_launcher(cx),
                             Signal::Quit => {
                                 d.quit_after_close = true;
@@ -629,6 +633,9 @@ impl Daemon {
         // short. A reopen during that window cancels the teardown and reuses
         // the still-live surface.
         let Some(h) = self.launcher.clone() else {
+            if !self.keep_alive || self.quit_after_close {
+                cx.quit();
+            }
             return;
         };
         let theme = self.cfg.theme.clone();
@@ -1124,5 +1131,10 @@ fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) 
         libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        libc::sigaddset(&mut mask, libc::SIGUSR1);
+        libc::sigaddset(&mut mask, libc::SIGUSR2);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
     }
 }
