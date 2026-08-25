@@ -151,6 +151,21 @@ cargo run -p awari
 awari ping
 ```
 
+## Install
+
+`awari` is not published to crates.io, because it depends on a vendored, patched
+GPUI committed under `.third_party/zed` (a local `[patch]` can't be published).
+Install it from the git repo instead:
+
+```sh
+cargo install --git https://github.com/borngraced/awari awari
+```
+
+This compiles GPUI from source, so it needs the Wayland/NixKB/EGL dev libraries
+listed in [Build](#build). The result is a single `awari` binary that also runs
+the GPU overlay (it re-executes itself as `awari gui`), so the one install is
+complete. Then start it as a resident service (below) and bind a key.
+
 Run `awari` as a resident user service so the overlay is always one key away:
 
 ```sh
