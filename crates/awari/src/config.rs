@@ -1,6 +1,7 @@
 //! `~/.config/awari/config.kdl`. Unknown keys are ignored. No `exec`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::ui::theme::{self, Theme};
 
@@ -204,7 +205,7 @@ fn parse_theme_body(body: &str, t: &mut Theme) {
         match key {
             "font" => {
                 if !val.is_empty() && val != "default" {
-                    t.font = Some(val.to_string());
+                    t.font = Some(Arc::from(val));
                 }
                 i += 2;
             }

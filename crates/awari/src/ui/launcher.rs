@@ -5,7 +5,7 @@ use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     Image, ImageFormat, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
     Render, Rgba, ScrollStrategy, SpringAnimation, SpringConfig, Styled, StyledImage,
-    StyledText, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list, Point,
+    SharedString, StyledText, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list, Point,
     Pixels,
 };
 use std::collections::HashMap;
@@ -98,8 +98,9 @@ pub enum LauncherCmd {
 #[derive(Clone)]
 pub struct LauncherRow {
     pub kind: RowKind,
-    pub label: String,
-    pub resolved_icon: Option<PathBuf>,
+    pub label: SharedString,
+    pub resolved_icon: Option<Arc<Path>>,
+    pub subtitle: Option<SharedString>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,8 +129,8 @@ impl RowAction {
 #[derive(Clone)]
 pub enum RowKind {
     App {
-        name: String,
-        exec: Vec<String>,
+        name: SharedString,
+        exec: Arc<[String]>,
     },
     Window {
         id: u64,
@@ -172,7 +173,7 @@ pub struct LauncherView {
     pub open: bool,
     pub query: String,
     pub selected: usize,
-    pub rows: Vec<LauncherRow>,
+    pub rows: Arc<[LauncherRow]>,
     pub theme: Theme,
     pub category: Category,
     /// Whether the Files source is enabled; gates the Files category chip.
@@ -196,7 +197,7 @@ impl LauncherView {
             open: false,
             query: String::new(),
             selected: 0,
-            rows: Vec::new(),
+            rows: Arc::new([]),
             theme,
             category: Category::All,
             files_enabled: true,
@@ -613,7 +614,7 @@ fn tab_completion(query: &str, rows: &[LauncherRow], selected: usize) -> Option<
             if ghost_suffix(query, &r.label).is_some() {
                 return Some(TabOutcome::Inline {
                     accepted_off: query.len(),
-                    completed: r.label.clone(),
+                    completed: r.label.to_string(),
                 });
             }
         }
@@ -621,7 +622,7 @@ fn tab_completion(query: &str, rows: &[LauncherRow], selected: usize) -> Option<
     rows.get(selected).and_then(|row| {
         let completion = match &row.kind {
             RowKind::File { path } => path.display().to_string(),
-            RowKind::App { .. } | RowKind::Window { .. } => row.label.clone(),
+            RowKind::App { .. } | RowKind::Window { .. } => row.label.to_string(),
             RowKind::Command { command } => command.clone(),
             RowKind::Calc { result } => result.clone(),
         };
@@ -700,11 +701,13 @@ fn open_file_row(p: &Path, is_direct: bool) -> LauncherRow {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| p.display().to_string())
     };
+    let kind = RowKind::File {
+        path: p.to_path_buf(),
+    };
     LauncherRow {
-        kind: RowKind::File {
-            path: p.to_path_buf(),
-        },
-        label,
+        subtitle: build_subtitle(&kind),
+        kind,
+        label: SharedString::from(label),
         resolved_icon: None,
     }
 }
@@ -841,25 +844,32 @@ pub fn score_app_window(
     }
 
     let win_row = |ix: usize| -> LauncherRow {
-        let (id, title, app_id, _) = &windows[ix];
+        let (id, title, app_id, app_id_lc) = &windows[ix];
         let resolved_icon = app_id.as_deref().and_then(|raw| {
-            let lc = raw.to_lowercase();
-            let name = app_icons.get(&lc).map(|s| s.as_str()).unwrap_or(raw);
+            let name = app_icons
+                .get(app_id_lc.as_deref().unwrap_or(raw))
+                .map(|s| s.as_str())
+                .unwrap_or(raw);
             crate::icons::resolve(name)
         });
+        let kind = RowKind::Window { id: *id };
         LauncherRow {
-            kind: RowKind::Window { id: *id },
-            label: title.clone(),
+            subtitle: build_subtitle(&kind),
+            kind,
+            label: SharedString::from(title.clone()),
             resolved_icon,
         }
     };
     let app_row = |app: &DesktopApp| -> LauncherRow {
+        let name = SharedString::from(app.name.as_str());
+        let kind = RowKind::App {
+            name: name.clone(),
+            exec: app.exec.clone(),
+        };
         LauncherRow {
-            kind: RowKind::App {
-                name: app.name.clone(),
-                exec: app.exec.clone(),
-            },
-            label: app.name.clone(),
+            subtitle: build_subtitle(&kind),
+            kind,
+            label: name,
             resolved_icon: app.icon.as_deref().and_then(crate::icons::resolve),
         }
     };
@@ -883,9 +893,11 @@ pub fn filter_rows(
     file_max: usize,
     total_max: usize,
 ) -> Vec<LauncherRow> {
+    let prefix = command_prefix(query);
+    let calc = crate::math::evaluate(query);
     filter_rows_cached(
         query, apps, windows, files, recents, app_usage, app_icons, category, file_max, total_max,
-        None, None,
+        None, None, prefix, calc,
     )
 }
 
@@ -907,22 +919,26 @@ pub fn filter_rows_cached(
     total_max: usize,
     cached_app_rows: Option<&[LauncherRow]>,
     cached_win_rows: Option<&[LauncherRow]>,
+    prefix: Option<&str>,
+    calc: Option<String>,
 ) -> Vec<LauncherRow> {
     let q = query.trim();
     // Inline command modes replace the result list. `r:` falls through to the
     // normal path (it only flips file search to regex mode, handled below).
-    if let Some(prefix) = command_prefix(q) {
+    if let Some(prefix) = prefix {
         match prefix {
             ">" => {
                 let cmd = q.strip_prefix('>').unwrap().trim();
                 return if cmd.is_empty() {
                     Vec::new()
                 } else {
+                    let kind = RowKind::Command {
+                        command: cmd.to_string(),
+                    };
                     vec![LauncherRow {
-                        kind: RowKind::Command {
-                            command: cmd.to_string(),
-                        },
-                        label: format!("Run “{}” in terminal", cmd),
+                        subtitle: build_subtitle(&kind),
+                        kind,
+                        label: SharedString::from(format!("Run “{}” in terminal", cmd)),
                         resolved_icon: None,
                     }]
                 };
@@ -936,12 +952,14 @@ pub fn filter_rows_cached(
     // Calculator mode: a query that parses as arithmetic shows its result as
     // the sole row. Only in the All view, so category tabs still behave.
     if category == Category::All {
-        if let Some(result) = crate::math::evaluate(q) {
+        if let Some(result) = &calc {
+            let kind = RowKind::Calc {
+                result: result.clone(),
+            };
             return vec![LauncherRow {
-                kind: RowKind::Calc {
-                    result: result.clone(),
-                },
-                label: format!("{} = {}", q.trim(), result),
+                subtitle: build_subtitle(&kind),
+                kind,
+                label: SharedString::from(format!("{} = {}", q.trim(), result)),
                 resolved_icon: None,
             }];
         }
@@ -966,20 +984,26 @@ pub fn filter_rows_cached(
     // of re-scoring the whole app/window list.
     let (app_rows, win_rows): (Vec<LauncherRow>, Vec<LauncherRow>) =
         match (cached_app_rows, cached_win_rows) {
-            (Some(a), Some(w)) if !empty => (a.to_vec(), w.to_vec()),
+            (Some(a), Some(w)) if !empty => (
+                a.iter().cloned().take(ranked_cap.unwrap_or(usize::MAX)).collect(),
+                w.iter().cloned().take(ranked_cap.unwrap_or(usize::MAX)).collect(),
+            ),
             _ => score_app_window(q, apps, windows, recents, app_usage, app_icons, category),
         };
 
     let file_row = |hit: &FileHit| -> LauncherRow {
+        let kind = RowKind::File {
+            path: hit.path.clone(),
+        };
         LauncherRow {
-            kind: RowKind::File {
-                path: hit.path.clone(),
-            },
-            label: hit
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| hit.path.display().to_string()),
+            subtitle: build_subtitle(&kind),
+            kind,
+            label: SharedString::from(
+                hit.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| hit.path.display().to_string()),
+            ),
             resolved_icon: None,
         }
     };
@@ -1020,11 +1044,12 @@ pub fn filter_rows_cached(
     // Fallback: nothing matched a non-path query -> offer to run it as a
     // shell command, mirroring the `>` command-mode trigger.
     if out.is_empty() && !empty && !crate::files::is_path_shaped(q) {
+        let cmd = q.to_string();
+        let kind = RowKind::Command { command: cmd };
         out.push(LauncherRow {
-            kind: RowKind::Command {
-                command: q.to_string(),
-            },
-            label: format!("Run “{}” in terminal", q),
+            subtitle: build_subtitle(&kind),
+            kind,
+            label: SharedString::from(format!("Run “{}” in terminal", q)),
             resolved_icon: None,
         });
     }
@@ -1078,8 +1103,7 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: &Theme, size: f32, radius: f3
     }
 }
 
-fn highlighted_name(label: &str, query: &str, t: &Theme) -> StyledText {
-    let q: Vec<char> = query.trim().to_lowercase().chars().collect();
+fn highlighted_name(label: &str, q: &[char], t: &Theme) -> StyledText {
     let accent = HighlightStyle {
         color: Some(t.accent().into()),
         ..Default::default()
@@ -1105,19 +1129,17 @@ fn highlighted_name(label: &str, query: &str, t: &Theme) -> StyledText {
         }
         start += len;
     }
-    StyledText::new(label.to_string()).with_highlights(ranges)
+    StyledText::new(label).with_highlights(ranges)
 }
 
-/// Secondary line shown under a list item: the file path, the launch command,
-/// or a short kind label.
-fn row_subtitle(row: &LauncherRow) -> String {
-    match &row.kind {
-        RowKind::File { path } => path.display().to_string(),
-        RowKind::App { exec, .. } => exec.join(" "),
-        RowKind::Window { .. } => "Window".into(),
-        RowKind::Command { command } => command.clone(),
+fn build_subtitle(kind: &RowKind) -> Option<SharedString> {
+    match kind {
+        RowKind::File { path } => Some(SharedString::from(path.display().to_string())),
+        RowKind::App { exec, .. } => Some(SharedString::from(exec.join(" "))),
+        RowKind::Window { .. } => Some(SharedString::from("Window")),
+        RowKind::Command { command } => Some(SharedString::from(command.clone())),
         // The label already shows "expr = result"; a subtitle would repeat it.
-        RowKind::Calc { .. } => String::new(),
+        RowKind::Calc { .. } => None,
     }
 }
 
@@ -1288,9 +1310,8 @@ impl Launcher {
             .into_any_element()
     }
 
-    fn list_row(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn list_row(&self, i: usize, t: &Theme, q: &[char], cx: &mut Context<Self>) -> AnyElement {
         let this = cx.entity();
-        let q = &self.view.query;
         let Some(row) = self.view.rows.get(i) else {
             return div().id(("launch-row-empty", i)).into_any_element();
         };
@@ -1348,14 +1369,14 @@ impl Launcher {
                             .text_color(if selected { t.fg() } else { t.muted() })
                             .truncate()
                             .child(highlighted_name(&row.label, q, t)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(if selected { t.muted() } else { t.faint() })
-                            .truncate()
-                            .child(row_subtitle(row)),
-                    ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(if selected { t.muted() } else { t.faint() })
+                                .truncate()
+                                .child(row.subtitle.clone().unwrap_or_default()),
+                        ),
             )
             .with_spring(
                 ("launch-row-hover", i as u64),
@@ -1469,12 +1490,15 @@ impl Render for Launcher {
         } else {
             let n = self.view.rows.len();
             let t_list = t.clone();
+            let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
             results = results.child(
                 uniform_list(
                     "launch-list",
                     n,
                     cx.processor(move |this, range: Range<usize>, _, cx| {
-                        range.map(|i| this.list_row(i, &t_list, cx)).collect()
+                        range
+                            .map(|i| this.list_row(i, &t_list, &q_chars, cx))
+                            .collect()
                     }),
                 )
                 .track_scroll(&self.scroll)
@@ -1798,7 +1822,7 @@ mod tests {
     fn app(name: &str, app_id: Option<&str>) -> DesktopApp {
         DesktopApp {
             name: name.into(),
-            exec: vec![name.to_lowercase()],
+            exec: Arc::from(vec![name.to_lowercase()]),
             app_id: app_id.map(Into::into),
             icon: None,
             name_lc: name.to_lowercase(),
@@ -2091,8 +2115,9 @@ mod open_path_tests {
 
     fn lrow(kind: RowKind, label: &str) -> LauncherRow {
         LauncherRow {
+            subtitle: build_subtitle(&kind),
             kind,
-            label: label.into(),
+            label: SharedString::from(label),
             resolved_icon: None,
         }
     }
@@ -2102,7 +2127,7 @@ mod open_path_tests {
         let rows = vec![lrow(
             RowKind::App {
                 name: "GoLand".into(),
-                exec: vec![],
+                exec: Arc::from(vec![]),
             },
             "GoLand",
         )];
@@ -2160,7 +2185,7 @@ mod open_path_tests {
             lrow(
                 RowKind::App {
                     name: "Zed".into(),
-                    exec: vec![],
+                    exec: Arc::from(vec![]),
                 },
                 "Zed",
             ),

@@ -1,6 +1,7 @@
 //! Launcher palette. Defaults match the overlay concept; every token is KDL-overridable.
 
 use gpui::{Rgba, rgb, rgba};
+use std::sync::Arc;
 
 /// Packed `0xRRGGBBAA`. Six-digit hex is stored with `AA = FF`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct Theme {
     pub text_dim: Color,
     pub text_faint: Color,
     pub scrim: Color,
-    pub font: Option<String>,
+    pub font: Option<Arc<str>>,
     pub font_size: Option<u32>,
 }
 

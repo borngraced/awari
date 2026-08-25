@@ -104,7 +104,7 @@ pub struct Daemon {
     source_gen: u64,
     /// Last computed rows, reused across highlight moves (Select / arrows)
     /// and other non-query changes to avoid re-scoring on every keystroke.
-    last_rows: Option<Vec<launcher::LauncherRow>>,
+    last_rows: Option<Arc<[launcher::LauncherRow]>>,
     last_rows_key: Option<(String, launcher::Category, u64, u64, u64)>,
     /// Pre-scored app/window rows, keyed by `(query, source_gen, category)`.
     /// Reused on the re-render that fires when file results arrive so the
@@ -113,8 +113,8 @@ pub struct Daemon {
         String,
         launcher::Category,
         u64,
-        Vec<launcher::LauncherRow>,
-        Vec<launcher::LauncherRow>,
+        Arc<[launcher::LauncherRow]>,
+        Arc<[launcher::LauncherRow]>,
     )>,
 }
 
@@ -292,6 +292,8 @@ impl Daemon {
         &self,
         cached_app: Option<&[launcher::LauncherRow]>,
         cached_win: Option<&[launcher::LauncherRow]>,
+        prefix: Option<&str>,
+        calc: Option<String>,
     ) -> Vec<launcher::LauncherRow> {
         let apps = self.apps.as_slice();
         let empty_windows: &[(u64, String, Option<String>, Option<String>)] = &[];
@@ -318,6 +320,8 @@ impl Daemon {
             self.cfg.max_results,
             cached_app,
             cached_win,
+            prefix,
+            calc,
         )
     }
 
@@ -327,27 +331,28 @@ impl Daemon {
         };
         // Reuse the last rows when nothing that affects ranking changed, so a
         // highlight move (Select / arrow) doesn't re-score every app/window.
-        let key = (
-            self.launcher_query.clone(),
-            self.launcher_category,
-            self.files_seq,
-            self.file_hits_gen,
-            self.source_gen,
-        );
-        let rows = if self.last_rows_key.as_ref() == Some(&key) {
+        let rows = if self.last_rows_key.as_ref().is_some_and(|k| {
+            k.0 == self.launcher_query
+                && k.1 == self.launcher_category
+                && k.2 == self.files_seq
+                && k.3 == self.file_hits_gen
+                && k.4 == self.source_gen
+        }) {
             self.last_rows.clone().unwrap()
         } else {
             // Reuse pre-scored app/window rows when the query + source list are
             // unchanged. This skips the expensive `matchq` scoring on the
             // re-render that fires when file results arrive.
             let q = self.launcher_query.trim();
+            let prefix = launcher::command_prefix(q);
+            let calc = crate::math::evaluate(q);
             let use_cache = !q.is_empty()
-                && launcher::command_prefix(q).is_none()
+                && prefix.is_none()
                 && self.launcher_category != launcher::Category::Commands
-                && crate::math::evaluate(q).is_none();
+                && calc.is_none();
             let (cached_app, cached_win): (
-                Option<Vec<launcher::LauncherRow>>,
-                Option<Vec<launcher::LauncherRow>>,
+                Option<Arc<[launcher::LauncherRow]>>,
+                Option<Arc<[launcher::LauncherRow]>>,
             ) = if use_cache {
                 match &self.appwin_cache {
                     Some((cq, ccat, cgen, ca, cw))
@@ -367,23 +372,33 @@ impl Daemon {
                             &self.app_icons,
                             self.launcher_category,
                         );
+                        let a_arc: Arc<[launcher::LauncherRow]> = Arc::from(a);
+                        let w_arc: Arc<[launcher::LauncherRow]> = Arc::from(w);
                         self.appwin_cache = Some((
                             q.to_string(),
                             self.launcher_category,
                             self.source_gen,
-                            a.clone(),
-                            w.clone(),
+                            a_arc.clone(),
+                            w_arc.clone(),
                         ));
-                        (Some(a), Some(w))
+                        (Some(a_arc), Some(w_arc))
                     }
                 }
             } else {
                 self.appwin_cache = None;
                 (None, None)
             };
-            let rows = self.filtered_rows(cached_app.as_deref(), cached_win.as_deref());
+            let rows_vec =
+                self.filtered_rows(cached_app.as_deref(), cached_win.as_deref(), prefix, calc);
+            let rows: Arc<[launcher::LauncherRow]> = Arc::from(rows_vec);
             self.last_rows = Some(rows.clone());
-            self.last_rows_key = Some(key);
+            self.last_rows_key = Some((
+                self.launcher_query.clone(),
+                self.launcher_category,
+                self.files_seq,
+                self.file_hits_gen,
+                self.source_gen,
+            ));
             rows
         };
         if self.launcher_selected >= rows.len() {
@@ -801,7 +816,10 @@ impl Daemon {
     }
 
     fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
-        let rows = self.filtered_rows(None, None);
+        let q = self.launcher_query.trim();
+        let prefix = launcher::command_prefix(q);
+        let calc = crate::math::evaluate(q);
+        let rows = self.filtered_rows(None, None, prefix, calc);
         let Some(row) = rows.get(self.launcher_selected) else {
             return;
         };
@@ -868,10 +886,10 @@ impl Daemon {
         // don't have to re-score every row here (which also races async
         // updates that may have changed the selection since the menu opened).
         if let launcher::RowKind::App { name, .. } = &kind {
-            self.recents.retain(|n| n != name);
-            self.recents.insert(0, name.clone());
+            self.recents.retain(|n| n.as_str() != name.as_ref());
+            self.recents.insert(0, name.to_string());
             self.recents.truncate(20);
-            *self.app_usage.entry(name.clone()).or_insert(0) += 1;
+            *self.app_usage.entry(name.to_string()).or_insert(0) += 1;
             self.save_usage();
         }
         if let launcher::RowKind::Command { command } = &kind {

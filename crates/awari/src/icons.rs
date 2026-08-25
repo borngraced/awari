@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Raster/vector extensions gpui can decode. XPM is intentionally absent.
 const ICON_EXTS: [&str; 2] = ["png", "svg"];
@@ -13,17 +13,18 @@ const ICON_EXTS: [&str; 2] = ["png", "svg"];
 const THEME_SUBDIRS: [&str; 6] = ["48x48", "scalable", "32x32", "64x64", "128x128", "256x256"];
 
 /// Resolve `name` against the user's real XDG data dirs, memoized.
-pub fn resolve(name: &str) -> Option<PathBuf> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
+pub fn resolve(name: &str) -> Option<Arc<Path>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<Path>>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().ok()?.get(name) {
         return hit.clone();
     }
     let resolved = resolve_uncached(name);
+    let arc = resolved.map(Arc::from);
     if let Ok(mut map) = cache.lock() {
-        map.insert(name.to_string(), resolved.clone());
+        map.insert(name.to_string(), arc.clone());
     }
-    resolved
+    arc
 }
 
 fn resolve_uncached(name: &str) -> Option<PathBuf> {

@@ -1,11 +1,12 @@
 //! Strict `.desktop` Exec parsing (architecture launcher rules). Never shell.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesktopApp {
     pub name: String,
-    pub exec: Vec<String>,
+    pub exec: Arc<[String]>,
     pub app_id: Option<String>,
     /// Raw `Icon=` value from the entry: an absolute path or a themed name.
     pub icon: Option<String>,
@@ -199,7 +200,7 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
     let app_id_lc = app_id.as_deref().map(|s| s.to_lowercase());
     Some(DesktopApp {
         name,
-        exec: argv,
+        exec: Arc::from(argv),
         app_id,
         icon,
         name_lc,
@@ -297,11 +298,11 @@ mod tests {
         let app = parse_desktop_entry(entry, std::path::Path::new("/x.desktop"));
         assert_eq!(
             app.map(|a| a.exec),
-            Some(vec![
+            Some(Arc::from(vec![
                 "xterm".to_string(),
                 "-e".to_string(),
                 "top".to_string()
-            ])
+            ]))
         );
     }
 
@@ -355,6 +356,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.name, "Alacritty");
-        assert_eq!(app.exec, vec!["alacritty"]);
+        assert_eq!(app.exec, Arc::from(vec!["alacritty".to_string()]));
     }
 }
