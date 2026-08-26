@@ -14,7 +14,7 @@ pops onto your screen in an unnoticeable ~19 ms while maintaining a lean idle
 footprint. For ultra-low-spec hardware, it can easily drop down to a pure
 on-demand mode to free up every megabyte of RAM.
 
-The name Awari is Yoruba for "a discovery."
+The name Awari is Yoruba for "discovery."
 
 ![Àwárí launcher overview](docs/overview.png)
 
