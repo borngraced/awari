@@ -347,6 +347,9 @@ impl Daemon {
         };
         // Reuse the last rows when nothing that affects ranking changed, so a
         // highlight move (Select / arrow) doesn't re-score every app/window.
+        let q = self.launcher_query.trim();
+        let prefix = launcher::command_prefix(q);
+        let calc = crate::math::evaluate(q);
         let rows = if self.last_rows_key.as_ref().is_some_and(|k| {
             k.query == self.launcher_query
                 && k.category == self.launcher_category
@@ -359,9 +362,6 @@ impl Daemon {
             // Reuse pre-scored app/window rows when the query + source list are
             // unchanged. This skips the expensive `matchq` scoring on the
             // re-render that fires when file results arrive.
-            let q = self.launcher_query.trim();
-            let prefix = launcher::command_prefix(q);
-            let calc = crate::math::evaluate(q);
             let use_cache = !q.is_empty()
                 && prefix.is_none()
                 && self.launcher_category != launcher::Category::Commands
@@ -402,7 +402,7 @@ impl Daemon {
                 (None, None)
             };
             let rows_vec =
-                self.filtered_rows(cached_app.as_deref(), cached_win.as_deref(), prefix, calc);
+                self.filtered_rows(cached_app.as_deref(), cached_win.as_deref(), prefix, calc.clone());
             let rows: Arc<[launcher::LauncherRow]> = Arc::from(rows_vec);
             self.last_rows = Some(rows.clone());
             self.last_rows_key = Some(RowsKey {
@@ -425,6 +425,7 @@ impl Daemon {
             theme: self.cfg.theme.clone(),
             category: self.launcher_category,
             files_enabled: self.cfg.sources.files,
+            calc: calc.clone(),
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
@@ -830,16 +831,22 @@ impl Daemon {
 
     fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
         let q = self.launcher_query.trim();
+        // A valid calculator expression is the default action: there's nothing
+        // to launch, so copy the result and close (it surfaces as an inline
+        // ghost, never a list row).
+        if let Some(result) = crate::math::evaluate(q) {
+            cx.write_to_clipboard(ClipboardItem::new_string(result));
+            self.dismiss_launcher(cx);
+            return;
+        }
         let prefix = launcher::command_prefix(q);
-        let calc = crate::math::evaluate(q);
-        let rows = self.filtered_rows(None, None, prefix, calc);
+        let rows = self.filtered_rows(None, None, prefix, None);
         let Some(row) = rows.get(self.launcher_selected) else {
             return;
         };
         let kind = row.kind.clone();
         // Enter runs the kind's default action (index 0 of `actions()`), which
-        // is `Open` for apps/files/windows, `Run` for commands, and
-        // `CopyResult` for calculator results.
+        // is `Open` for apps/files/windows and `Run` for commands.
         let default = kind
             .actions()
             .into_iter()
@@ -871,7 +878,6 @@ impl Daemon {
                     launcher::RowKind::App { exec, .. } => exec.join(" "),
                     launcher::RowKind::Window { .. } => String::new(),
                     launcher::RowKind::Command { command } => command.clone(),
-                    launcher::RowKind::Calc { .. } => String::new(),
                 };
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -882,12 +888,6 @@ impl Daemon {
                 if let launcher::RowKind::File { path } = &kind {
                     let dir = path.parent().unwrap_or(path);
                     crate::files::run_in_terminal(dir);
-                }
-                self.dismiss_launcher(cx);
-            }
-            launcher::RowAction::CopyResult => {
-                if let launcher::RowKind::Calc { result } = &kind {
-                    cx.write_to_clipboard(ClipboardItem::new_string(result.clone()));
                 }
                 self.dismiss_launcher(cx);
             }
@@ -932,7 +932,6 @@ impl Daemon {
             }
             launcher::RowKind::File { .. } => unreachable!("handled above"),
             launcher::RowKind::Command { .. } => {}
-            launcher::RowKind::Calc { .. } => {}
         });
     }
 }

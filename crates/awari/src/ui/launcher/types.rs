@@ -67,7 +67,6 @@ pub enum RowAction {
     CopyPath,
     RunInTerminal,
     Run,
-    CopyResult,
 }
 
 impl RowAction {
@@ -78,7 +77,6 @@ impl RowAction {
             RowAction::CopyPath => "Copy Path",
             RowAction::RunInTerminal => "Run in Terminal",
             RowAction::Run => "Run",
-            RowAction::CopyResult => "Copy Result",
         }
     }
 }
@@ -99,10 +97,6 @@ pub enum RowKind {
     Command {
         command: String,
     },
-    /// A calculator result; `Enter` copies the value to the clipboard.
-    Calc {
-        result: String,
-    },
 }
 
 impl RowKind {
@@ -119,7 +113,6 @@ impl RowKind {
             RowKind::App { .. } => vec![RowAction::Open, RowAction::CopyPath],
             RowKind::Window { .. } => vec![RowAction::Open],
             RowKind::Command { .. } => vec![RowAction::Run, RowAction::CopyPath],
-            RowKind::Calc { .. } => vec![RowAction::CopyResult],
         }
     }
 }

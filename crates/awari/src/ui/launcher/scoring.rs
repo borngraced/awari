@@ -14,7 +14,6 @@ pub fn row_category(r: &LauncherRow) -> Category {
         // Windows have no dedicated tab; treat them as neutral (no highlight).
         RowKind::Window { .. } => Category::All,
         RowKind::Command { .. } => Category::Commands,
-        RowKind::Calc { .. } => Category::All,
     }
 }
 
@@ -98,25 +97,21 @@ pub enum TabOutcome {
 }
 
 pub fn tab_completion(query: &str, rows: &[LauncherRow], selected: usize) -> Option<TabOutcome> {
-    if let Some(r) = rows.first() {
-        // Calc results never ghost (the result text is not a completion).
-        if !query.is_empty()
-            && command_prefix(query).is_none()
-            && !matches!(r.kind, RowKind::Calc { .. })
-            && ghost_suffix(query, &r.label).is_some()
-        {
-            return Some(TabOutcome::Inline {
-                accepted_off: query.len(),
-                completed: r.label.to_string(),
-            });
-        }
+    if let Some(r) = rows.first()
+        && !query.is_empty()
+        && command_prefix(query).is_none()
+        && ghost_suffix(query, &r.label).is_some()
+    {
+        return Some(TabOutcome::Inline {
+            accepted_off: query.len(),
+            completed: r.label.to_string(),
+        });
     }
     rows.get(selected).and_then(|row| {
         let completion = match &row.kind {
             RowKind::File { path } => path.display().to_string(),
             RowKind::App { .. } | RowKind::Window { .. } => row.label.to_string(),
             RowKind::Command { command } => command.clone(),
-            RowKind::Calc { result } => result.clone(),
         };
         (!completion.is_empty()).then_some(TabOutcome::Row(completion))
     })
@@ -429,20 +424,6 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
         }
     }
 
-    if category == Category::All
-        && let Some(result) = &calc
-    {
-        let kind = RowKind::Calc {
-            result: result.clone(),
-        };
-        return vec![LauncherRow {
-            subtitle: build_subtitle(&kind),
-            kind,
-            label: SharedString::from(format!("{} = {}", q.trim(), result)),
-            resolved_icon: None,
-        }];
-    }
-
     if category == Category::Commands {
         return Vec::new();
     }
@@ -528,8 +509,10 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
         push_capped(&mut out, ranked_cap, win_rows);
     }
     // Fallback: nothing matched a non-path query -> offer to run it as a
-    // shell command, mirroring the `>` command-mode trigger.
-    if out.is_empty() && !empty && !crate::files::is_path_shaped(q) {
+    // shell command, mirroring the `>` command-mode trigger. A valid
+    // calculator expression never reaches here (it surfaces as an inline ghost,
+    // not a list row), so it must not spawn a "run in terminal" fallback.
+    if out.is_empty() && !empty && calc.is_none() && !crate::files::is_path_shaped(q) {
         let cmd = q.to_string();
         let kind = RowKind::Command { command: cmd };
         out.push(LauncherRow {

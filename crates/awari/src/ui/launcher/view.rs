@@ -40,6 +40,10 @@ pub struct LauncherView {
     pub theme: Theme,
     pub category: Category,
     pub files_enabled: bool,
+    /// A valid calculator result for the current query, if any. When set the
+    /// launcher shows it as an inline ghost (` = <result>`) instead of a list
+    /// row, and Enter copies it / Tab accepts it as the new input.
+    pub calc: Option<String>,
 }
 
 fn action_menu_top(row_top: Pixels, item_h: Pixels, menu_h: Pixels, viewport: Pixels) -> Pixels {
@@ -63,6 +67,7 @@ impl LauncherView {
             theme,
             category: Category::All,
             files_enabled: true,
+            calc: None,
         }
     }
 }
@@ -318,16 +323,16 @@ impl Launcher {
             0
         };
         let (s_accent, s_norm) = suffix.split_at(s_accent_len);
-        // Ghost preview hides once its own accept is on screen. Calculator
-        // results are shown verbatim, so they must not spawn a ghost suffix.
+        // Ghost preview hides once its own accept is on screen. A valid
+        // calculator result ghosts as ` = <result>` appended to the typed
+        // query (the "what my input becomes" model); otherwise the top row's
+        // completion suffix is used.
         let ghost = if token_len == 0 && c == q.len() && accepted_off.is_none() {
-            self.view.rows.first().and_then(|r| {
-                if matches!(r.kind, RowKind::Calc { .. }) {
-                    None
-                } else {
-                    ghost_suffix(q, &r.label)
-                }
-            })
+            if let Some(result) = &self.view.calc {
+                Some(format!(" = {}", result))
+            } else {
+                self.view.rows.first().and_then(|r| ghost_suffix(q, &r.label))
+            }
         } else {
             None
         };
@@ -417,9 +422,6 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: &Theme, size: f32, radius: f3
     match &row.kind {
         RowKind::File { .. } => tile
             .child(Icon::File.element_px(if selected { t.fg() } else { t.muted() }, size * 0.58)),
-        RowKind::Calc { .. } => tile.child(
-            Icon::Command.element_px(if selected { t.fg() } else { t.muted() }, size * 0.58),
-        ),
         _ => match &row.resolved_icon {
             Some(path) => tile.overflow_hidden().child(
                 img(path.clone())
@@ -471,8 +473,6 @@ pub(crate) fn build_subtitle(kind: &RowKind) -> Option<SharedString> {
         RowKind::App { exec, .. } => Some(SharedString::from(exec.join(" "))),
         RowKind::Window { .. } => Some(SharedString::from("Window")),
         RowKind::Command { command } => Some(SharedString::from(command.clone())),
-        // The label already shows "expr = result"; a subtitle would repeat it.
-        RowKind::Calc { .. } => None,
     }
 }
 
@@ -786,7 +786,7 @@ impl Render for Launcher {
                 .unwrap_or(Category::All)
         };
         let browsing_grid = cat == Category::Apps && q_empty;
-        let show_results = !q_empty || cat != Category::All;
+        let show_results = (!q_empty || cat != Category::All) && self.view.calc.is_none();
         let compact = q_empty && cat == Category::All;
         let panel_h = if compact { SEARCH_H } else { PANEL_H };
         self.keep_selected_visible(browsing_grid, cx);
@@ -1060,6 +1060,19 @@ impl Render for Launcher {
                 }
                 if key == "tab" {
                     cx.stop_propagation();
+                    // A valid calculator result: Tab accepts it as the new
+                    // input (so the user can keep computing, e.g. `4 * 3`).
+                    // Only when the top slot is active — if the user has
+                    // arrowed into the list, Tab completes the selected row.
+                    if this.view.selected == 0
+                        && let Some(result) = this.view.calc.clone()
+                    {
+                        this.cursor = result.len();
+                        this.accepted = None;
+                        this.view.query = result.clone();
+                        post(this, cx, LauncherCmd::SetQuery { query: result });
+                        return;
+                    }
                     match tab_completion(&this.view.query, &this.view.rows, this.view.selected) {
                         Some(TabOutcome::Inline {
                             completed,

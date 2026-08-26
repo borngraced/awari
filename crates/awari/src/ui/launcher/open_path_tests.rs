@@ -93,21 +93,6 @@
     }
 
     #[test]
-    fn tab_calc_row_never_ghosts() {
-        let rows = vec![lrow(
-            RowKind::Calc {
-                result: "42".into(),
-            },
-            "1+1 = 42",
-        )];
-        match tab_completion("1+", &rows, 0) {
-            Some(TabOutcome::Inline { .. }) => panic!("calc must not ghost"),
-            Some(TabOutcome::Row(c)) => assert_eq!(c, "42"),
-            None => panic!("expected selected-row completion"),
-        }
-    }
-
-    #[test]
     fn tab_falls_back_to_selected_file_path() {
         let rows = vec![
             lrow(

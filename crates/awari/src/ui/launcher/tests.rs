@@ -201,7 +201,9 @@
     }
 
     #[test]
-    fn calculator_shows_result_in_all_view() {
+    fn calculator_does_not_spawn_list_row() {
+        // A valid arithmetic query must not produce a list row (it surfaces as
+        // an inline ghost instead), nor the "run in terminal" fallback.
         let out = filter_rows(FilterParams {
             query: "2 + 2",
             apps: &[],
@@ -218,13 +220,13 @@
             prefix: None,
             calc: None,
         });
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].label, "2 + 2 = 4");
-        assert!(matches!(out[0].kind, RowKind::Calc { .. }));
+        assert!(out.is_empty());
     }
 
     #[test]
-    fn calculator_only_in_all_view() {
+    fn calculator_no_row_in_any_category() {
+        // Calc is never a per-category list row; an Apps-view arithmetic query
+        // yields no injected row either (the "no match" fallback is suppressed).
         let out = filter_rows(FilterParams {
             query: "2 + 2",
             apps: &[],
