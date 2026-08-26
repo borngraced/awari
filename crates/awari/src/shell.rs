@@ -11,8 +11,8 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::io::{FromRawFd, IntoRawFd};
-use std::os::unix::net::UnixStream;
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,10 +34,7 @@ pub fn run(mode: GpuMode) {
     let filter = tracing_subscriber::EnvFilter::try_from_env("AWARI_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    // One shared `awari.log`. The daemon's own tracing and the GUI's captured
-    // stdout/stderr both flow through a pipe into a single reader thread that
-    // writes (and caps) the file, so there is exactly one writer.
-    let log_tx = init_log_pipe(filter);
+    let child_log_fd = init_log_pipe(filter);
 
     let cfg = config::load();
     let keep_alive = matches!(mode, GpuMode::KeepAlive) && cfg.keep_alive;
@@ -58,11 +55,10 @@ pub fn run(mode: GpuMode) {
     let child = Arc::new(Mutex::new(None::<Child>));
     let visible = Arc::new(AtomicBool::new(false));
 
-    spawn_reaper(child.clone(), visible.clone(), keep_alive, log_tx.clone());
+    spawn_reaper(child.clone(), visible.clone(), keep_alive, child_log_fd);
 
-    // Keep-alive mode pre-spawns a hidden, warm GUI so the first open is instant.
     if keep_alive {
-        start_child(&child, keep_alive, &log_tx);
+        start_child(&child, keep_alive, child_log_fd);
     }
 
     #[cfg(unix)]
@@ -84,21 +80,17 @@ pub fn run(mode: GpuMode) {
                     if visible.load(Ordering::Relaxed) {
                         signal_child(&child, libc::SIGUSR2);
                     } else {
-                        if child.lock().unwrap().is_none() {
-                            start_child(&child, keep_alive, &log_tx);
-                        }
+                        start_child(&child, keep_alive, child_log_fd);
                         signal_child(&child, libc::SIGUSR1);
                     }
                 } else if visible.load(Ordering::Relaxed) {
                     stop_child(&child);
                 } else {
-                    start_child(&child, keep_alive, &log_tx);
+                    start_child(&child, keep_alive, child_log_fd);
                 }
             }
             ClientRequest::OpenLauncher => {
-                if child.lock().unwrap().is_none() {
-                    start_child(&child, keep_alive, &log_tx);
-                }
+                start_child(&child, keep_alive, child_log_fd);
                 if keep_alive {
                     signal_child(&child, libc::SIGUSR1);
                 }
@@ -167,7 +159,7 @@ fn spawn_reaper(
     child: Arc<Mutex<Option<Child>>>,
     visible: Arc<AtomicBool>,
     keep_alive: bool,
-    log_tx: Option<Arc<Mutex<File>>>,
+    child_log_fd: RawFd,
 ) {
     thread::Builder::new()
         .name("awari-reap".into())
@@ -177,37 +169,59 @@ fn spawn_reaper(
             loop {
                 {
                     let mut g = child.lock().unwrap();
-                    if let Some(c) = g.as_mut()
-                        && matches!(c.try_wait(), Ok(Some(_)))
-                    {
-                        let ran_for = last_start.elapsed();
-                        *g = None;
-                        drop(g);
-                        if keep_alive {
-                            consecutive_failures = if ran_for < REAPER_FAST_FAIL {
-                                consecutive_failures + 1
+                    if let Some(c) = g.as_mut() {
+                        if matches!(c.try_wait(), Ok(Some(_))) {
+                            let ran_for = last_start.elapsed();
+                            *g = None;
+                            drop(g);
+                            if keep_alive {
+                                consecutive_failures = if ran_for < REAPER_FAST_FAIL {
+                                    consecutive_failures + 1
+                                } else {
+                                    0
+                                };
+                                if consecutive_failures >= REAPER_MAX_FAST_FAILS {
+                                    tracing::error!(
+                                        failures = consecutive_failures,
+                                        "gui crashed on startup repeatedly; \
+                                             disabling keep-alive respawn"
+                                    );
+                                    return;
+                                }
+                                let factor = 2u32.saturating_pow(consecutive_failures);
+                                let backoff_ms = REAPER_BASE_BACKOFF_MS
+                                    .checked_mul(u64::from(factor))
+                                    .unwrap_or(30_000);
+                                let backoff =
+                                    Duration::from_millis(backoff_ms).min(REAPER_MAX_BACKOFF);
+                                thread::sleep(backoff);
+                                last_start = Instant::now();
+                                start_child(&child, keep_alive, child_log_fd);
                             } else {
-                                0
-                            };
-                            if consecutive_failures >= REAPER_MAX_FAST_FAILS {
-                                tracing::error!(
-                                    failures = consecutive_failures,
-                                    "gui crashed on startup repeatedly; \
-                                         disabling keep-alive respawn"
-                                );
-                                return;
+                                visible.store(false, Ordering::Relaxed);
                             }
-                            let factor = 2u32.saturating_pow(consecutive_failures);
-                            let backoff_ms = REAPER_BASE_BACKOFF_MS
-                                .checked_mul(u64::from(factor))
-                                .unwrap_or(30_000);
-                            let backoff = Duration::from_millis(backoff_ms).min(REAPER_MAX_BACKOFF);
-                            thread::sleep(backoff);
-                            last_start = Instant::now();
-                            start_child(&child, keep_alive, &log_tx);
-                        } else {
-                            visible.store(false, Ordering::Relaxed);
+                            continue;
                         }
+                    } else if keep_alive {
+                        // child is None — first spawn never succeeded.
+                        // Retry after a short backoff so we don't spin-loop.
+                        consecutive_failures += 1;
+                        if consecutive_failures >= REAPER_MAX_FAST_FAILS {
+                            tracing::error!(
+                                failures = consecutive_failures,
+                                "gui never started; disabling keep-alive respawn"
+                            );
+                            return;
+                        }
+                        let factor = 2u32.saturating_pow(consecutive_failures - 1);
+                        let backoff_ms = REAPER_BASE_BACKOFF_MS
+                            .checked_mul(u64::from(factor))
+                            .unwrap_or(30_000);
+                        let backoff = Duration::from_millis(backoff_ms).min(REAPER_MAX_BACKOFF);
+                        drop(g);
+                        thread::sleep(backoff);
+                        last_start = Instant::now();
+                        start_child(&child, keep_alive, child_log_fd);
                         continue;
                     }
                 }
@@ -218,12 +232,15 @@ fn spawn_reaper(
         .ok();
 }
 
+/// Spawn a GUI child if none is running. Holds the child lock across
+/// check-and-spawn to prevent two callers from both spawning.
 fn start_child(
     child: &Arc<Mutex<Option<Child>>>,
     keep_alive: bool,
-    log_tx: &Option<Arc<Mutex<File>>>,
+    child_log_fd: RawFd,
 ) {
-    if child.lock().unwrap().is_some() {
+    let mut guard = child.lock().unwrap();
+    if guard.is_some() {
         return;
     }
     let exe = match std::env::current_exe() {
@@ -240,17 +257,39 @@ fn start_child(
     } else {
         cmd.arg("--no-keep-alive");
     }
-    let (out, err) = match log_tx {
-        Some(tx) => match (
-            tx.lock().unwrap().try_clone(),
-            tx.lock().unwrap().try_clone(),
-        ) {
-            (Ok(o), Ok(e)) => (Stdio::from(o), Stdio::from(e)),
-            _ => (Stdio::null(), Stdio::null()),
-        },
-        None => (Stdio::null(), Stdio::null()),
+    let (out, err) = if child_log_fd >= 0 {
+        unsafe {
+            let o = libc::dup(child_log_fd);
+            let e = libc::dup(child_log_fd);
+            if o >= 0 && e >= 0 {
+                (Stdio::from_raw_fd(o), Stdio::from_raw_fd(e))
+            } else {
+                if o >= 0 { libc::close(o); }
+                if e >= 0 { libc::close(e); }
+                (Stdio::null(), Stdio::null())
+            }
+        }
+    } else {
+        (Stdio::null(), Stdio::null())
     };
     cmd.stdout(out).stderr(err);
+    // The parent blocks SIGUSR1/SIGUSR2 around the fork so a signal aimed at
+    // the daemon can't race the child, but the child *inherits* that blocked
+    // mask. A manually launched `awari gui` starts with signals unblocked and
+    // works; with them blocked, GPUI/wgpu init fails and the child exits
+    // instantly (spawn succeeds, process dies -> no persistent child to
+    // signal). Unblock in the child before exec so it matches a normal launch.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut mask);
+            libc::sigaddset(&mut mask, libc::SIGUSR1);
+            libc::sigaddset(&mut mask, libc::SIGUSR2);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
+            Ok(())
+        });
+    }
     #[cfg(unix)]
     let mut saved_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
     #[cfg(unix)]
@@ -261,12 +300,9 @@ fn start_child(
         libc::sigaddset(&mut mask, libc::SIGUSR2);
         libc::pthread_sigmask(libc::SIG_BLOCK, &mask, &mut saved_mask);
     }
-    {
-        let mut guard = child.lock().unwrap();
-        match cmd.spawn() {
-            Ok(c) => *guard = Some(c),
-            Err(e) => tracing::error!(%e, "spawn gui"),
-        }
+    match cmd.spawn() {
+        Ok(c) => *guard = Some(c),
+        Err(e) => tracing::error!(%e, "spawn gui"),
     }
     #[cfg(unix)]
     unsafe {
@@ -277,9 +313,12 @@ fn start_child(
 fn signal_child(child: &Arc<Mutex<Option<Child>>>, sig: i32) {
     let pid = child.lock().unwrap().as_ref().map(|c| c.id());
     if let Some(pid) = pid {
+        tracing::debug!(pid, sig, "sending signal to gui");
         unsafe {
             libc::kill(pid as i32, sig);
         }
+    } else {
+        tracing::warn!(sig, "no gui child to signal");
     }
 }
 
@@ -312,53 +351,58 @@ fn stop_child(child: &Arc<Mutex<Option<Child>>>) {
         .ok();
 }
 
-/// Max size of `awari.log`. When exceeded the reader rewrites the file keeping
-/// only the most recent `LOG_CAP` bytes (trimmed to a line boundary).
 const LOG_CAP: u64 = 1024 * 1024;
-/// Re-compact only once the file grows this far past `LOG_CAP`, so compaction
-/// (a full tail rewrite) runs every ~`LOG_COMPACT_HEADROOM` bytes of new log
-/// instead of on every write chunk once the log is full.
 const LOG_COMPACT_HEADROOM: u64 = 1024 * 1024;
 
 /// Set up the shared log pipe: the daemon's tracing and the GUI's captured
 /// stdout/stderr both write to one pipe that a reader thread drains into
-/// `awari.log`. Returns the pipe write end so `start_child` can redirect the
-/// GUI child to it; `None` (and stdout logging) if the pipe can't be created.
-fn init_log_pipe(filter: tracing_subscriber::EnvFilter) -> Option<Arc<Mutex<File>>> {
-    let (rx, tx) = match UnixStream::pair() {
-        Ok(p) => p,
-        // No pipe: log to stdout so we still capture the daemon.
-        Err(_) => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-            return None;
-        }
-    };
-    let tx = Arc::new(Mutex::new(unsafe { File::from_raw_fd(tx.into_raw_fd()) }));
+/// `awari.log`. Returns a dup'd write fd for the GUI child's stdout/stderr,
+/// or -1 if the pipe can't be created.
+///
+/// The tracing subscriber writes through `PipeWriter(Arc<Mutex<File>>)` —
+/// the mutex serialises concurrent writes so no interleaving is possible.
+/// The returned child fd is a separate dup; `start_child` never touches
+/// the shared `File`, avoiding the old deadlock where both paths competed
+/// for the same lock.
+fn init_log_pipe(filter: tracing_subscriber::EnvFilter) -> RawFd {
+    let mut fds = [-1i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+        return -1;
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
     let path = runtime_dir().join("awari.log");
-    let reader_tx = tx.clone();
-    // If the reader can't spawn, don't route through the pipe or writes would
-    // block once its buffer fills — fall back to stdout logging.
+
+    // Dup before wrapping the original in Arc<Mutex<File>> — start_child
+    // will use this copy; it never touches the shared File.
+    let child_fd = unsafe { libc::dup(write_fd) };
+
+    let shared = Arc::new(Mutex::new(unsafe { File::from_raw_fd(write_fd) }));
+
     match thread::Builder::new()
         .name("awari-log".into())
-        .spawn(move || log_reader(rx, path))
+        .spawn(move || log_reader(read_fd, path))
     {
         Ok(_) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
-                .with_writer(PipeWriter(tx))
+                .with_writer(PipeWriter(shared))
                 .init();
-            Some(reader_tx)
+            child_fd
         }
         Err(_) => {
+            unsafe {
+                libc::close(read_fd);
+                libc::close(child_fd);
+            }
             tracing_subscriber::fmt().with_env_filter(filter).init();
-            None
+            -1
         }
     }
 }
 
-/// Drains the log pipe into `awari.log`, capping size by dropping the oldest
-/// lines. If the file can't be opened it discards input so writes never block.
-fn log_reader(mut rx: UnixStream, path: PathBuf) {
+fn log_reader(read_fd: RawFd, path: PathBuf) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -366,9 +410,14 @@ fn log_reader(mut rx: UnixStream, path: PathBuf) {
         .ok();
     let mut buf = [0u8; 8192];
     loop {
-        match rx.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
+        let n = unsafe {
+            libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+        };
+        match n {
+            -1 => break,
+            0 => break,
+            n => {
+                let n = n as usize;
                 if file
                     .as_mut()
                     .map(|f| {
@@ -390,9 +439,9 @@ fn log_reader(mut rx: UnixStream, path: PathBuf) {
                     let _ = f.flush();
                 }
             }
-            Err(_) => break,
         }
     }
+    unsafe { libc::close(read_fd); }
 }
 
 /// Rewrite `path` to keep at most `cap` bytes, advancing past the first
@@ -403,8 +452,6 @@ fn compact_log(path: &Path, cap: u64) -> std::io::Result<()> {
     if len <= cap {
         return Ok(());
     }
-    // Scan in chunks to find the first newline at or after `excess` without
-    // loading the file into memory.
     let excess = (len - cap) as usize;
     let mut file = File::open(path)?;
     let mut buf = [0u8; 8192];
@@ -426,7 +473,6 @@ fn compact_log(path: &Path, cap: u64) -> std::io::Result<()> {
         }
         pos += n;
     }
-    // Stream the tail [start..] into a temp file, then swap it in atomically.
     let tmp = path.with_extension("tmp");
     {
         let mut src = File::open(path)?;
@@ -439,6 +485,12 @@ fn compact_log(path: &Path, cap: u64) -> std::io::Result<()> {
 }
 
 /// `MakeWriter` that fans tracing events into the shared log pipe.
+///
+/// Writes are serialised through the mutex, so concurrent callers from
+/// different threads never interleave. Tracing lines are well under
+/// `PIPE_BUF` (4096 on Linux), so even without the mutex a single
+/// `write(2)` would be atomic — but the mutex also protects the
+/// `File`'s internal buffer state.
 struct PipeWriter(Arc<Mutex<File>>);
 
 impl Write for PipeWriter {

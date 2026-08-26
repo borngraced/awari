@@ -167,9 +167,14 @@ impl Daemon {
             cx.spawn(async move |cx| {
                 use futures::StreamExt;
                 while let Some(sig) = rx.next().await {
+                    tracing::debug!(?sig, "signal received in gui");
                     if let Some(d) = entity.upgrade() {
                         d.update(cx, |d, cx| match sig {
                             Signal::Open => {
+                                tracing::debug!(
+                                    launcher_open = d.launcher_open,
+                                    "handling Signal::Open"
+                                );
                                 if !d.launcher_open {
                                     d.set_launcher_open(true, cx);
                                 }
@@ -180,6 +185,8 @@ impl Daemon {
                                 d.dismiss_launcher(cx);
                             }
                         });
+                    } else {
+                        tracing::warn!("daemon entity dropped, ignoring signal");
                     }
                 }
             })
@@ -588,6 +595,7 @@ impl Daemon {
     }
 
     fn set_launcher_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        tracing::debug!(open, launcher_open = self.launcher_open, "set_launcher_open");
         // Bumped on every transition; deferred window work from a previous
         // generation is dropped so a stale hide cannot clobber a fresh open
         // (destroy-on-close masked this by killing the handle instead).
@@ -1137,6 +1145,7 @@ fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) 
             let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
             let mut buf = [0u8; 1];
             while reader.read(&mut buf).is_ok() {
+                tracing::debug!(byte = buf[0], "self-pipe byte received");
                 let sig = match buf[0] {
                     b'O' => Signal::Open,
                     b'C' => Signal::Close,
