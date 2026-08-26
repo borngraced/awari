@@ -3,11 +3,13 @@ compile_error!("awari is Linux-only (Wayland)");
 
 mod app;
 mod argv;
+mod child;
 mod config;
 mod desktop;
 mod files;
 mod icons;
 mod lock;
+mod log;
 mod matchq;
 mod math;
 mod shell;
