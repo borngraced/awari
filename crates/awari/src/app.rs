@@ -112,10 +112,6 @@ pub struct Daemon {
     /// Reused on the re-render that fires when file results arrive so the
     /// expensive `matchq` scoring + sort doesn't run twice per keystroke.
     appwin_cache: Option<AppWinCache>,
-    /// Debounce task for panel expansion — delayed until the user pauses typing.
-    height_debounce: Option<Task<()>>,
-    /// Whether the panel is allowed to expand (debounced, not immediate).
-    panel_expanded: bool,
     /// Panel position offset from default center-top position.
     panel_offset_x: f32,
     panel_offset_y: f32,
@@ -252,8 +248,6 @@ impl Daemon {
             last_rows: None,
             last_rows_key: None,
             appwin_cache: None,
-            height_debounce: None,
-            panel_expanded: false,
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
         };
@@ -447,7 +441,6 @@ impl Daemon {
             category: self.launcher_category,
             files_enabled: self.cfg.sources.files,
             calc: calc.clone(),
-            panel_expanded: self.panel_expanded,
             panel_offset_x: self.panel_offset_x,
             panel_offset_y: self.panel_offset_y,
         };
@@ -581,7 +574,6 @@ impl Daemon {
                 if self.launcher_category != category {
                     self.launcher_category = category;
                     self.launcher_selected = 0;
-                    self.height_debounce.take();
                     self.sync_launcher(cx);
                 }
             }
@@ -595,24 +587,6 @@ impl Daemon {
                     self.history_cursor = None;
                     self.history_live = None;
                     self.refresh_file_hits();
-                    // Debounce expansion: collapse instantly, expand after pause.
-                    self.height_debounce.take();
-                    if self.launcher_query.trim().is_empty() {
-                        self.panel_expanded = false;
-                    } else if !self.panel_expanded {
-                        let debounce = cx.spawn(async move |this, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(150))
-                                .await;
-                            if let Some(daemon) = this.upgrade() {
-                                daemon.update(cx, |d, cx| {
-                                    d.panel_expanded = true;
-                                    d.sync_launcher(cx);
-                                });
-                            }
-                        });
-                        self.height_debounce = Some(debounce);
-                    }
                     self.sync_launcher(cx);
                 }
             }
@@ -683,7 +657,6 @@ impl Daemon {
 
     fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
         let cfg_motion_ms = self.cfg.motion.duration_ms as u64;
-        self.height_debounce.take();
         self.save_position();
         self.launcher_open = false;
         // Tell the daemon the overlay is now actually hidden. This is what keeps

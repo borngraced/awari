@@ -3,7 +3,7 @@ use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Point, Render,
     ScrollStrategy, SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText,
-    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
+    Task, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, HEIGHT_SPRING, ICON_GRID, ICON_LIST, LAUNCHER_W, PANEL_SPRING, SCALE_MIN,
-    SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H,
+    GRID_COLS, GRID_ROW_H, HEIGHT_SPRING, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H,
+    PANEL_SPRING, ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -34,8 +34,6 @@ pub struct LauncherView {
     /// launcher shows it as an inline ghost (` = <result>`) instead of a list
     /// row, and Enter copies it / Tab accepts it as the new input.
     pub calc: Option<String>,
-    /// Whether the panel is allowed to expand (debounced, not immediate).
-    pub panel_expanded: bool,
     /// Panel position offset from default center-top position.
     pub panel_offset_x: f32,
     pub panel_offset_y: f32,
@@ -63,7 +61,6 @@ impl LauncherView {
             category: Category::All,
             files_enabled: true,
             calc: None,
-            panel_expanded: false,
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
         }
@@ -116,6 +113,13 @@ pub struct Launcher {
     /// View-side panel position offset (avoids IPC round-trip on every mouse move).
     panel_offset_x: f32,
     panel_offset_y: f32,
+    /// Debounced row count that drives the panel height, so the panel does not
+    /// resize on every keystroke; live `view.rows` still filter/scroll below.
+    fit_rows: usize,
+    /// Debounced expansion flag (panel allowed to grow to fit results).
+    fit_expanded: bool,
+    /// Task that, after the user pauses typing, refits the panel height.
+    height_debounce: Option<Task<()>>,
 }
 
 impl Launcher {
@@ -149,6 +153,9 @@ impl Launcher {
             dragging: None,
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
+            fit_rows: 0,
+            fit_expanded: false,
+            height_debounce: None,
         }
     }
 
@@ -170,8 +177,38 @@ impl Launcher {
             self.accepted = None;
         }
 
+        let was_expanded = self.fit_expanded;
         self.view = view;
         self.last_select = Some(self.view.selected);
+
+        // Results visibility is immediate, so typing reveals matches right
+        // away. Only the *fitted row count* (and thus the panel height) is
+        // debounced: every sync — including async file-result refreshes — re-arms
+        // the timer, so the height holds steady through a typing burst and
+        // refits only once the user pauses.
+        let show =
+            (!self.view.query.trim().is_empty() || self.view.category != Category::All)
+                && self.view.calc.is_none();
+        self.fit_expanded = show;
+
+        if show {
+            self.height_debounce.take();
+            // First expand fits immediately so we don't flash the placeholder.
+            if !was_expanded {
+                self.fit_rows = self.view.rows.len();
+            }
+            let debounce = cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let _ = this.update(cx, |l, cx| {
+                    l.fit_rows = l.view.rows.len();
+                    cx.notify();
+                });
+            });
+            self.height_debounce = Some(debounce);
+        }
+        cx.notify();
 
         if self.view.open {
             self.closing = false;
@@ -697,7 +734,13 @@ impl Launcher {
             .into_any_element()
     }
 
-    fn list_row(&self, i: usize, t: &Theme, q: &[char], cx: &mut Context<Self>) -> AnyElement {
+    fn list_row(
+        &self,
+        i: usize,
+        t: &Theme,
+        q: &[char],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(row) = self.view.rows.get(i) else {
             return div().id(("launch-row-empty", i)).into_any_element();
         };
@@ -710,8 +753,8 @@ impl Launcher {
             .items_center()
             .gap(px(14.))
             .w_full()
-            .h(px(row_h))
             .min_w_0()
+            .h(px(ROW_H))
             .overflow_hidden()
             .px(px(12.))
             .py(px(11.))
@@ -809,32 +852,33 @@ impl Render for Launcher {
                 .unwrap_or(Category::All)
         };
         let browsing_grid = cat == Category::Apps && q_empty;
-        let show_results = (!q_empty || cat != Category::All) && self.view.calc.is_none();
-        let expanded = show_results && self.view.panel_expanded;
+        let expanded = self.fit_expanded;
         let max_panel_h: f32 = 500.0;
         let search_bar_h: f32 = SEARCH_H;
         let chips_h: f32 = if expanded { 36.0 } else { 0.0 };
-        let panel_pad: f32 = if expanded { 16.0 } else { 0.0 };
-        let measured_row_h = self
-            .scroll
-            .0
-            .borrow()
-            .base_handle
-            .bounds_for_item(0)
-            .map(|b| b.size.height);
-        let row_h: f32 = measured_row_h.unwrap_or(px(56.0)).into();
-        let n_rows = if expanded {
-            self.view.rows.len().min(8)
+        // launch-results contributes p(8)+p(8)+mb(8) = 24px of vertical space
+        // around the list that the panel height must include.
+        let results_pad: f32 = 24.0;
+
+        // Height is driven by the debounced `fit_rows`/`fit_expanded` so the
+        // panel does not resize per keystroke; the list content below still
+        // uses the live row count.
+        let fit_rows = self.fit_rows;
+        let results_h = if browsing_grid {
+            let grid_rows = fit_rows.div_ceil(GRID_COLS);
+            (grid_rows as f32 * GRID_ROW_H + LIST_BREATH)
+                .min(max_panel_h - search_bar_h - chips_h - results_pad)
+        } else if fit_rows == 0 {
+            NO_MATCH_H
         } else {
-            0
+            (fit_rows as f32 * ROW_H + LIST_BREATH)
+                .min(max_panel_h - search_bar_h - chips_h - results_pad)
         };
-        // let panel_h =
-        //     (search_bar_h + chips_h + panel_pad + (n_rows as f32 * row_h)).min(max_panel_h);
-        // let panel_h = panel_h.max(search_bar_h);
-        let has_rows = n_rows > 0;
-        let extra = if has_rows { chips_h + panel_pad } else { 0.0 };
-        let panel_h = (search_bar_h + extra + (n_rows as f32 * row_h))
-            .clamp(search_bar_h, max_panel_h.max(search_bar_h));
+        let panel_h = if expanded {
+            (search_bar_h + chips_h + results_pad + results_h).clamp(search_bar_h, max_panel_h)
+        } else {
+            search_bar_h
+        };
         self.keep_selected_visible(browsing_grid, cx);
 
         let mut results = div()
@@ -886,7 +930,8 @@ impl Render for Launcher {
             let n = self.view.rows.len();
             let t_list = t.clone();
             let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
-            let list_h = (n as f32 * row_h).min(max_panel_h - search_bar_h - chips_h - panel_pad);
+            let list_h = (fit_rows as f32 * ROW_H + LIST_BREATH)
+                .min(max_panel_h - search_bar_h - chips_h - results_pad);
 
             results = results.child(
                 uniform_list(
