@@ -22,6 +22,12 @@ pub enum ClientRequest {
     /// (e.g. dismissed via Escape/click inside the GUI). Keeps the daemon's
     /// `visible` flag truthful even when the close was not daemon-initiated.
     LauncherHidden,
+    /// Overlay latency and RSS. The GUI process owns these numbers; the daemon
+    /// stores the last report so `dump-stats` is not stuck on shell RSS.
+    ReportStats {
+        launcher_open_to_first_commit_ms: Option<u64>,
+        rss_bytes: u64,
+    },
     Ping,
     DumpStats,
 }
@@ -53,6 +59,15 @@ pub fn runtime_dir() -> PathBuf {
         .join(".awari")
 }
 
+/// Durable state (history, usage, panel position). Survives reboot.
+pub fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("awari")
+}
+
 pub fn socket_path() -> PathBuf {
     runtime_dir().join(SOCKET_NAME)
 }
@@ -80,10 +95,28 @@ pub fn ping_live() -> Result<ClientReply, IpcError> {
 static NOTIFY_PUMP: Once = Once::new();
 static NOTIFY_TX: Mutex<Option<mpsc::Sender<ClientRequest>>> = Mutex::new(None);
 
+/// One request, one connection, read the reply. The daemon's accept loop is
+/// one-shot per accept, so a kept-alive stream's second write is never read.
+fn notify_once(line: &str) -> Result<(), IpcError> {
+    let mut stream = UnixStream::connect(socket_path())?;
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    let mut reader = BufReader::new(stream);
+    let mut reply = String::new();
+    reader.read_line(&mut reply)?;
+    if reply.is_empty() {
+        return Err(IpcError::Empty);
+    }
+    let _ = serde_json::from_str::<ClientReply>(reply.trim())?;
+    Ok(())
+}
+
 /// Fire-and-forget status ping from the GUI back to the daemon (e.g. when the
 /// overlay is actually shown or hidden by an in-GUI action such as Escape).
 /// Writes are serialized through one pump thread so rapid show/hide pings
 /// can't be reordered on the socket and desync the daemon's `visible` flag.
+/// Each ping is retried once on a fresh connection so a dead peer cannot drop
+/// `LauncherHidden` and invert the next toggle.
 pub fn notify(req: ClientRequest) {
     NOTIFY_PUMP.call_once(|| {
         let (tx, rx) = mpsc::channel::<ClientRequest>();
@@ -91,30 +124,15 @@ pub fn notify(req: ClientRequest) {
         std::thread::Builder::new()
             .name("awari-notify".into())
             .spawn(move || {
-                let mut stream: Option<UnixStream> = None;
                 for req in rx {
                     let mut line = match serde_json::to_string(&req) {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
                     line.push('\n');
-                    let mut s = match stream.take() {
-                        Some(s) => s,
-                        None => match UnixStream::connect(socket_path()) {
-                            Ok(s) => s,
-                            Err(_) => continue,
-                        },
-                    };
-                    if s.write_all(line.as_bytes())
-                        .and_then(|_| s.flush())
-                        .is_err()
-                    {
-                        // Broken connection (daemon restarted, etc.): drop it and
-                        // reconnect on the next notification. Keeps the
-                        // fire-and-forget ping from allocating a socket per call.
-                        continue;
+                    if notify_once(&line).is_err() {
+                        let _ = notify_once(&line);
                     }
-                    stream = Some(s);
                 }
             })
             .expect("notify pump thread");
@@ -135,6 +153,12 @@ mod tests {
             ClientRequest::OpenLauncher,
             ClientRequest::CloseLauncher,
             ClientRequest::DumpStats,
+            ClientRequest::LauncherShown,
+            ClientRequest::LauncherHidden,
+            ClientRequest::ReportStats {
+                launcher_open_to_first_commit_ms: Some(12),
+                rss_bytes: 1,
+            },
         ] {
             let s = serde_json::to_string(&req).unwrap();
             assert_eq!(serde_json::from_str::<ClientRequest>(&s).unwrap(), req);

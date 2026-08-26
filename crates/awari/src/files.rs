@@ -485,7 +485,6 @@ fn is_lockfile(path: &Path) -> bool {
             | "deno.lock"
             | "bun.lockb"
             | "go.sum"
-            | "go.mod"
     )
 }
 
@@ -755,8 +754,19 @@ pub(crate) fn resolve_terminal() -> Option<String> {
 
 /// Build the args to run `script` via `sh -c` in the given terminal.
 fn terminal_args(term: &str, script: &str) -> Vec<String> {
-    match term {
-        "gnome-terminal" => vec![
+    let name = Path::new(term)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(term);
+    match name {
+        "gnome-terminal" | "kitty" => vec![
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+        ],
+        "wezterm" | "wezterm-gui" => vec![
+            "start".to_string(),
             "--".to_string(),
             "sh".to_string(),
             "-c".to_string(),
@@ -847,6 +857,22 @@ mod tests {
     }
 
     #[test]
+    fn terminal_argv_matches_emulator() {
+        assert_eq!(
+            terminal_args("wezterm", "ls"),
+            vec!["start", "--", "sh", "-c", "ls"]
+        );
+        assert_eq!(
+            terminal_args("/usr/bin/kitty", "ls"),
+            vec!["--", "sh", "-c", "ls"]
+        );
+        assert_eq!(
+            terminal_args("alacritty", "ls"),
+            vec!["-e", "sh", "-c", "ls"]
+        );
+    }
+
+    #[test]
     fn lockfiles_detected_by_name() {
         assert!(is_lockfile(Path::new("/p/Cargo.lock")));
         assert!(is_lockfile(Path::new("/p/nested/foo.lock")));
@@ -855,6 +881,8 @@ mod tests {
         assert!(!is_lockfile(Path::new("/p/main.rs")));
         assert!(!is_lockfile(Path::new("/p/Cargo.toml")));
         assert!(!is_lockfile(Path::new("/p/flake.nix")));
+        assert!(!is_lockfile(Path::new("/p/go.mod")));
+        assert!(is_lockfile(Path::new("/p/go.sum")));
     }
 
     #[test]

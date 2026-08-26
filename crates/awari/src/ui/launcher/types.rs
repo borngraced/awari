@@ -13,6 +13,7 @@ pub enum Category {
     Apps,
     Files,
     Commands,
+    Windows,
 }
 
 impl Category {
@@ -22,6 +23,7 @@ impl Category {
             Self::Apps => Icon::AppWindow,
             Self::Files => Icon::File,
             Self::Commands => Icon::Command,
+            Self::Windows => Icon::Search,
         }
     }
 
@@ -31,11 +33,12 @@ impl Category {
             Self::Apps => "Apps",
             Self::Files => "Files",
             Self::Commands => "Commands",
+            Self::Windows => "Windows",
         }
     }
 
-    pub(crate) fn all() -> [Category; 3] {
-        [Self::Apps, Self::Files, Self::Commands]
+    pub(crate) fn all() -> [Category; 4] {
+        [Self::Apps, Self::Files, Self::Commands, Self::Windows]
     }
 }
 #[derive(Clone)]

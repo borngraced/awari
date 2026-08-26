@@ -282,7 +282,21 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
                 updated_at: now,
             });
 
-            let elapsed = now.duration_since(state.updated_at).as_secs_f32();
+            // A skipped frame, compositor stall, or a hidden overlay that wakes
+            // up after a long gap yields a huge elapsed time. Clamp it so the
+            // motion eases in over a few frames instead of dumping the whole
+            // remaining distance (and velocity) in one layout.
+            let elapsed = now
+                .duration_since(state.updated_at)
+                .as_secs_f32()
+                .clamp(0.0, 1.0 / 30.0);
+
+            // Apply the latest target/config before stepping so the first frame
+            // after a retarget integrates toward the new target rather than the
+            // stale one (which would otherwise cause a two-frame hitch).
+            state.config = self.config;
+            state.target = self.target;
+
             match state.playback {
                 SpringPlayback::Running => {
                     state.spring = state.config.step(state.spring, state.target, elapsed);
@@ -292,9 +306,6 @@ impl<E: IntoElement + 'static> Element for SpringAnimationElement<E> {
                 | SpringPlayback::Completed
                 | SpringPlayback::Cancelled => {}
             }
-
-            state.config = self.config;
-            state.target = self.target;
 
             let done = match self.playback {
                 SpringPlayback::Running => {
@@ -897,6 +908,41 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(*rendered_values.borrow().last().unwrap(), px(100.0));
         assert_eq!(simulate_next_frame(&window, cx), 0);
+    }
+
+    #[gpui::test]
+    fn test_spring_animation_clamps_large_frame_gap(cx: &mut TestAppContext) {
+        let rendered_values = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.0), px(100.0)), {
+            let rendered_values = rendered_values.clone();
+            move |_, _| SpringAnimationTestView {
+                target: px(100.0),
+                initial: Some(px(0.0)),
+                playback: SpringPlayback::Running,
+                rendered_values,
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(*rendered_values.borrow(), vec![px(0.0)]);
+
+        // Mimic a keep-alive overlay that is hidden and skips frames: jump the
+        // clock 500ms between layouts. Without an elapsed-time clamp the first
+        // painted frame would integrate the whole gap at once and overshoot the
+        // target; with it the spring advances a bounded step and converges over
+        // subsequent frames.
+        cx.executor().advance_clock(Duration::from_millis(500));
+        assert!(simulate_next_frame(&window, cx) > 0);
+        let value = *rendered_values.borrow().last().unwrap();
+        assert!(value > px(0.0));
+        assert!(value < px(100.0));
+
+        for _ in 0..300 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            simulate_next_frame(&window, cx);
+        }
+        let final_value = *rendered_values.borrow().last().unwrap();
+        assert!(final_value > px(90.0));
+        assert!(final_value < px(110.0));
     }
 
     #[gpui::test]

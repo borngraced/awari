@@ -56,7 +56,13 @@ mod tests {
 
     #[test]
     fn launcher_icons_are_embedded() {
-        for icon in [Icon::AppWindow, Icon::LayoutGrid, Icon::File] {
+        for icon in [
+            Icon::AppWindow,
+            Icon::LayoutGrid,
+            Icon::File,
+            Icon::Command,
+            Icon::Search,
+        ] {
             let bytes = icon.bytes();
             assert!(bytes.starts_with(b"<svg"), "{}", icon.path());
         }

@@ -16,13 +16,24 @@ pub use view::*;
 pub const LAUNCHER_W: f32 = 600.0;
 pub const LAUNCHER_H: f32 = 1080.0;
 
-const PANEL_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
-const HEIGHT_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
+/// Pause after the last keystroke before results (and panel height) appear.
+const RESULTS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Spring driving list scroll-to-selection: near-critical, slight overshoot for
 /// a buttery glide that retargets without restarting.
 const SCROLL_SPRING: SpringConfig = SpringConfig::new(300.0, 32.0, 1.0);
 /// Settled tolerance (px) for the scroll spring.
 const SCROLL_EPSILON: f32 = 0.5;
+
+/// Critically damped spring that settles in about `duration_ms`.
+fn motion_spring(duration_ms: u32) -> SpringConfig {
+    if duration_ms == 0 {
+        return SpringConfig::new(20_000.0, 282.0, 1.0);
+    }
+    let t = (duration_ms as f32 / 1000.0).clamp(0.04, 1.0);
+    let omega = 4.2 / t;
+    SpringConfig::new(omega * omega, 2.0 * omega, 1.0)
+}
 
 const GRID_COLS: usize = 4;
 /// Height of one grid row of app tiles: tile py(16)*2 + gap_3(12) + icon(12)
@@ -39,8 +50,8 @@ const ROW_H: f32 = 60.0;
 const LIST_BREATH: f32 = 8.0;
 /// Content height of the "no matches" block (py(28)*2 + ~text).
 const NO_MATCH_H: f32 = 76.0;
-/// Minimum scale while the overlay is closed, so it eases in/out from ~96%.
-const SCALE_MIN: f32 = 0.96;
+/// Minimum scale while the overlay is closed, so it eases in/out from ~92%.
+const SCALE_MIN: f32 = 0.92;
 const SEARCH_H: f32 = 50.0;
 const ICON_LIST: f32 = 30.0;
 const ICON_GRID: f32 = 50.0;

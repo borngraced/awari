@@ -22,6 +22,13 @@ pub struct SpringConfig {
 impl SpringConfig {
     /// Creates a spring from its physical parameters.
     pub const fn new(stiffness: f32, damping: f32, mass: f32) -> Self {
+        // A non-positive stiffness or mass makes `canonical()` return NaN, which
+        // poisons every propagator and freezes the overlay. Catch it at the call
+        // site rather than letting the motion silently die.
+        debug_assert!(
+            stiffness > 0.0 && mass > 0.0 && damping >= 0.0,
+            "spring parameters must be finite and positive (stiffness > 0, mass > 0, damping >= 0)"
+        );
         Self {
             stiffness,
             damping,
@@ -91,7 +98,19 @@ impl SpringConfig {
             let decay = damping_ratio * natural_frequency;
             let damped_frequency = natural_frequency * (1.0 - damping_ratio * damping_ratio).sqrt();
             let exponential = (-decay * delta_time).exp();
-            let (sine, cosine) = (damped_frequency * delta_time).sin_cos();
+            // When the damped frequency approaches zero (ζ → 1⁻) the step can be
+            // evaluated at a tiny `ω_d·Δt`, where `sin(ω_d·Δt)/ω_d` is
+            // numerically fragile. Use its series so the result stays finite and
+            // matches the analytic limit.
+            let omega_d_dt = damped_frequency * delta_time;
+            let (sine, cosine) = if omega_d_dt < 1e-3 {
+                (
+                    omega_d_dt - omega_d_dt.powi(3) / 6.0,
+                    1.0 - omega_d_dt.powi(2) / 2.0,
+                )
+            } else {
+                omega_d_dt.sin_cos()
+            };
             let sine_over_frequency = sine / damped_frequency;
 
             [

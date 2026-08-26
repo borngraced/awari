@@ -41,8 +41,8 @@ closes the menu.
 ## Categories
 
 The chips All, Apps, Files, Commands, and Windows are clickable and filter
-results. Windows has no dedicated ranking and only shows up under All. The
-Commands tab is filled by the `>` command mode.
+results. The Commands tab treats the query as a shell command (the `>` prefix
+is optional there). Windows lists open toplevels only.
 
 ## Query prefixes
 
@@ -128,14 +128,14 @@ Controls what happens to the GPU overlay after you dismiss the launcher:
 
 The daemon flag `--no-keep-alive` forces drop mode regardless of this setting.
 `awari gui` inherits the mode from how the daemon launched it
-(`--no-keep-alive --open` for drop, `--keep-alive --hidden` for keep-alive).
+(`gui --no-keep-alive` for drop, `gui --hidden` for keep-alive).
 
 ### motion
 
 ```kdl
 motion {
     reduced false     // disable the open/close animation
-    duration-ms 140   // animation duration (clamped to 0-1000)
+    duration-ms 140   // open/close and panel-height spring settle (0-1000; 0 snaps)
 }
 ```
 

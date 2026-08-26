@@ -239,45 +239,59 @@ fn try_exec_ok(cmd: &str) -> bool {
 }
 
 pub fn scan_applications() -> Vec<DesktopApp> {
-    let mut dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
-        .split(':')
-        .filter_map(|d| {
-            if !d.is_empty() {
-                Some(PathBuf::from(d).join("applications"))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    scan_application_dirs(&application_dirs())
+}
 
-    if let Some(home) = std::env::var_os("XDG_DATA_HOME") {
+/// High-precedence first: `$XDG_DATA_HOME`, then `$XDG_DATA_DIRS`.
+fn application_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
         dirs.push(PathBuf::from(home).join("applications"));
     } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    for d in data_dirs.split(':').filter(|d| !d.is_empty()) {
+        let p = PathBuf::from(d).join("applications");
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
 
+fn collect_desktop_files(dir: &Path, rel: &Path, out: &mut Vec<(std::ffi::OsString, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        let name = ent.file_name();
+        let child_rel = rel.join(&name);
+        let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            collect_desktop_files(&path, &child_rel, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+            continue;
+        }
+        out.push((child_rel.into_os_string(), path));
+    }
+}
+
+fn scan_application_dirs(dirs: &[PathBuf]) -> Vec<DesktopApp> {
     let mut apps = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-
-        for ent in rd.flatten() {
-            let path = ent.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+        let mut files = Vec::new();
+        collect_desktop_files(dir, Path::new(""), &mut files);
+        for (id, path) in files {
+            if !seen.insert(id) {
                 continue;
             }
-
-            let id = path.file_name().map(|s| s.to_os_string());
-            if let Some(id) = &id
-                && !seen.insert(id.clone())
-            {
-                continue;
-            }
-
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -377,5 +391,36 @@ mod tests {
         .unwrap();
         assert_eq!(app.name, "Alacritty");
         assert_eq!(app.exec, Arc::from(vec!["alacritty".to_string()]));
+    }
+
+    #[test]
+    fn user_applications_override_system() {
+        let root = std::env::temp_dir().join(format!("awari_xdg_{}", std::process::id()));
+        let user = root.join("user/applications");
+        let system = root.join("system/applications");
+        let nested = system.join("nested");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            user.join("foo.desktop"),
+            "[Desktop Entry]\nType=Application\nName=UserFoo\nExec=user-foo\n",
+        )
+        .unwrap();
+        std::fs::write(
+            system.join("foo.desktop"),
+            "[Desktop Entry]\nType=Application\nName=SystemFoo\nExec=system-foo\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("bar.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Bar\nExec=bar\n",
+        )
+        .unwrap();
+        let apps = scan_application_dirs(&[user, system]);
+        let _ = std::fs::remove_dir_all(&root);
+        let names: Vec<_> = apps.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"UserFoo"), "{names:?}");
+        assert!(!names.contains(&"SystemFoo"), "{names:?}");
+        assert!(names.contains(&"Bar"), "{names:?}");
     }
 }

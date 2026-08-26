@@ -109,9 +109,13 @@
                 "Zed",
             ),
         ];
-        match tab_completion("zed", &rows, 0) {
-            Some(TabOutcome::Row(p)) => assert_eq!(p, "/tmp/a b.txt"),
-            other => panic!("expected File path, got {other:?}"),
+        match tab_completion("ze", &rows, 1) {
+            Some(TabOutcome::Inline { completed, .. }) => assert_eq!(completed, "Zed"),
+            other => panic!("expected Inline on selected app, got {other:?}"),
+        }
+        match tab_completion("a", &rows, 0) {
+            Some(TabOutcome::Inline { completed, .. }) => assert_eq!(completed, "a b.txt"),
+            other => panic!("expected Inline on selected file, got {other:?}"),
         }
         assert!(matches!(
             tab_completion("zzz", &rows, 1),

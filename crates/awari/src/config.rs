@@ -286,6 +286,13 @@ fn parse_files_body(body: &str, f: &mut FilesConfig) {
                     i += 2;
                     continue;
                 }
+                "max_results" | "max-results" => {
+                    if let Ok(n) = val.parse::<usize>() {
+                        f.max_results = n.max(1);
+                    }
+                    i += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -489,5 +496,14 @@ mod tests {
         assert!(!d.files.index_lockfiles);
         assert!(!d.files.regex);
         assert!(d.files.roots.iter().any(|p| p.ends_with("Documents")));
+    }
+
+    #[test]
+    fn files_max_results_parses_inside_block() {
+        let c = parse("files { max-results 80 }\nmax-results 40");
+        assert_eq!(c.files.max_results, 80);
+        assert_eq!(c.max_results, 40);
+        let d = parse("files { max_results 1 }");
+        assert_eq!(d.files.max_results, 1);
     }
 }

@@ -43,10 +43,28 @@ pub(crate) fn spawn_signal_thread(child: Arc<Mutex<Option<Child>>>) {
             let mut sig: i32 = 0;
             loop {
                 if unsafe { libc::sigwait(&set, &mut sig) } == 0 && sig == libc::SIGTERM {
-                    if let Some(c) = child.lock().unwrap().as_ref() {
-                        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+                    let pid = child.lock().unwrap().as_ref().map(|c| c.id());
+                    if let Some(pid) = pid {
+                        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
                     }
-                    thread::sleep(Duration::from_millis(200));
+                    let deadline = Instant::now() + Duration::from_millis(KILL_TIMEOUT_MS);
+                    while Instant::now() < deadline {
+                        let mut g = child.lock().unwrap();
+                        match g.as_mut().map(|c| c.try_wait()) {
+                            Some(Ok(Some(_))) | None => {
+                                *g = None;
+                                break;
+                            }
+                            _ => {
+                                drop(g);
+                                thread::sleep(Duration::from_millis(50));
+                            }
+                        }
+                    }
+                    if let Some(mut c) = child.lock().unwrap().take() {
+                        unsafe { libc::kill(c.id() as i32, libc::SIGKILL) };
+                        let _ = c.wait();
+                    }
                     unsafe { libc::_exit(0) };
                 }
             }
@@ -185,6 +203,7 @@ pub(crate) fn start_child(
             libc::sigemptyset(&mut mask);
             libc::sigaddset(&mut mask, libc::SIGUSR1);
             libc::sigaddset(&mut mask, libc::SIGUSR2);
+            libc::sigaddset(&mut mask, libc::SIGTERM);
             libc::pthread_sigmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
             Ok(())
         });

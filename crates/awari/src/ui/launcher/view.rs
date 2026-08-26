@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Point, Render,
-    ScrollStrategy, SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText,
+    SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText,
     Task, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
 use std::ops::Range;
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, GRID_ROW_H, HEIGHT_SPRING, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H,
-    PANEL_SPRING, ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H,
+    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H, RESULTS_DEBOUNCE,
+    ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H, motion_spring,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -30,6 +30,7 @@ pub struct LauncherView {
     pub theme: Theme,
     pub category: Category,
     pub files_enabled: bool,
+    pub windows_enabled: bool,
     /// A valid calculator result for the current query, if any. When set the
     /// launcher shows it as an inline ghost (` = <result>`) instead of a list
     /// row, and Enter copies it / Tab accepts it as the new input.
@@ -37,6 +38,44 @@ pub struct LauncherView {
     /// Panel position offset from default center-top position.
     pub panel_offset_x: f32,
     pub panel_offset_y: f32,
+    /// Open/close and height spring settle time (`motion.duration-ms`).
+    pub motion_ms: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevealAction {
+    Collapse,
+    Debounce,
+    ShowNow,
+    Hold,
+}
+
+pub(crate) fn wants_results(query: &str, category: Category, has_calc: bool) -> bool {
+    !has_calc && (!query.trim().is_empty() || category != Category::All)
+}
+
+/// Results stay hidden while the query is changing. A pause reveals them
+/// (and grows the panel) once. Category clicks show immediately.
+pub(crate) fn reveal_action(
+    wants: bool,
+    daemon_query: bool,
+    category_changed: bool,
+) -> RevealAction {
+    if !wants {
+        RevealAction::Collapse
+    } else if daemon_query {
+        RevealAction::Debounce
+    } else if category_changed {
+        RevealAction::ShowNow
+    } else {
+        RevealAction::Hold
+    }
+}
+
+/// A snapshot whose query does not match the live buffer is an in-flight
+/// echo from an earlier keystroke and must not rewind the input.
+pub(crate) fn stale_query_snapshot(local_dirty: bool, local_q: &str, snap_q: &str) -> bool {
+    local_dirty && local_q != snap_q
 }
 
 fn action_menu_top(row_top: Pixels, item_h: Pixels, menu_h: Pixels, viewport: Pixels) -> Pixels {
@@ -60,9 +99,11 @@ impl LauncherView {
             theme,
             category: Category::All,
             files_enabled: true,
+            windows_enabled: true,
             calc: None,
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
+            motion_ms: 140,
         }
     }
 }
@@ -81,8 +122,8 @@ pub struct Launcher {
     scroll: UniformListScrollHandle,
     scrolled_to: Option<usize>,
     scroll_target: Option<Pixels>,
-    scroll_anim_gen: u64,
     scroll_spring: SpringState,
+    scroll_last: Instant,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
     hovered_chip: Option<Category>,
@@ -113,13 +154,22 @@ pub struct Launcher {
     /// View-side panel position offset (avoids IPC round-trip on every mouse move).
     panel_offset_x: f32,
     panel_offset_y: f32,
-    /// Debounced row count that drives the panel height, so the panel does not
-    /// resize on every keystroke; live `view.rows` still filter/scroll below.
+    /// Row count used for panel height, applied only when results are revealed.
     fit_rows: usize,
-    /// Debounced expansion flag (panel allowed to grow to fit results).
+    /// Results (and panel growth) are shown only after typing pauses, or
+    /// immediately on a category click.
     fit_expanded: bool,
-    /// Task that, after the user pauses typing, refits the panel height.
+    /// Task that reveals results after `RESULTS_DEBOUNCE` of quiet typing.
     height_debounce: Option<Task<()>>,
+    /// Invalidates in-flight debounce tasks. Dropping the Task does not
+    /// cancel the executor timer, so a generation check is required.
+    reveal_gen: u64,
+    /// True after a local edit until a daemon snapshot with the same query
+    /// arrives. Stale snapshots must not overwrite the input buffer.
+    local_query_dirty: bool,
+    /// Bumped each open so open/close springs remount from rest instead of
+    /// continuing a previous close's height.
+    open_gen: u64,
 }
 
 impl Launcher {
@@ -138,8 +188,8 @@ impl Launcher {
             scroll: UniformListScrollHandle::new(),
             scrolled_to: None,
             scroll_target: None,
-            scroll_anim_gen: 0,
             scroll_spring: SpringState::default(),
+            scroll_last: Instant::now(),
             open_started: None,
             closing: false,
             hovered_chip: None,
@@ -156,61 +206,102 @@ impl Launcher {
             fit_rows: 0,
             fit_expanded: false,
             height_debounce: None,
+            reveal_gen: 0,
+            local_query_dirty: false,
+            open_gen: 0,
         }
     }
 
-    pub fn apply_view(&mut self, view: LauncherView, cx: &mut Context<Self>) {
+    pub fn apply_view(&mut self, incoming: LauncherView, cx: &mut Context<Self>) {
         let was_open = self.view.open;
+        let opening = incoming.open && !was_open;
 
-        if self.view.query != view.query || self.view.category != view.category {
-            self.scrolled_to = None;
-            self.scroll_target = None;
-            self.scroll_anim_gen = self.scroll_anim_gen.wrapping_add(1);
-            self.scroll_spring = SpringState::default();
+        if opening {
+            self.cursor = 0;
+            self.local_query_dirty = false;
+            self.accepted = None;
+            self.view = incoming;
+            self.last_select = Some(self.view.selected);
+            self.open_gen = self.open_gen.wrapping_add(1);
+            self.hide_results();
+            self.panel_offset_x = self.view.panel_offset_x;
+            self.panel_offset_y = self.view.panel_offset_y;
+            self.closing = false;
+            self.ensure_blink(cx);
+            cx.notify();
+            return;
         }
 
-        if self.view.query != view.query || self.view.selected != view.selected {
+        if stale_query_snapshot(self.local_query_dirty, &self.view.query, &incoming.query) {
+            self.view.open = incoming.open;
+            self.view.theme = incoming.theme;
+            self.view.files_enabled = incoming.files_enabled;
+            self.view.windows_enabled = incoming.windows_enabled;
+            self.view.panel_offset_x = incoming.panel_offset_x;
+            self.view.panel_offset_y = incoming.panel_offset_y;
+            self.view.motion_ms = incoming.motion_ms;
+            self.apply_open_flags(incoming.open, was_open, cx);
+            cx.notify();
+            return;
+        }
+
+        let daemon_query = incoming.query != self.view.query;
+        let category_changed = incoming.category != self.view.category;
+
+        if daemon_query {
+            self.view.query = incoming.query;
+            self.cursor = self.view.query.len();
+            self.accepted = None;
+            self.local_query_dirty = false;
+            self.scrolled_to = None;
+            self.scroll_target = None;
+            self.scroll_spring = SpringState::default();
+            self.action_menu = None;
+        } else {
+            self.local_query_dirty = false;
+        }
+
+        if category_changed {
+            self.scrolled_to = None;
+            self.scroll_target = None;
+            self.scroll_spring = SpringState::default();
+            self.action_menu = None;
+        } else if self.view.selected != incoming.selected {
             self.action_menu = None;
         }
 
-        if self.view.query != view.query {
-            self.accepted = None;
-        }
-
-        let was_expanded = self.fit_expanded;
-        self.view = view;
+        self.view.open = incoming.open;
+        self.view.rows = incoming.rows;
+        self.view.selected = incoming.selected;
+        self.view.theme = incoming.theme;
+        self.view.category = incoming.category;
+        self.view.files_enabled = incoming.files_enabled;
+        self.view.windows_enabled = incoming.windows_enabled;
+        self.view.calc = incoming.calc;
+        self.view.panel_offset_x = incoming.panel_offset_x;
+        self.view.panel_offset_y = incoming.panel_offset_y;
+        self.view.motion_ms = incoming.motion_ms;
         self.last_select = Some(self.view.selected);
 
-        // Results visibility is immediate, so typing reveals matches right
-        // away. Only the *fitted row count* (and thus the panel height) is
-        // debounced: every sync — including async file-result refreshes — re-arms
-        // the timer, so the height holds steady through a typing burst and
-        // refits only once the user pauses.
-        let show =
-            (!self.view.query.trim().is_empty() || self.view.category != Category::All)
-                && self.view.calc.is_none();
-        self.fit_expanded = show;
-
-        if show {
-            self.height_debounce.take();
-            // First expand fits immediately so we don't flash the placeholder.
-            if !was_expanded {
-                self.fit_rows = self.view.rows.len();
+        let wants =
+            wants_results(&self.view.query, self.view.category, self.view.calc.is_some());
+        match reveal_action(wants, daemon_query, category_changed) {
+            RevealAction::Collapse => self.hide_results(),
+            RevealAction::Debounce => self.schedule_results_reveal(cx),
+            RevealAction::ShowNow => self.show_results_now(),
+            RevealAction::Hold => {
+                if wants && self.view.open && self.height_debounce.is_none() {
+                    self.schedule_results_reveal(cx);
+                }
             }
-            let debounce = cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                let _ = this.update(cx, |l, cx| {
-                    l.fit_rows = l.view.rows.len();
-                    cx.notify();
-                });
-            });
-            self.height_debounce = Some(debounce);
         }
-        cx.notify();
 
-        if self.view.open {
+        self.apply_open_flags(self.view.open, was_open, cx);
+        cx.notify();
+    }
+
+    fn apply_open_flags(&mut self, open: bool, was_open: bool, cx: &mut Context<Self>) {
+        if open {
             self.closing = false;
             if !was_open {
                 self.panel_offset_x = self.view.panel_offset_x;
@@ -222,6 +313,58 @@ impl Launcher {
             self.caret_on = true;
             self.stop_blink();
         }
+    }
+
+    /// Hide results and, after a typing pause, reveal them at the fitted height.
+    /// Called from the key handler because the query is applied locally before
+    /// the daemon round-trip, so `apply_view` often sees no query change.
+    fn on_query_typed(&mut self, cx: &mut Context<Self>) {
+        self.local_query_dirty = true;
+        self.view.calc = crate::math::evaluate(&self.view.query);
+        if wants_results(&self.view.query, self.view.category, self.view.calc.is_some()) {
+            self.schedule_results_reveal(cx);
+        } else {
+            self.hide_results();
+        }
+    }
+
+    fn hide_results(&mut self) {
+        self.reveal_gen = self.reveal_gen.wrapping_add(1);
+        self.height_debounce.take();
+        self.fit_expanded = false;
+        self.fit_rows = 0;
+        self.scrolled_to = None;
+        self.scroll_target = None;
+    }
+
+    fn show_results_now(&mut self) {
+        self.reveal_gen = self.reveal_gen.wrapping_add(1);
+        self.height_debounce.take();
+        self.fit_expanded = true;
+        self.fit_rows = self.view.rows.len();
+    }
+
+    fn schedule_results_reveal(&mut self, cx: &mut Context<Self>) {
+        // Re-arm the reveal timer without collapsing the panel. The height must
+        // stay fixed while the query is changing; only this timer (which fires
+        // once typing pauses) is allowed to grow `fit_rows`.
+        self.reveal_gen = self.reveal_gen.wrapping_add(1);
+        self.height_debounce.take();
+        let ticket = self.reveal_gen;
+        let debounce = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESULTS_DEBOUNCE).await;
+            let _ = this.update(cx, |l, cx| {
+                if l.reveal_gen != ticket {
+                    return;
+                }
+                if wants_results(&l.view.query, l.view.category, l.view.calc.is_some()) {
+                    l.fit_expanded = true;
+                    l.fit_rows = l.view.rows.len();
+                }
+                cx.notify();
+            });
+        });
+        self.height_debounce = Some(debounce);
     }
 
     /// Begin the close animation without discarding the current content.
@@ -322,6 +465,8 @@ impl Launcher {
                     .next_back()
                     .map(|(i, _)| i)
                     .unwrap_or(0);
+                self.cursor = c;
+                return None;
             }
             "arrowright" | "right" => {
                 c = self.view.query[c..]
@@ -329,9 +474,17 @@ impl Launcher {
                     .nth(1)
                     .map(|(i, _)| c + i)
                     .unwrap_or(self.view.query.len());
+                self.cursor = c;
+                return None;
             }
-            "home" => c = 0,
-            "end" => c = self.view.query.len(),
+            "home" => {
+                self.cursor = 0;
+                return None;
+            }
+            "end" => {
+                self.cursor = self.view.query.len();
+                return None;
+            }
             _ => {
                 let Some(ch) = &k.key_char else { return None };
                 if ch.is_empty() || ch.chars().any(|b| b.is_control()) {
@@ -392,11 +545,13 @@ impl Launcher {
         let ghost = if token_len == 0 && c == q.len() && accepted_off.is_none() {
             if let Some(result) = &self.view.calc {
                 Some(format!(" = {}", result))
-            } else {
+            } else if self.fit_expanded {
                 self.view
                     .rows
                     .first()
                     .and_then(|r| ghost_suffix(q, &r.label))
+            } else {
+                None
             }
         } else {
             None
@@ -574,24 +729,20 @@ impl Launcher {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn keep_selected_visible(&mut self, grid: bool, cx: &mut Context<Self>) {
+    fn keep_selected_visible(&mut self, grid: bool, window: &mut Window) {
         let sel = self.view.selected;
         if self.view.rows.is_empty() {
             return;
         }
-        if self.scrolled_to == Some(sel) {
+        if self.scrolled_to == Some(sel) && self.scroll_target.is_none() {
             return;
         }
-        self.scrolled_to = Some(sel);
 
         let (item_h, viewport, max_off, cur) = {
             let state = self.scroll.0.borrow();
             let handle = &state.base_handle;
             let Some(item_h) = handle.bounds_for_item(0).map(|b| b.size.height) else {
-                drop(state);
-                let ix = if grid { sel / GRID_COLS } else { sel };
-                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-
+                window.request_animation_frame();
                 return;
             };
             (
@@ -611,6 +762,8 @@ impl Launcher {
         } else if item_visible_bottom > viewport {
             cur - (item_visible_bottom - viewport)
         } else {
+            self.scrolled_to = Some(sel);
+            self.scroll_target = None;
             return;
         };
 
@@ -623,63 +776,54 @@ impl Launcher {
         }
 
         if (target - cur).abs() < px(0.5) {
+            self.scrolled_to = Some(sel);
+            self.scroll_target = None;
             return;
         }
 
-        // Ease to `target` with a spring; re-sync its position to the live
-        // offset each frame so manual scrolls retarget seamlessly.
+        if self.scroll_target.is_none() {
+            self.scroll_spring.position = f32::from(cur);
+            self.scroll_spring.velocity = 0.0;
+            self.scroll_last = Instant::now();
+        }
         self.scroll_target = Some(target);
-        let anim_gen = self.scroll_anim_gen.wrapping_add(1);
-        self.scroll_anim_gen = anim_gen;
+    }
 
-        cx.spawn(async move |this, cx| {
-            let mut last = Instant::now();
-            loop {
-                if this
-                    .update(cx, |l, _| l.scroll_anim_gen != anim_gen)
-                    .unwrap_or(true)
-                {
-                    break;
-                }
-                let (target_y, spring) = this
-                    .update(cx, |l, _| {
-                        let live: f32 = l.scroll.0.borrow().base_handle.offset().y.into();
-                        l.scroll_spring.position = live;
-                        (l.scroll_target.map(|p| p.into()), l.scroll_spring)
-                    })
-                    .unwrap_or((None, SpringState::default()));
-                let Some(target_y) = target_y else { break };
+    fn step_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.scroll_target else {
+            return;
+        };
+        let target_y: f32 = target.into();
+        if cx.reduce_motion() {
+            self.scroll_spring.position = target_y;
+            self.scroll_spring.velocity = 0.0;
+            self.scroll
+                .0
+                .borrow()
+                .base_handle
+                .set_offset(Point::new(px(0.0), target));
+            self.scroll_target = None;
+            self.scrolled_to = Some(self.view.selected);
+            return;
+        }
 
-                let now = Instant::now();
-                let dt = now.duration_since(last).as_secs_f32().clamp(0.0, 0.064);
-                last = now;
-
-                let next = SCROLL_SPRING.step(spring, target_y, dt);
-                let settled = SCROLL_SPRING.is_settled(next, target_y, SCROLL_EPSILON);
-
-                let _ = this.update(cx, |l, cx| {
-                    l.scroll_spring = next;
-                    l.scroll
-                        .0
-                        .borrow()
-                        .base_handle
-                        .set_offset(Point::new(px(0.0), px(next.position)));
-                    if settled {
-                        l.scroll_target = None;
-                    }
-                    cx.notify();
-                });
-
-                if settled {
-                    break;
-                }
-                let _ = cx
-                    .background_executor()
-                    .timer(Duration::from_millis(8))
-                    .await;
-            }
-        })
-        .detach();
+        let now = Instant::now();
+        let dt = now.duration_since(self.scroll_last).as_secs_f32().clamp(0.0, 0.032);
+        self.scroll_last = now;
+        let next = SCROLL_SPRING.step(self.scroll_spring, target_y, dt);
+        let settled = SCROLL_SPRING.is_settled(next, target_y, SCROLL_EPSILON);
+        self.scroll_spring = next;
+        self.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(Point::new(px(0.0), px(next.position)));
+        if settled {
+            self.scroll_target = None;
+            self.scrolled_to = Some(self.view.selected);
+        } else {
+            window.request_animation_frame();
+        }
     }
 
     fn tile(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -879,7 +1023,12 @@ impl Render for Launcher {
         } else {
             search_bar_h
         };
-        self.keep_selected_visible(browsing_grid, cx);
+        if expanded {
+            self.keep_selected_visible(browsing_grid, window);
+            self.step_scroll(window, cx);
+        }
+        let motion = motion_spring(self.view.motion_ms);
+        let open_gen = self.open_gen;
 
         let mut results = div()
             .id("launch-results")
@@ -952,8 +1101,12 @@ impl Render for Launcher {
         let mut cat_icons = div().flex().flex_none().items_center().gap(px(6.));
         let this = cx.entity();
         let files_enabled = self.view.files_enabled;
+        let windows_enabled = self.view.windows_enabled;
         for c in Category::all() {
             if c == Category::Files && !files_enabled {
+                continue;
+            }
+            if c == Category::Windows && !windows_enabled {
                 continue;
             }
             let active = active_cat == c;
@@ -1059,7 +1212,7 @@ impl Render for Launcher {
                 }))
                 .with_spring(
                     "action-menu",
-                    SpringAnimation::new(PANEL_SPRING).to(1.0).from(0.0),
+                    SpringAnimation::new(motion).to(1.0).from(0.0),
                     |el, v| el.opacity(v).mt(px((1.0 - v) * 6.0)),
                 )
         });
@@ -1077,9 +1230,7 @@ impl Render for Launcher {
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
             )
-            .when(!self.view.rows.is_empty() || browsing_grid, |el| {
-                el.child(results)
-            })
+            .child(results)
             .when_some(action_menu_el, |el, menu| el.child(menu));
 
         let search_focus = self.focus_handle.clone();
@@ -1225,6 +1376,7 @@ impl Render for Launcher {
                         this.cursor = result.len();
                         this.accepted = None;
                         this.view.query = result.clone();
+                        this.on_query_typed(cx);
                         post(this, cx, LauncherCmd::SetQuery { query: result });
                         return;
                     }
@@ -1236,11 +1388,14 @@ impl Render for Launcher {
                             this.cursor = completed.len();
                             this.accepted = Some((completed.clone(), accepted_off));
                             this.view.query = completed.clone();
+                            this.on_query_typed(cx);
                             post(this, cx, LauncherCmd::SetQuery { query: completed });
                         }
                         Some(TabOutcome::Row(completion)) => {
                             this.cursor = completion.len();
                             this.accepted = None;
+                            this.view.query = completion.clone();
+                            this.on_query_typed(cx);
                             post(this, cx, LauncherCmd::SetQuery { query: completion });
                         }
                         None => {}
@@ -1249,6 +1404,7 @@ impl Render for Launcher {
                 }
                 if let Some(query) = this.edit(&ev.keystroke) {
                     cx.stop_propagation();
+                    this.on_query_typed(cx);
                     post(this, cx, LauncherCmd::SetQuery { query });
                 }
                 cx.notify();
@@ -1261,10 +1417,10 @@ impl Render for Launcher {
                     .mt(px(80.0 + offset_y))
                     .ml(px(offset_x))
                     .with_spring(
-                        "launcher-panel-h",
-                        SpringAnimation::new(HEIGHT_SPRING)
+                        ("launcher-panel-h", open_gen),
+                        SpringAnimation::new(motion)
                             .to(panel_h)
-                            .from(panel_h),
+                            .from(SEARCH_H),
                         |el, h| el.h(px(h)),
                     )
                     .child(
@@ -1354,8 +1510,10 @@ impl Render for Launcher {
                                             .overflow_hidden()
                                             .child(self.query_element())
                                             .child(div().flex_1().min_w_0())
-                                            .when_some(self.view.rows.first(), |el, row| {
-                                                el.child(first_result_icon(row, &t))
+                                            .when(expanded, |el| {
+                                                el.when_some(self.view.rows.first(), |el, row| {
+                                                    el.child(first_result_icon(row, &t))
+                                                })
                                             }),
                                     ),
                             )
@@ -1373,9 +1531,13 @@ impl Render for Launcher {
                                 .child(results_body)
                             })
                             .with_spring(
-                                "launcher-panel",
-                                SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
-                                move |el, p| el.opacity(p).scale(SCALE_MIN + p * (1.0 - SCALE_MIN)),
+                                ("launcher-panel", open_gen),
+                                SpringAnimation::new(motion).to(target).from(0.0),
+                                move |el, p| {
+                                    el.opacity(p)
+                                        .scale(SCALE_MIN + p * (1.0 - SCALE_MIN))
+                                        .mt(px((p - 1.0) * 12.0))
+                                },
                             ),
                     ),
             )

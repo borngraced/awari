@@ -440,9 +440,11 @@ impl Daemon {
             theme: self.cfg.theme.clone(),
             category: self.launcher_category,
             files_enabled: self.cfg.sources.files,
+            windows_enabled: self.cfg.sources.windows,
             calc: calc.clone(),
             panel_offset_x: self.panel_offset_x,
             panel_offset_y: self.panel_offset_y,
+            motion_ms: self.cfg.motion.duration_ms,
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
@@ -591,8 +593,16 @@ impl Daemon {
                 }
             }
             LauncherCmd::OpenToRender { ms } => {
-                let mut s = self.stats.lock().expect("stats");
-                s.launcher_open_to_first_commit_ms = Some(ms);
+                let rss = crate::lock::rss_bytes();
+                {
+                    let mut s = self.stats.lock().expect("stats");
+                    s.launcher_open_to_first_commit_ms = Some(ms);
+                    s.gui_rss_bytes = Some(rss);
+                }
+                notify(ClientRequest::ReportStats {
+                    launcher_open_to_first_commit_ms: Some(ms),
+                    rss_bytes: rss,
+                });
                 tracing::info!(ms, "launcher open → first render");
                 if !self.keep_alive
                     && let Some(cold) = cold_start_ms()
@@ -709,7 +719,11 @@ impl Daemon {
         let close_task = cx.spawn(async move |this, cx| {
             // Grace covers the full fade (theme `motion.duration-ms`) so the
             // drop-mode quit lands after the animation, not mid-fade.
-            let grace_ms = LAUNCHER_CLOSE_GRACE_MS.max(cfg_motion_ms);
+            let grace_ms = if cfg_motion_ms == 0 {
+                50
+            } else {
+                LAUNCHER_CLOSE_GRACE_MS.max(cfg_motion_ms)
+            };
             cx.background_executor()
                 .timer(Duration::from_millis(grace_ms))
                 .await;
@@ -798,10 +812,22 @@ impl Daemon {
         self.sync_launcher(cx);
     }
 
-    /// Load past queries from `$XDG_RUNTIME_DIR/.awari/history`.
+    fn read_state(name: &str) -> Option<String> {
+        let primary = awari_ipc::state_dir().join(name);
+        fs::read_to_string(&primary)
+            .ok()
+            .or_else(|| fs::read_to_string(awari_ipc::runtime_dir().join(name)).ok())
+    }
+
+    fn write_state(name: &str, body: &str) {
+        let dir = awari_ipc::state_dir();
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join(name), body);
+    }
+
+    /// Load past queries from `$XDG_STATE_HOME/awari/history`.
     fn load_history(&mut self) {
-        let path = awari_ipc::runtime_dir().join("history");
-        if let Ok(s) = fs::read_to_string(&path) {
+        if let Some(s) = Self::read_state("history") {
             self.query_history = s
                 .lines()
                 .map(str::to_string)
@@ -812,15 +838,12 @@ impl Daemon {
 
     /// Persist `query_history` to `history` (newline-separated).
     fn save_history(&self) {
-        let dir = awari_ipc::runtime_dir();
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(dir.join("history"), self.query_history.join("\n"));
+        Self::write_state("history", &self.query_history.join("\n"));
     }
 
-    /// Load app launch counts from `$XDG_RUNTIME_DIR/.awari/usage`.
+    /// Load app launch counts from `$XDG_STATE_HOME/awari/usage`.
     fn load_usage(&mut self) {
-        let path = awari_ipc::runtime_dir().join("usage");
-        if let Ok(s) = fs::read_to_string(&path) {
+        if let Some(s) = Self::read_state("usage") {
             for line in s.lines() {
                 if let Some((name, cnt)) = line.split_once('\t')
                     && let Ok(n) = cnt.parse::<u64>()
@@ -833,20 +856,17 @@ impl Daemon {
 
     /// Persist `app_usage` to `usage` as `name\tcount` lines.
     fn save_usage(&self) {
-        let dir = awari_ipc::runtime_dir();
-        let _ = fs::create_dir_all(&dir);
         let body: Vec<String> = self
             .app_usage
             .iter()
             .map(|(k, v)| format!("{}\t{}", k, v))
             .collect();
-        let _ = fs::write(dir.join("usage"), body.join("\n"));
+        Self::write_state("usage", &body.join("\n"));
     }
 
-    /// Load panel position offset from `$XDG_RUNTIME_DIR/.awari/position`.
+    /// Load panel position offset from `$XDG_STATE_HOME/awari/position`.
     fn load_position(&mut self) {
-        let path = awari_ipc::runtime_dir().join("position");
-        if let Ok(s) = fs::read_to_string(&path) {
+        if let Some(s) = Self::read_state("position") {
             let parts: Vec<&str> = s.split_whitespace().collect();
             if parts.len() == 2
                 && let (Ok(x), Ok(y)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
@@ -859,11 +879,9 @@ impl Daemon {
 
     /// Persist panel position offset to `position` as `x y`.
     fn save_position(&self) {
-        let dir = awari_ipc::runtime_dir();
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(
-            dir.join("position"),
-            format!("{} {}", self.panel_offset_x, self.panel_offset_y),
+        Self::write_state(
+            "position",
+            &format!("{} {}", self.panel_offset_x, self.panel_offset_y),
         );
     }
 

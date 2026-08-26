@@ -11,8 +11,7 @@ pub fn row_category(r: &LauncherRow) -> Category {
     match r.kind {
         RowKind::App { .. } => Category::Apps,
         RowKind::File { .. } => Category::Files,
-        // Windows have no dedicated tab; treat them as neutral (no highlight).
-        RowKind::Window { .. } => Category::All,
+        RowKind::Window { .. } => Category::Windows,
         RowKind::Command { .. } => Category::Commands,
     }
 }
@@ -97,7 +96,7 @@ pub enum TabOutcome {
 }
 
 pub fn tab_completion(query: &str, rows: &[LauncherRow], selected: usize) -> Option<TabOutcome> {
-    if let Some(r) = rows.first()
+    if let Some(r) = rows.get(selected)
         && !query.is_empty()
         && command_prefix(query).is_none()
         && ghost_suffix(query, &r.label).is_some()
@@ -251,6 +250,7 @@ pub fn score_app_window(
     let empty = q.is_empty();
     let apps_only = category == Category::Apps;
     let files_only = category == Category::Files;
+    let windows_only = category == Category::Windows;
 
     let mut win_scored: Vec<(i64, usize)> = if files_only || apps_only {
         Vec::new()
@@ -278,7 +278,7 @@ pub fn score_app_window(
         .filter_map(|&(_, ix)| windows[ix].app_id_lc.as_deref())
         .collect();
 
-    let mut app_scored: Vec<(i64, &DesktopApp)> = if files_only {
+    let mut app_scored: Vec<(i64, &DesktopApp)> = if files_only || windows_only {
         Vec::new()
     } else {
         apps.iter()
@@ -403,19 +403,7 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
         match prefix {
             ">" => {
                 let cmd = q.strip_prefix('>').unwrap().trim();
-                return if cmd.is_empty() {
-                    Vec::new()
-                } else {
-                    let kind = RowKind::Command {
-                        command: cmd.to_string(),
-                    };
-                    vec![LauncherRow {
-                        subtitle: build_subtitle(&kind),
-                        kind,
-                        label: SharedString::from(format!("Run “{}” in terminal", cmd)),
-                        resolved_icon: None,
-                    }]
-                };
+                return command_mode_rows(cmd);
             }
             "o:" => {
                 return open_path_rows(q.strip_prefix("o:").unwrap(), file_max);
@@ -425,14 +413,15 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
     }
 
     if category == Category::Commands {
-        return Vec::new();
+        return command_mode_rows(q.strip_prefix('>').unwrap_or(q).trim());
     }
 
     // Score folds case internally; keep the raw trimmed query.
     let empty = q.is_empty();
     let apps_only = category == Category::Apps;
     let files_only = category == Category::Files;
-    let ranked_cap = if apps_only || files_only {
+    let windows_only = category == Category::Windows;
+    let ranked_cap = if apps_only || files_only || windows_only {
         None
     } else {
         Some(total_max)
@@ -486,6 +475,10 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
         push_capped(&mut out, ranked_cap, app_rows);
         return out;
     }
+    if windows_only {
+        push_capped(&mut out, ranked_cap, win_rows);
+        return out;
+    }
 
     if crate::files::is_path_shaped(q) {
         // Explicit path navigation: files first, then apps, then windows.
@@ -513,14 +506,22 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
     // calculator expression never reaches here (it surfaces as an inline ghost,
     // not a list row), so it must not spawn a "run in terminal" fallback.
     if out.is_empty() && !empty && calc.is_none() && !crate::files::is_path_shaped(q) {
-        let cmd = q.to_string();
-        let kind = RowKind::Command { command: cmd };
-        out.push(LauncherRow {
-            subtitle: build_subtitle(&kind),
-            kind,
-            label: SharedString::from(format!("Run “{}” in terminal", q)),
-            resolved_icon: None,
-        });
+        out.extend(command_mode_rows(q));
     }
     out
+}
+
+fn command_mode_rows(cmd: &str) -> Vec<LauncherRow> {
+    if cmd.is_empty() {
+        return Vec::new();
+    }
+    let kind = RowKind::Command {
+        command: cmd.to_string(),
+    };
+    vec![LauncherRow {
+        subtitle: build_subtitle(&kind),
+        kind,
+        label: SharedString::from(format!("Run “{}” in terminal", cmd)),
+        resolved_icon: None,
+    }]
 }

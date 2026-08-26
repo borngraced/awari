@@ -18,6 +18,9 @@ pub struct IpcServer {
 #[derive(Default)]
 pub struct Stats {
     pub launcher_open_to_first_commit_ms: Option<u64>,
+    /// Last overlay RSS reported by the GUI. `dump-stats` prefers this over
+    /// the shell process RSS.
+    pub gui_rss_bytes: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -132,8 +135,17 @@ fn handle_client(
             let s = stats.lock().expect("stats");
             ClientReply::Stats {
                 launcher_open_to_first_commit_ms: s.launcher_open_to_first_commit_ms,
-                rss_bytes: rss_bytes(),
+                rss_bytes: s.gui_rss_bytes.unwrap_or_else(rss_bytes),
             }
+        }
+        ClientRequest::ReportStats {
+            launcher_open_to_first_commit_ms,
+            rss_bytes,
+        } => {
+            let mut s = stats.lock().expect("stats");
+            s.launcher_open_to_first_commit_ms = launcher_open_to_first_commit_ms;
+            s.gui_rss_bytes = Some(rss_bytes);
+            ClientReply::Ok
         }
         ClientRequest::ToggleLauncher
         | ClientRequest::OpenLauncher
@@ -152,7 +164,7 @@ fn handle_client(
     Ok(())
 }
 
-fn rss_bytes() -> u64 {
+pub fn rss_bytes() -> u64 {
     if let Ok(s) = std::fs::read_to_string("/proc/self/statm")
         && let Some(pages) = s.split_whitespace().nth(1)
         && let Ok(n) = pages.parse::<u64>()

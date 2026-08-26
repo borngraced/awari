@@ -184,7 +184,7 @@ fn files_chip_returns_every_hit() {
 }
 
 #[test]
-fn commands_chip_is_empty() {
+fn commands_chip_runs_query() {
     let out = filter_rows(FilterParams {
         query: "x",
         apps: &[app("X", None)],
@@ -201,7 +201,35 @@ fn commands_chip_is_empty() {
         prefix: None,
         calc: None,
     });
-    assert!(out.is_empty());
+    assert_eq!(out.len(), 1);
+    assert!(matches!(out[0].kind, RowKind::Command { .. }));
+}
+
+#[test]
+fn windows_chip_only_windows() {
+    let out = filter_rows(FilterParams {
+        query: "",
+        apps: &[app("Firefox", Some("firefox"))],
+        windows: &[WindowEntry {
+            id: 7,
+            title: "Mozilla Firefox".into(),
+            app_id: Some("firefox".into()),
+            app_id_lc: Some("firefox".into()),
+        }],
+        files: &[],
+        recents: &[],
+        app_usage: &Default::default(),
+        app_icons: &Default::default(),
+        category: Category::Windows,
+        file_max: 50,
+        total_max: 30,
+        cached_app_rows: None,
+        cached_win_rows: None,
+        prefix: None,
+        calc: None,
+    });
+    assert_eq!(out.len(), 1);
+    assert!(matches!(out[0].kind, RowKind::Window { .. }));
 }
 
 #[test]
@@ -296,4 +324,54 @@ fn icon_letter_falls_back_to_digit_then_hash() {
     assert_eq!(icon_letter(Some("org.example.firefox")), "F");
     assert_eq!(icon_letter(Some("1234")), "1");
     assert_eq!(icon_letter(None), "#");
+}
+
+#[test]
+fn reveal_waits_for_query_pause() {
+    assert_eq!(
+        reveal_action(true, true, false),
+        RevealAction::Debounce
+    );
+    assert_eq!(
+        reveal_action(true, false, true),
+        RevealAction::ShowNow
+    );
+    assert_eq!(
+        reveal_action(true, false, false),
+        RevealAction::Hold
+    );
+    assert_eq!(
+        reveal_action(false, true, false),
+        RevealAction::Collapse
+    );
+    assert!(!wants_results("", Category::All, false));
+    assert!(wants_results("a", Category::All, false));
+    assert!(wants_results("", Category::Apps, false));
+    assert!(!wants_results("2+2", Category::All, true));
+}
+
+#[test]
+fn stale_echo_does_not_rewind_query() {
+    assert!(stale_query_snapshot(true, "fire", "f"));
+    assert!(stale_query_snapshot(true, "fir", "fire"));
+    assert!(!stale_query_snapshot(true, "fire", "fire"));
+    assert!(!stale_query_snapshot(false, "old", "from-history"));
+}
+
+#[test]
+fn reveal_delete_is_a_query_change() {
+    // Backspace/delete are local edits. Daemon-driven query changes Debounce;
+    // emptying the box Collapses.
+    assert_eq!(
+        reveal_action(true, true, false),
+        RevealAction::Debounce
+    );
+    assert_eq!(
+        reveal_action(false, true, false),
+        RevealAction::Collapse
+    );
+    assert_eq!(
+        reveal_action(true, false, false),
+        RevealAction::Hold
+    );
 }

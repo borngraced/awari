@@ -478,8 +478,16 @@ impl Dispatch<WlOutput, ()> for WlrState {
             wl_output::Event::Geometry { x, y, .. } => {
                 info.geometry = Some((x, y));
             }
-            wl_output::Event::Mode { width, height, .. } => {
-                info.mode = Some((width, height));
+            wl_output::Event::Mode {
+                flags, width, height, ..
+            } => {
+                let bits = match flags {
+                    wl::WEnum::Value(m) => u32::from(m),
+                    wl::WEnum::Unknown(v) => v,
+                };
+                if bits & 1 != 0 {
+                    info.mode = Some((width, height));
+                }
             }
             wl_output::Event::Scale { factor } => {
                 info.scale = factor;
