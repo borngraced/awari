@@ -25,6 +25,15 @@ impl Category {
         }
     }
 
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Apps => "Apps",
+            Self::Files => "Files",
+            Self::Commands => "Commands",
+        }
+    }
+
     pub(crate) fn all() -> [Category; 3] {
         [Self::Apps, Self::Files, Self::Commands]
     }
@@ -51,6 +60,10 @@ pub enum LauncherCmd {
     },
     OpenToRender {
         ms: u64,
+    },
+    SavePosition {
+        x: f32,
+        y: f32,
     },
 }
 #[derive(Clone)]

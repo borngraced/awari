@@ -2644,6 +2644,18 @@ impl Window {
         self.scale_factor
     }
 
+    /// Push a transform applied to this element and its subtree for the rest of
+    /// the current paint. Pair with [`Window::pop_element_transform`]. Used by
+    /// `Div` to implement the `scale` style.
+    pub fn push_element_transform(&mut self, matrix: TransformationMatrix) {
+        self.next_frame.scene.push_transform(matrix);
+    }
+
+    /// Pop the transform pushed by [`Window::push_element_transform`].
+    pub fn pop_element_transform(&mut self) {
+        self.next_frame.scene.pop_transform();
+    }
+
     /// Overrides the display scale factor for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scale_factor(&mut self, scale_factor: f32) {

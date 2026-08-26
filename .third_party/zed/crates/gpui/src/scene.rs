@@ -42,6 +42,7 @@ pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    transform_stack: Vec<TransformationMatrix>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -58,6 +59,7 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.transform_stack.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -84,8 +86,91 @@ impl Scene {
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
+    /// Push an element-space transform that applies to every primitive inserted
+    /// until the matching [`Scene::pop_transform`]. Transforms compose with any
+    /// already-active transform, so nested scaled elements scale correctly.
+    pub(crate) fn push_transform(&mut self, matrix: TransformationMatrix) {
+        let current = self.transform_stack.last().copied().unwrap_or_default();
+        self.transform_stack.push(current.compose(matrix));
+    }
+
+    /// Pop the most recently pushed element transform.
+    pub(crate) fn pop_transform(&mut self) {
+        self.transform_stack.pop();
+    }
+
+    /// Transform a `Bounds<ScaledPixels>` by a scale-around-origin matrix,
+    /// working entirely in scaled-pixel units (the matrix is built that way by
+    /// `Div`).
+    fn apply_matrix(bounds: Bounds<ScaledPixels>, m: &TransformationMatrix) -> Bounds<ScaledPixels> {
+        let sx = m.rotation_scale[0][0];
+        let sy = m.rotation_scale[1][1];
+        Bounds {
+            origin: Point::new(
+                ScaledPixels(sx * bounds.origin.x.0 + m.translation[0]),
+                ScaledPixels(sy * bounds.origin.y.0 + m.translation[1]),
+            ),
+            size: Size::new(
+                ScaledPixels(bounds.size.width.0 * sx),
+                ScaledPixels(bounds.size.height.0 * sy),
+            ),
+        }
+    }
+
+    /// Apply the active element transform to every variant of a primitive.
+    fn transform_primitive(primitive: &mut Primitive, m: &TransformationMatrix) {
+        let s = m.rotation_scale[0][0];
+        match primitive {
+            Primitive::Shadow(shadow) => {
+                shadow.bounds = Self::apply_matrix(shadow.bounds, m);
+                shadow.element_bounds = Self::apply_matrix(shadow.element_bounds, m);
+                shadow.content_mask.bounds = Self::apply_matrix(shadow.content_mask.bounds, m);
+                shadow.blur_radius = ScaledPixels(shadow.blur_radius.0 * s);
+                shadow.corner_radii = shadow.corner_radii.map(|r| ScaledPixels(r.0 * s));
+                shadow.element_corner_radii =
+                    shadow.element_corner_radii.map(|r| ScaledPixels(r.0 * s));
+            }
+            Primitive::Quad(quad) => {
+                quad.bounds = Self::apply_matrix(quad.bounds, m);
+                quad.content_mask.bounds = Self::apply_matrix(quad.content_mask.bounds, m);
+                quad.corner_radii = quad.corner_radii.map(|r| ScaledPixels(r.0 * s));
+                quad.border_widths = quad.border_widths.map(|w| ScaledPixels(w.0 * s));
+            }
+            Primitive::Path(path) => {
+                // Paths carry their own transformation (SVG); only adjust the
+                // bounds/mask used for draw ordering here.
+                path.bounds = Self::apply_matrix(path.bounds, m);
+                path.content_mask.bounds = Self::apply_matrix(path.content_mask.bounds, m);
+            }
+            Primitive::Underline(underline) => {
+                underline.bounds = Self::apply_matrix(underline.bounds, m);
+                underline.content_mask.bounds = Self::apply_matrix(underline.content_mask.bounds, m);
+                underline.thickness = ScaledPixels(underline.thickness.0 * s);
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                sprite.bounds = Self::apply_matrix(sprite.bounds, m);
+                sprite.content_mask.bounds = Self::apply_matrix(sprite.content_mask.bounds, m);
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                sprite.bounds = Self::apply_matrix(sprite.bounds, m);
+                sprite.content_mask.bounds = Self::apply_matrix(sprite.content_mask.bounds, m);
+            }
+            Primitive::PolychromeSprite(sprite) => {
+                sprite.bounds = Self::apply_matrix(sprite.bounds, m);
+            }
+            Primitive::Surface(surface) => {
+                surface.bounds = Self::apply_matrix(surface.bounds, m);
+                surface.content_mask.bounds = Self::apply_matrix(surface.content_mask.bounds, m);
+            }
+        }
+    }
+
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
+        let matrix = self.transform_stack.last().copied().unwrap_or_default();
+        if matrix != TransformationMatrix::default() {
+            Self::transform_primitive(&mut primitive, &matrix);
+        }
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);

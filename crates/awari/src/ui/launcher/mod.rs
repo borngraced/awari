@@ -8,15 +8,18 @@ pub const LAUNCHER_H: f32 = 1080.0;
 
 const PANEL_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
 const HEIGHT_SPRING: SpringConfig = SpringConfig::new(520.0, 48.0, 1.0);
-const ITEM_HOVER_SPRING: SpringConfig = SpringConfig::new(600.0, 52.0, 1.0);
+/// Spring driving list scroll-to-selection: near-critical, slight overshoot for
+/// a buttery glide that retargets without restarting.
+const SCROLL_SPRING: SpringConfig = SpringConfig::new(300.0, 32.0, 1.0);
+/// Settled tolerance (px) for the scroll spring.
+const SCROLL_EPSILON: f32 = 0.5;
 
 const GRID_COLS: usize = 4;
-const SLIDE: f32 = 10.0;
-const SEARCH_H: f32 = 68.0;
-const PANEL_H: f32 = 560.0;
+/// Minimum scale while the overlay is closed, so it eases in/out from ~96%.
+const SCALE_MIN: f32 = 0.96;
+const SEARCH_H: f32 = 50.0;
 const ICON_LIST: f32 = 30.0;
 const ICON_GRID: f32 = 50.0;
-const AWARI_MARK: &[u8] = include_bytes!("../../../assets/icons/awari_mark.svg");
 
 pub mod types;
 pub mod scoring;

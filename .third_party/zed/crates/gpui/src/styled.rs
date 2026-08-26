@@ -748,6 +748,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets a uniform scale factor for this element and its subtree, anchored
+    /// at the element's center.
+    fn scale(mut self, scale: f32) -> Self {
+        self.style().scale = Some(scale);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {

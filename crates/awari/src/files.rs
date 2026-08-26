@@ -376,12 +376,19 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
     if n > m {
         return None;
     }
-    // prev[j]: best score matching the first (i-1) needle chars, ending at
-    // haystack position (j-1). MIN marks "no match ends here".
+    // prev[j]: best score matching the first (i-1) needle chars ending at
+    // haystack position (j-1), carried forward as a running max. prev_exact[j]
+    // is the same score but only when a match ends EXACTLY at j — it is never
+    // carried forward, so it records the real last-matched position. The gapped
+    // path uses the carried `prev` (best so far); the consecutive path uses
+    // `prev_exact` so a carried plateau can't fake adjacency.
     let mut prev = vec![i32::MIN; m + 1];
-    let mut best = i32::MIN;
+    let mut prev_exact = vec![i32::MIN; m + 1];
+    let mut cur = vec![i32::MIN; m + 1];
+    let mut cur_exact = vec![i32::MIN; m + 1];
     for i in 1..=n {
-        let mut cur = vec![i32::MIN; m + 1];
+        cur.fill(i32::MIN);
+        cur_exact.fill(i32::MIN);
         let mut best_prev_excl = i32::MIN; // max prev[k] for k < j-1 (gapped path)
         let nc = needle[i - 1].to_ascii_lowercase();
         let mut prev_c: Option<char> = None;
@@ -404,13 +411,15 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
                     let s = bonus - (j as i32 - 1) * SCORE_LEAD;
                     if s > cur[j] {
                         cur[j] = s;
+                        cur_exact[j] = s;
                     }
                 } else {
-                    // Consecutive: previous char matched at j-2 (prev[j-1]).
-                    if prev[j - 1] != i32::MIN {
-                        let s = prev[j - 1] + SCORE_CONSECUTIVE;
+                    // Consecutive: previous needle char matched EXACTLY at j-1.
+                    if prev_exact[j - 1] != i32::MIN {
+                        let s = prev_exact[j - 1] + SCORE_CONSECUTIVE;
                         if s > cur[j] {
                             cur[j] = s;
+                            cur_exact[j] = s;
                         }
                     }
                     // Gapped: previous char matched somewhere before j-2.
@@ -418,6 +427,7 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
                         let s = best_prev_excl + bonus;
                         if s > cur[j] {
                             cur[j] = s;
+                            cur_exact[j] = s;
                         }
                     }
                 }
@@ -428,19 +438,25 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
             }
             prev_c = Some(c);
         }
-        prev = cur;
+        // This row becomes prev for the next needle char; reuse the buffers.
+        std::mem::swap(&mut prev, &mut cur);
+        std::mem::swap(&mut prev_exact, &mut cur_exact);
     }
-    // Only a full match (the final row) counts; partial matches from earlier
-    // rows must not leak through as the score.
-    for (j, pv) in prev.iter().copied().enumerate().skip(1).take(m) {
-        if pv != i32::MIN {
-            let trail = (m - j) as i32 * SCORE_TRAIL;
-            let sc = pv - trail;
-            if sc > best {
-                best = sc;
-            }
-        }
-    }
+    // Only a full match (the final row) counts. The real last-matched position
+    // is the highest j with an exact match there; penalize the unmatched tail.
+    let last_match = prev_exact
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, v)| **v != i32::MIN)
+        .map(|(j, _)| j as i32)
+        .max()
+        .unwrap_or(0);
+    let best = if last_match == 0 {
+        i32::MIN
+    } else {
+        prev[m] - (m as i32 - last_match) * SCORE_TRAIL
+    };
     (best != i32::MIN).then_some(best)
 }
 
@@ -917,6 +933,19 @@ mod tests {
         assert!(subsequence_score("heap", "heaptrace.rs").is_some());
         assert!(subsequence_score("head", "head.rs").is_some());
         assert!(subsequence_score("head", "src/headless.rs").is_some());
+    }
+
+    #[test]
+    fn subsequence_consecutive_requires_adjacency() {
+        // "ab" in "axb" is gapped (a at 1, x at 2, b at 3): the consecutive
+        // bonus must NOT fire across the gap. "ab" in "abx" is truly
+        // consecutive (a at 1, b at 2). The gapped match scores below the
+        // consecutive one, and an exact (no trailing) match above both.
+        let gapped = subsequence_score("ab", "axb").unwrap();
+        let consecutive = subsequence_score("ab", "abx").unwrap();
+        let exact = subsequence_score("ab", "ab").unwrap();
+        assert!(gapped < consecutive, "{gapped} < {consecutive}");
+        assert!(consecutive < exact, "{consecutive} < {exact}");
     }
 
     #[test]

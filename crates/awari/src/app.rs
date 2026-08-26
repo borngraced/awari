@@ -112,6 +112,13 @@ pub struct Daemon {
     /// Reused on the re-render that fires when file results arrive so the
     /// expensive `matchq` scoring + sort doesn't run twice per keystroke.
     appwin_cache: Option<AppWinCache>,
+    /// Debounce task for panel expansion — delayed until the user pauses typing.
+    height_debounce: Option<Task<()>>,
+    /// Whether the panel is allowed to expand (debounced, not immediate).
+    panel_expanded: bool,
+    /// Panel position offset from default center-top position.
+    panel_offset_x: f32,
+    panel_offset_y: f32,
 }
 
 /// Cache key for `last_rows`: a row set is reusable when none of these inputs
@@ -245,6 +252,10 @@ impl Daemon {
             last_rows: None,
             last_rows_key: None,
             appwin_cache: None,
+            height_debounce: None,
+            panel_expanded: false,
+            panel_offset_x: 0.0,
+            panel_offset_y: 0.0,
         };
         spawn_compositor_pump(cx, inbox);
         if let Some(files_rx) = files_rx {
@@ -261,6 +272,7 @@ impl Daemon {
             .ok();
         daemon.load_history();
         daemon.load_usage();
+        daemon.load_position();
         daemon
     }
 
@@ -421,9 +433,11 @@ impl Daemon {
             });
             rows
         };
+
         if self.launcher_selected >= rows.len() {
             self.launcher_selected = rows.len().saturating_sub(1);
         }
+
         let view = LauncherView {
             open: self.launcher_open,
             query: self.launcher_query.clone(),
@@ -433,6 +447,9 @@ impl Daemon {
             category: self.launcher_category,
             files_enabled: self.cfg.sources.files,
             calc: calc.clone(),
+            panel_expanded: self.panel_expanded,
+            panel_offset_x: self.panel_offset_x,
+            panel_offset_y: self.panel_offset_y,
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
@@ -564,6 +581,7 @@ impl Daemon {
                 if self.launcher_category != category {
                     self.launcher_category = category;
                     self.launcher_selected = 0;
+                    self.height_debounce.take();
                     self.sync_launcher(cx);
                 }
             }
@@ -574,10 +592,27 @@ impl Daemon {
                 if self.launcher_query != query {
                     self.launcher_query = query;
                     self.launcher_selected = 0;
-                    // Typing returns to the live query, leaving history recall.
                     self.history_cursor = None;
                     self.history_live = None;
                     self.refresh_file_hits();
+                    // Debounce expansion: collapse instantly, expand after pause.
+                    self.height_debounce.take();
+                    if self.launcher_query.trim().is_empty() {
+                        self.panel_expanded = false;
+                    } else if !self.panel_expanded {
+                        let debounce = cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(150))
+                                .await;
+                            if let Some(daemon) = this.upgrade() {
+                                daemon.update(cx, |d, cx| {
+                                    d.panel_expanded = true;
+                                    d.sync_launcher(cx);
+                                });
+                            }
+                        });
+                        self.height_debounce = Some(debounce);
+                    }
                     self.sync_launcher(cx);
                 }
             }
@@ -590,6 +625,11 @@ impl Daemon {
                 {
                     tracing::info!(ms = cold, "cold start: spawn → first frame");
                 }
+            }
+            LauncherCmd::SavePosition { x, y } => {
+                self.panel_offset_x = x;
+                self.panel_offset_y = y;
+                self.save_position();
             }
         }
     }
@@ -643,6 +683,8 @@ impl Daemon {
 
     fn dismiss_launcher(&mut self, cx: &mut Context<Self>) {
         let cfg_motion_ms = self.cfg.motion.duration_ms as u64;
+        self.height_debounce.take();
+        self.save_position();
         self.launcher_open = false;
         // Tell the daemon the overlay is now actually hidden. This is what keeps
         // the daemon's `visible` flag in sync when the dismiss is triggered
@@ -676,7 +718,6 @@ impl Daemon {
             }
             return;
         };
-        let theme = self.cfg.theme.clone();
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
         cx.defer(move |cx| {
@@ -686,8 +727,7 @@ impl Daemon {
                 return;
             }
             let _ = h.update(cx, |l, window, cx| {
-                l.apply_view(LauncherView::closed(theme), cx);
-                l.closing = true;
+                l.begin_close(cx);
                 window.set_input_region(Some(&[]));
                 window.set_keyboard_interactivity(gpui::layer_shell::KeyboardInteractivity::None);
                 cx.notify();
@@ -707,6 +747,11 @@ impl Daemon {
                     }
                     if !d.keep_alive || d.quit_after_close {
                         cx.quit();
+                    } else if let Some(h) = d.launcher {
+                        let _ = h.update(cx, |l, _window, cx| {
+                            l.closing = false;
+                            cx.notify();
+                        });
                     }
                 });
             }
@@ -823,6 +868,30 @@ impl Daemon {
             .map(|(k, v)| format!("{}\t{}", k, v))
             .collect();
         let _ = fs::write(dir.join("usage"), body.join("\n"));
+    }
+
+    /// Load panel position offset from `$XDG_RUNTIME_DIR/.awari/position`.
+    fn load_position(&mut self) {
+        let path = awari_ipc::runtime_dir().join("position");
+        if let Ok(s) = fs::read_to_string(&path) {
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            if parts.len() == 2
+                && let (Ok(x), Ok(y)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
+            {
+                self.panel_offset_x = x;
+                self.panel_offset_y = y;
+            }
+        }
+    }
+
+    /// Persist panel position offset to `position` as `x y`.
+    fn save_position(&self) {
+        let dir = awari_ipc::runtime_dir();
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(
+            dir.join("position"),
+            format!("{} {}", self.panel_offset_x, self.panel_offset_y),
+        );
     }
 
     fn refresh_file_hits(&mut self) {

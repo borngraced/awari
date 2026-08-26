@@ -23,7 +23,8 @@ use crate::{
     LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
     PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
+    StyleRefinement, Styled, Task, TooltipId, TransformationMatrix, Visibility, Window,
+    WindowControlArea, point, px,
     size,
 };
 use collections::HashMap;
@@ -1963,6 +1964,21 @@ impl Element for Div {
             .as_mut()
             .map(|provider| provider.provide(window, cx));
 
+        // A non-unit scale transforms the element and its subtree around its
+        // center for this paint. The matrix is expressed in scaled-pixel units.
+        let transform = self.style().scale.map(|scale| {
+            let scale_factor = window.scale_factor();
+            let center_x = (bounds.origin.x.0 + bounds.size.width.0 / 2.0) * scale_factor;
+            let center_y = (bounds.origin.y.0 + bounds.size.height.0 / 2.0) * scale_factor;
+            TransformationMatrix {
+                rotation_scale: [[scale, 0.0], [0.0, scale]],
+                translation: [center_x * (1.0 - scale), center_y * (1.0 - scale)],
+            }
+        });
+        if let Some(matrix) = transform {
+            window.push_element_transform(matrix);
+        }
+
         window.with_image_cache(image_cache, |window| {
             self.interactivity.paint(
                 global_id,
@@ -1983,6 +1999,10 @@ impl Element for Div {
                 },
             )
         });
+
+        if transform.is_some() {
+            window.pop_element_transform();
+        }
     }
 }
 

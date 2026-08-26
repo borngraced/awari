@@ -1,10 +1,9 @@
 use gpui::prelude::*;
 use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    Image, ImageFormat, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
-    Pixels, Point, Render, Rgba, ScrollStrategy, SharedString, SpringAnimation, Styled,
-    StyledImage, StyledText, UniformListScrollHandle, WeakEntity, Window, div, img, px,
-    uniform_list,
+    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Point, Render,
+    ScrollStrategy, SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText,
+    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -14,23 +13,14 @@ use std::time::{Duration, Instant};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    AWARI_MARK, GRID_COLS, HEIGHT_SPRING, ICON_GRID, ICON_LIST, ITEM_HOVER_SPRING, LAUNCHER_W,
-    PANEL_H, PANEL_SPRING, SEARCH_H, SLIDE,
+    GRID_COLS, HEIGHT_SPRING, ICON_GRID, ICON_LIST, LAUNCHER_W, PANEL_SPRING, SCALE_MIN,
+    SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
 use crate::ui::icon::Icon;
 use crate::ui::theme::Theme;
 
-fn mix(a: &Rgba, b: &Rgba, t: f32) -> Rgba {
-    let t = t.clamp(0.0, 1.0);
-    Rgba {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: a.a + (b.a - a.a) * t,
-    }
-}
 #[derive(Clone)]
 pub struct LauncherView {
     pub open: bool,
@@ -44,6 +34,11 @@ pub struct LauncherView {
     /// launcher shows it as an inline ghost (` = <result>`) instead of a list
     /// row, and Enter copies it / Tab accepts it as the new input.
     pub calc: Option<String>,
+    /// Whether the panel is allowed to expand (debounced, not immediate).
+    pub panel_expanded: bool,
+    /// Panel position offset from default center-top position.
+    pub panel_offset_x: f32,
+    pub panel_offset_y: f32,
 }
 
 fn action_menu_top(row_top: Pixels, item_h: Pixels, menu_h: Pixels, viewport: Pixels) -> Pixels {
@@ -68,6 +63,9 @@ impl LauncherView {
             category: Category::All,
             files_enabled: true,
             calc: None,
+            panel_expanded: false,
+            panel_offset_x: 0.0,
+            panel_offset_y: 0.0,
         }
     }
 }
@@ -87,9 +85,9 @@ pub struct Launcher {
     scrolled_to: Option<usize>,
     scroll_target: Option<Pixels>,
     scroll_anim_gen: u64,
+    scroll_spring: SpringState,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
-    hovered: Option<usize>,
     hovered_chip: Option<Category>,
     /// Last row index we posted a `Select` for, so pointer-move spam over the
     /// same row doesn't round-trip through the daemon.
@@ -113,6 +111,11 @@ pub struct Launcher {
     /// cursor sits at the end and the query is unchanged; any edit or query
     /// swap clears it.
     accepted: Option<(String, usize)>,
+    /// Drag state: (origin_x, origin_y) in screen coords when drag started.
+    dragging: Option<(f32, f32)>,
+    /// View-side panel position offset (avoids IPC round-trip on every mouse move).
+    panel_offset_x: f32,
+    panel_offset_y: f32,
 }
 
 impl Launcher {
@@ -132,9 +135,9 @@ impl Launcher {
             scrolled_to: None,
             scroll_target: None,
             scroll_anim_gen: 0,
+            scroll_spring: SpringState::default(),
             open_started: None,
             closing: false,
-            hovered: None,
             hovered_chip: None,
             last_select: None,
             last_input_open: None,
@@ -143,14 +146,20 @@ impl Launcher {
             blink_running: false,
             action_menu: None,
             accepted: None,
+            dragging: None,
+            panel_offset_x: 0.0,
+            panel_offset_y: 0.0,
         }
     }
 
     pub fn apply_view(&mut self, view: LauncherView, cx: &mut Context<Self>) {
+        let was_open = self.view.open;
+
         if self.view.query != view.query || self.view.category != view.category {
             self.scrolled_to = None;
             self.scroll_target = None;
             self.scroll_anim_gen = self.scroll_anim_gen.wrapping_add(1);
+            self.scroll_spring = SpringState::default();
         }
 
         if self.view.query != view.query || self.view.selected != view.selected {
@@ -166,12 +175,32 @@ impl Launcher {
 
         if self.view.open {
             self.closing = false;
+            if !was_open {
+                self.panel_offset_x = self.view.panel_offset_x;
+                self.panel_offset_y = self.view.panel_offset_y;
+            }
             self.ensure_blink(cx);
         } else {
             self.cursor = 0;
             self.caret_on = true;
             self.stop_blink();
         }
+    }
+
+    /// Begin the close animation without discarding the current content.
+    ///
+    /// Flipping only `view.open` makes the panel/height springs retarget to
+    /// their closed state, so the overlay fades and slides out, while the
+    /// query, rows, theme and category stay intact through the fade. The old
+    /// path replaced the whole view with `closed`, blanking the panel and
+    /// collapsing its height on the first frame so nothing visibly animated.
+    pub(crate) fn begin_close(&mut self, cx: &mut Context<Self>) {
+        self.view.open = false;
+        self.closing = true;
+        self.action_menu = None;
+        self.accepted = None;
+        self.stop_blink();
+        cx.notify();
     }
 
     /// Run the caret timer only while the overlay is open. The task parks in
@@ -297,11 +326,7 @@ impl Launcher {
                 .items_center()
                 .flex_none()
                 .child(caret)
-                .child(
-                    div()
-                        .text_color(t.muted())
-                        .child("Search apps, files, and commands"),
-                )
+                .child(div().text_color(t.muted()).child("Awari search"))
                 .into_any_element();
         }
         let token_len = command_token_len(q);
@@ -331,7 +356,10 @@ impl Launcher {
             if let Some(result) = &self.view.calc {
                 Some(format!(" = {}", result))
             } else {
-                self.view.rows.first().and_then(|r| ghost_suffix(q, &r.label))
+                self.view
+                    .rows
+                    .first()
+                    .and_then(|r| ghost_suffix(q, &r.label))
             }
         } else {
             None
@@ -437,6 +465,34 @@ fn icon_slot(row: &LauncherRow, selected: bool, t: &Theme, size: f32, radius: f3
     }
 }
 
+fn first_result_icon(row: &LauncherRow, t: &Theme) -> gpui::Div {
+    let size = 22.0;
+    let tile = div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(t.surface());
+
+    match &row.kind {
+        RowKind::File { .. } => tile.child(Icon::File.element_px(t.muted(), size * 0.58)),
+        _ => match &row.resolved_icon {
+            Some(path) => tile.overflow_hidden().child(
+                img(path.clone())
+                    .size(px(size))
+                    .object_fit(ObjectFit::Contain)
+                    .flex_none(),
+            ),
+            None => tile
+                .text_color(t.muted())
+                .text_xs()
+                .child(icon_letter(Some(&row.label))),
+        },
+    }
+}
+
 fn highlighted_name(label: &str, q: &[char], t: &Theme) -> StyledText {
     let accent = HighlightStyle {
         color: Some(t.accent().into()),
@@ -533,52 +589,56 @@ impl Launcher {
             return;
         }
 
+        // Ease to `target` with a spring; re-sync its position to the live
+        // offset each frame so manual scrolls retarget seamlessly.
         self.scroll_target = Some(target);
         let anim_gen = self.scroll_anim_gen.wrapping_add(1);
         self.scroll_anim_gen = anim_gen;
 
         cx.spawn(async move |this, cx| {
+            let mut last = Instant::now();
             loop {
-                let current = this
-                    .update(cx, |l, _| l.scroll.0.borrow().base_handle.offset().y)
-                    .unwrap_or(px(0.0));
-                let target_y = this
-                    .update(cx, |l, _| l.scroll_target)
-                    .unwrap_or(None)
-                    .unwrap_or(current);
-
                 if this
                     .update(cx, |l, _| l.scroll_anim_gen != anim_gen)
                     .unwrap_or(true)
                 {
                     break;
                 }
-                let next = current + (target_y - current) * 0.35;
-                if (target_y - next).abs() < px(0.5) {
-                    let _ = this.update(cx, |l, cx| {
-                        l.scroll
-                            .0
-                            .borrow()
-                            .base_handle
-                            .set_offset(Point::new(px(0.0), target_y));
-                        l.scroll_target = None;
+                let (target_y, spring) = this
+                    .update(cx, |l, _| {
+                        let live: f32 = l.scroll.0.borrow().base_handle.offset().y.into();
+                        l.scroll_spring.position = live;
+                        (l.scroll_target.map(|p| p.into()), l.scroll_spring)
+                    })
+                    .unwrap_or((None, SpringState::default()));
+                let Some(target_y) = target_y else { break };
 
-                        cx.notify();
-                    });
+                let now = Instant::now();
+                let dt = now.duration_since(last).as_secs_f32().clamp(0.0, 0.064);
+                last = now;
 
-                    break;
-                }
+                let next = SCROLL_SPRING.step(spring, target_y, dt);
+                let settled = SCROLL_SPRING.is_settled(next, target_y, SCROLL_EPSILON);
+
                 let _ = this.update(cx, |l, cx| {
+                    l.scroll_spring = next;
                     l.scroll
                         .0
                         .borrow()
                         .base_handle
-                        .set_offset(Point::new(px(0.0), next));
+                        .set_offset(Point::new(px(0.0), px(next.position)));
+                    if settled {
+                        l.scroll_target = None;
+                    }
                     cx.notify();
                 });
+
+                if settled {
+                    break;
+                }
                 let _ = cx
                     .background_executor()
-                    .timer(Duration::from_millis(16))
+                    .timer(Duration::from_millis(8))
                     .await;
             }
         })
@@ -586,7 +646,6 @@ impl Launcher {
     }
 
     fn tile(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let this = cx.entity();
         let Some(row) = self.view.rows.get(i) else {
             return div()
                 .id(("launch-tile-empty", i))
@@ -596,9 +655,7 @@ impl Launcher {
                 .into_any_element();
         };
         let selected = i == self.view.selected;
-        let hv = if self.hovered == Some(i) { 1.0f32 } else { 0.0 };
         let base = if selected { t.select() } else { t.ghost() };
-        let hover_col = t.select();
 
         div()
             .id(("launch-tile", i))
@@ -613,16 +670,6 @@ impl Launcher {
             .px(px(8.))
             .rounded(px(10.))
             .bg(base)
-            .on_hover(move |h: &bool, _window, cx: &mut App| {
-                this.update(cx, |l, cx| {
-                    if *h {
-                        l.hovered = Some(i);
-                    } else if l.hovered == Some(i) {
-                        l.hovered = None;
-                    }
-                    cx.notify();
-                });
-            })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if this.last_select != Some(i) {
@@ -647,23 +694,15 @@ impl Launcher {
                     .truncate()
                     .child(row.label.clone()),
             )
-            .with_spring(
-                ("launch-tile-hover", i as u64),
-                SpringAnimation::new(ITEM_HOVER_SPRING).to(hv).from(0.0),
-                move |el, v| el.bg(mix(&base, &hover_col, v)),
-            )
             .into_any_element()
     }
 
     fn list_row(&self, i: usize, t: &Theme, q: &[char], cx: &mut Context<Self>) -> AnyElement {
-        let this = cx.entity();
         let Some(row) = self.view.rows.get(i) else {
             return div().id(("launch-row-empty", i)).into_any_element();
         };
         let selected = i == self.view.selected;
-        let hv = if self.hovered == Some(i) { 1.0f32 } else { 0.0 };
         let base = if selected { t.select() } else { t.ghost() };
-        let hover_col = t.select();
 
         div()
             .id(("launch-row", i))
@@ -671,22 +710,13 @@ impl Launcher {
             .items_center()
             .gap(px(14.))
             .w_full()
+            .h(px(row_h))
             .min_w_0()
             .overflow_hidden()
             .px(px(12.))
             .py(px(11.))
             .rounded(px(9.))
             .bg(base)
-            .on_hover(move |h: &bool, _window, cx: &mut App| {
-                this.update(cx, |l, cx| {
-                    if *h {
-                        l.hovered = Some(i);
-                    } else if l.hovered == Some(i) {
-                        l.hovered = None;
-                    }
-                    cx.notify();
-                });
-            })
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if this.last_select != Some(i) {
@@ -724,11 +754,6 @@ impl Launcher {
                             .child(row.subtitle.clone().unwrap_or_default()),
                     ),
             )
-            .with_spring(
-                ("launch-row-hover", i as u64),
-                SpringAnimation::new(ITEM_HOVER_SPRING).to(hv).from(0.0),
-                move |el, v| el.bg(mix(&base, &hover_col, v)),
-            )
             .into_any_element()
     }
 }
@@ -737,8 +762,7 @@ impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animating = self.view.open || self.closing;
         let open = self.view.open;
-        // set_input_region / focus only change on open-close transitions;
-        // skip the no-op churn on every animation frame.
+
         if self.last_input_open != Some(open) {
             window.set_input_region(if open { None } else { Some(&[]) });
             self.last_input_open = Some(open);
@@ -755,6 +779,7 @@ impl Render for Launcher {
         } else if !open {
             self.focused = false;
         }
+
         let target = if open { 1.0f32 } else { 0.0 };
 
         if let Some(t0) = self.open_started.take() {
@@ -763,8 +788,6 @@ impl Render for Launcher {
         }
 
         let t = self.view.theme.clone();
-        // Font customization: a rem override scales every text_* token at
-        // once; the family refines the root div so all children inherit.
         if let Some(size) = t.font_size {
             window.set_rem_size(px(size as f32));
         }
@@ -787,8 +810,31 @@ impl Render for Launcher {
         };
         let browsing_grid = cat == Category::Apps && q_empty;
         let show_results = (!q_empty || cat != Category::All) && self.view.calc.is_none();
-        let compact = q_empty && cat == Category::All;
-        let panel_h = if compact { SEARCH_H } else { PANEL_H };
+        let expanded = show_results && self.view.panel_expanded;
+        let max_panel_h: f32 = 500.0;
+        let search_bar_h: f32 = SEARCH_H;
+        let chips_h: f32 = if expanded { 36.0 } else { 0.0 };
+        let panel_pad: f32 = if expanded { 16.0 } else { 0.0 };
+        let measured_row_h = self
+            .scroll
+            .0
+            .borrow()
+            .base_handle
+            .bounds_for_item(0)
+            .map(|b| b.size.height);
+        let row_h: f32 = measured_row_h.unwrap_or(px(56.0)).into();
+        let n_rows = if expanded {
+            self.view.rows.len().min(8)
+        } else {
+            0
+        };
+        // let panel_h =
+        //     (search_bar_h + chips_h + panel_pad + (n_rows as f32 * row_h)).min(max_panel_h);
+        // let panel_h = panel_h.max(search_bar_h);
+        let has_rows = n_rows > 0;
+        let extra = if has_rows { chips_h + panel_pad } else { 0.0 };
+        let panel_h = (search_bar_h + extra + (n_rows as f32 * row_h))
+            .clamp(search_bar_h, max_panel_h.max(search_bar_h));
         self.keep_selected_visible(browsing_grid, cx);
 
         let mut results = div()
@@ -798,7 +844,8 @@ impl Render for Launcher {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .p(px(8.));
+            .p(px(8.))
+            .mb(px(8.));
         results = results.w_full();
         if self.view.rows.is_empty() {
             results = results.child(
@@ -839,6 +886,8 @@ impl Render for Launcher {
             let n = self.view.rows.len();
             let t_list = t.clone();
             let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
+            let list_h = (n as f32 * row_h).min(max_panel_h - search_bar_h - chips_h - panel_pad);
+
             results = results.child(
                 uniform_list(
                     "launch-list",
@@ -851,11 +900,11 @@ impl Render for Launcher {
                 )
                 .track_scroll(&self.scroll)
                 .flex_1()
-                .h_full(),
+                .h(px(list_h)),
             );
         }
 
-        let mut cat_icons = div().flex().flex_none().items_center().gap(px(14.));
+        let mut cat_icons = div().flex().flex_none().items_center().gap(px(6.));
         let this = cx.entity();
         let files_enabled = self.view.files_enabled;
         for c in Category::all() {
@@ -866,14 +915,19 @@ impl Render for Launcher {
             let cc = c;
             let this = this.clone();
             let icon_col = if active { t.accent() } else { t.muted() };
+            let text_col = if active { t.accent() } else { t.muted() };
             cat_icons = cat_icons.child(
                 div()
-                    .id(("cat-icon", c as u64))
+                    .id(("cat-chip", c as u64))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .gap(px(4.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(999.))
                     .cursor_pointer()
+                    .when(active, |el| el.bg(t.select()))
                     .on_hover(move |h: &bool, _window, cx: &mut App| {
                         this.update(cx, |l, cx| {
                             if *h {
@@ -895,7 +949,14 @@ impl Render for Launcher {
                             post(this, cx, LauncherCmd::SetCategory { category: next });
                         }),
                     )
-                    .child(c.icon().element_px(icon_col, 20.0)),
+                    .child(c.icon().element_px(icon_col, 14.0))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_col)
+                            .child(c.label()),
+                    ),
             );
         }
 
@@ -967,23 +1028,72 @@ impl Render for Launcher {
             .overflow_hidden()
             .border_t_1()
             .border_color(t.border())
-            .child(results)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .when(!self.view.rows.is_empty() || browsing_grid, |el| {
+                el.child(results)
+            })
             .when_some(action_menu_el, |el, menu| el.child(menu));
 
         let search_focus = self.focus_handle.clone();
+        let offset_x = self.panel_offset_x;
+        let offset_y = self.panel_offset_y;
         div()
             .id("launcher-root")
             .track_focus(&search_focus)
             .relative()
             .flex()
-            .items_center()
             .justify_center()
             .w_full()
             .h_full()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    post(this, cx, LauncherCmd::Dismiss);
+                    if this.dragging.is_none() {
+                        post(this, cx, LauncherCmd::Dismiss);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _, cx| {
+                if let Some((ox, oy)) = this.dragging.take() {
+                    let x: f32 = ev.position.x.into();
+                    let y: f32 = ev.position.y.into();
+                    this.panel_offset_x += x - ox;
+                    this.panel_offset_y += y - oy;
+                    this.dragging = Some((x, y));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.dragging.take().is_some() {
+                        post(
+                            this,
+                            cx,
+                            LauncherCmd::SavePosition {
+                                x: this.panel_offset_x,
+                                y: this.panel_offset_y,
+                            },
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.dragging.take().is_some() {
+                        post(
+                            this,
+                            cx,
+                            LauncherCmd::SavePosition {
+                                x: this.panel_offset_x,
+                                y: this.panel_offset_y,
+                            },
+                        );
+                    }
                 }),
             )
             .when_some(font_family, |root, family| root.font_family(family))
@@ -1103,9 +1213,13 @@ impl Render for Launcher {
                     .id("launcher-panel-wrap")
                     .relative()
                     .flex_none()
+                    .mt(px(80.0 + offset_y))
+                    .ml(px(offset_x))
                     .with_spring(
                         "launcher-panel-h",
-                        SpringAnimation::new(HEIGHT_SPRING).to(panel_h).from(0.0),
+                        SpringAnimation::new(HEIGHT_SPRING)
+                            .to(panel_h)
+                            .from(panel_h),
                         |el, h| el.h(px(h)),
                     )
                     .child(
@@ -1130,22 +1244,55 @@ impl Render for Launcher {
                             )
                             .child(
                                 div()
+                                    .id("search-bar")
                                     .flex()
                                     .flex_none()
                                     .items_center()
-                                    .gap(px(12.))
-                                    .px(px(20.))
-                                    .py(px(16.))
-                                    .child(
-                                        div().h(px(32.)).flex().items_center().flex_none().child(
-                                            img(Arc::new(Image::from_bytes(
-                                                ImageFormat::Svg,
-                                                AWARI_MARK.to_vec(),
-                                            )))
-                                            .size(px(32.))
-                                            .flex_none(),
-                                        ),
+                                    .gap(px(10.))
+                                    .px(px(16.))
+                                    .py(px(12.))
+                                    .cursor_grab()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            let x: f32 = ev.position.x.into();
+                                            let y: f32 = ev.position.y.into();
+                                            this.dragging = Some((x, y));
+                                            cx.notify();
+                                        }),
                                     )
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.dragging.take().is_some() {
+                                                post(
+                                                    this,
+                                                    cx,
+                                                    LauncherCmd::SavePosition {
+                                                        x: this.panel_offset_x,
+                                                        y: this.panel_offset_y,
+                                                    },
+                                                );
+                                            }
+                                        }),
+                                    )
+                                    .on_mouse_up_out(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.dragging.take().is_some() {
+                                                post(
+                                                    this,
+                                                    cx,
+                                                    LauncherCmd::SavePosition {
+                                                        x: this.panel_offset_x,
+                                                        y: this.panel_offset_y,
+                                                    },
+                                                );
+                                            }
+                                        }),
+                                    )
+                                    .child(Icon::Search.element_px(t.muted(), 20.0))
                                     .child(
                                         div()
                                             .id("query-wrap")
@@ -1154,7 +1301,6 @@ impl Render for Launcher {
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .mt(px(2.))
                                             .when_some(t.font.clone(), |el, f| el.font_family(f))
                                             .text_size(px(24.))
                                             .line_height(px(24.))
@@ -1163,14 +1309,28 @@ impl Render for Launcher {
                                             .overflow_hidden()
                                             .child(self.query_element())
                                             .child(div().flex_1().min_w_0())
-                                            .child(cat_icons),
+                                            .when_some(self.view.rows.first(), |el, row| {
+                                                el.child(first_result_icon(row, &t))
+                                            }),
                                     ),
                             )
-                            .when(show_results, |el| el.child(results_body))
+                            .when(expanded, |el| {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .px(px(20.))
+                                        .py(px(8.))
+                                        .child(cat_icons),
+                                )
+                                .child(results_body)
+                            })
                             .with_spring(
                                 "launcher-panel",
                                 SpringAnimation::new(PANEL_SPRING).to(target).from(0.0),
-                                |el, v| el.mt(px((1.0 - v) * SLIDE)).opacity(v),
+                                move |el, p| el.opacity(p).scale(SCALE_MIN + p * (1.0 - SCALE_MIN)),
                             ),
                     ),
             )
