@@ -1067,8 +1067,7 @@ impl Render for Launcher {
                         }),
                     )
                     .track_scroll(&self.scroll)
-                    .flex_1()
-                    .h_full(),
+                    .h(px(n as f32 * GRID_ROW_H)),
                 );
             } else {
                 let n = self.view.rows.len();
@@ -1087,7 +1086,6 @@ impl Render for Launcher {
                         }),
                     )
                     .track_scroll(&self.scroll)
-                    .flex_1()
                     .h(px(list_h)),
                 );
             }
