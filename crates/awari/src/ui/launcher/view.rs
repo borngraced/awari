@@ -1,8 +1,8 @@
 use gpui::prelude::*;
 use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Point, Render,
-    SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText, Task,
+    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Render,
+    ScrollStrategy, SharedString, SpringAnimation, Styled, StyledImage, StyledText, Task,
     UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
 use std::ops::Range;
@@ -13,9 +13,8 @@ use std::time::{Duration, Instant};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H,
-    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H, SOURCE_LIST_H,
-    motion_spring,
+    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H,
+    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H, motion_spring,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -129,10 +128,6 @@ pub struct Launcher {
     caret_on: bool,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
-    scrolled_to: Option<usize>,
-    scroll_target: Option<Pixels>,
-    scroll_spring: SpringState,
-    scroll_last: Instant,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
     /// Hovered source-list row (empty-state menu), tracked separately from the
@@ -165,8 +160,6 @@ pub struct Launcher {
     /// View-side panel position offset (avoids IPC round-trip on every mouse move).
     panel_offset_x: f32,
     panel_offset_y: f32,
-    /// Row count used for panel height, applied only when results are revealed.
-    fit_rows: usize,
     /// Results (and panel growth) are shown only after typing pauses, or
     /// immediately on a category click.
     fit_expanded: bool,
@@ -197,10 +190,6 @@ impl Launcher {
             caret_on: true,
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
-            scrolled_to: None,
-            scroll_target: None,
-            scroll_spring: SpringState::default(),
-            scroll_last: Instant::now(),
             open_started: None,
             closing: false,
             hovered_source: None,
@@ -214,7 +203,6 @@ impl Launcher {
             dragging: None,
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
-            fit_rows: 0,
             fit_expanded: false,
             height_debounce: None,
             reveal_gen: 0,
@@ -264,18 +252,12 @@ impl Launcher {
             self.cursor = self.view.query.len();
             self.accepted = None;
             self.local_query_dirty = false;
-            self.scrolled_to = None;
-            self.scroll_target = None;
-            self.scroll_spring = SpringState::default();
             self.action_menu = None;
         } else {
             self.local_query_dirty = false;
         }
 
         if category_changed {
-            self.scrolled_to = None;
-            self.scroll_target = None;
-            self.scroll_spring = SpringState::default();
             self.action_menu = None;
         } else if self.view.selected != incoming.selected {
             self.action_menu = None;
@@ -293,6 +275,23 @@ impl Launcher {
         self.view.panel_offset_y = incoming.panel_offset_y;
         self.view.motion_ms = incoming.motion_ms;
         self.last_select = Some(self.view.selected);
+
+        // Keep the highlighted row in view. `scroll_to_item` is the uniform
+        // list's own deferred-scroll primitive: it no-ops when the row is
+        // already visible and otherwise glides it into view, without the
+        // hand-rolled offset/spring bookkeeping that could drift out of sync
+        // with the actual laid-out items (e.g. after a file-results refresh
+        // re-lays out the list).
+        if self.view.open && !self.view.rows.is_empty() {
+            let browsing_grid =
+                self.view.category == Category::Apps && self.view.query.trim().is_empty();
+            let ix = if browsing_grid {
+                self.view.selected / GRID_COLS
+            } else {
+                self.view.selected
+            };
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
 
         let wants = wants_results(
             &self.view.query,
@@ -350,22 +349,19 @@ impl Launcher {
         self.reveal_gen = self.reveal_gen.wrapping_add(1);
         self.height_debounce.take();
         self.fit_expanded = false;
-        self.fit_rows = 0;
-        self.scrolled_to = None;
-        self.scroll_target = None;
     }
 
     fn show_results_now(&mut self) {
         self.reveal_gen = self.reveal_gen.wrapping_add(1);
         self.height_debounce.take();
         self.fit_expanded = true;
-        self.fit_rows = self.view.rows.len();
     }
 
     fn schedule_results_reveal(&mut self, cx: &mut Context<Self>) {
         // Re-arm the reveal timer without collapsing the panel. The height must
-        // stay fixed while the query is changing; only this timer (which fires
-        // once typing pauses) is allowed to grow `fit_rows`.
+        // stay fixed while the query is changing; the visible row count is a
+        // fixed capacity derived from `max_panel_h`, so it never needs to grow
+        // here — only the live result count (clamped to that capacity) matters.
         self.reveal_gen = self.reveal_gen.wrapping_add(1);
         self.height_debounce.take();
         let ticket = self.reveal_gen;
@@ -377,7 +373,6 @@ impl Launcher {
                 }
                 if wants_results(&l.view.query, l.view.category, l.view.calc.is_some()) {
                     l.fit_expanded = true;
-                    l.fit_rows = l.view.rows.len();
                 }
                 cx.notify();
             });
@@ -747,106 +742,6 @@ impl Launcher {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn keep_selected_visible(&mut self, grid: bool, window: &mut Window) {
-        let sel = self.view.selected;
-        if self.view.rows.is_empty() {
-            return;
-        }
-        if self.scrolled_to == Some(sel) && self.scroll_target.is_none() {
-            return;
-        }
-
-        let (item_h, viewport, max_off, cur) = {
-            let state = self.scroll.0.borrow();
-            let handle = &state.base_handle;
-            let Some(item_h) = handle.bounds_for_item(0).map(|b| b.size.height) else {
-                window.request_animation_frame();
-                return;
-            };
-            (
-                item_h,
-                handle.bounds().size.height,
-                handle.max_offset().y,
-                handle.offset().y,
-            )
-        };
-
-        let ix = if grid { sel / GRID_COLS } else { sel };
-        let item_top = item_h * (ix as f32);
-        let item_visible_top = item_top + cur;
-        let item_visible_bottom = item_visible_top + item_h;
-        let mut target = if item_visible_top < px(0.0) {
-            cur - item_visible_top
-        } else if item_visible_bottom > viewport {
-            cur - (item_visible_bottom - viewport)
-        } else {
-            self.scrolled_to = Some(sel);
-            self.scroll_target = None;
-            return;
-        };
-
-        if target > px(0.0) {
-            target = px(0.0);
-        }
-
-        if target < max_off {
-            target = max_off;
-        }
-
-        if (target - cur).abs() < px(0.5) {
-            self.scrolled_to = Some(sel);
-            self.scroll_target = None;
-            return;
-        }
-
-        if self.scroll_target.is_none() {
-            self.scroll_spring.position = f32::from(cur);
-            self.scroll_spring.velocity = 0.0;
-            self.scroll_last = Instant::now();
-        }
-        self.scroll_target = Some(target);
-    }
-
-    fn step_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.scroll_target else {
-            return;
-        };
-        let target_y: f32 = target.into();
-        if cx.reduce_motion() {
-            self.scroll_spring.position = target_y;
-            self.scroll_spring.velocity = 0.0;
-            self.scroll
-                .0
-                .borrow()
-                .base_handle
-                .set_offset(Point::new(px(0.0), target));
-            self.scroll_target = None;
-            self.scrolled_to = Some(self.view.selected);
-            return;
-        }
-
-        let now = Instant::now();
-        let dt = now
-            .duration_since(self.scroll_last)
-            .as_secs_f32()
-            .clamp(0.0, 0.032);
-        self.scroll_last = now;
-        let next = SCROLL_SPRING.step(self.scroll_spring, target_y, dt);
-        let settled = SCROLL_SPRING.is_settled(next, target_y, SCROLL_EPSILON);
-        self.scroll_spring = next;
-        self.scroll
-            .0
-            .borrow()
-            .base_handle
-            .set_offset(Point::new(px(0.0), px(next.position)));
-        if settled {
-            self.scroll_target = None;
-            self.scrolled_to = Some(self.view.selected);
-        } else {
-            window.request_animation_frame();
-        }
-    }
-
     fn tile(&self, i: usize, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.view.rows.get(i) else {
             return div()
@@ -865,10 +760,11 @@ impl Launcher {
             .flex_col()
             .items_center()
             .gap_3()
+            .h(px(GRID_ROW_H))
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .py(px(16.))
+            .py(px(5.))
             .px(px(8.))
             .rounded(px(10.))
             .bg(base)
@@ -985,8 +881,9 @@ impl Launcher {
                         .flex()
                         .items_center()
                         .gap(px(10.))
+                        .h(px(38.))
                         .px(px(10.))
-                        .py(px(9.))
+                        .py(px(10.))
                         .rounded(px(8.))
                         .when(selected, |el| el.bg(t.ghost()))
                         .on_hover(move |h: &bool, _window, cx: &mut App| {
@@ -1080,21 +977,36 @@ impl Render for Launcher {
         // around the list that the panel height must include.
         let results_pad: f32 = 24.0;
 
-        // Height is driven by the debounced `fit_rows`/`fit_expanded` so the
-        // panel does not resize per keystroke; the list content below still
-        // uses the live row count.
-        let fit_rows = self.fit_rows;
+        // Visible row count is a fixed *capacity* derived from the panel height,
+        // not a snapshot of the current result count. This is what prevents both
+        // failure modes: too few rows (capacity smaller than the live count →
+        // forced scroll) and the empty gap (capacity larger than the live count
+        // → panel reserves space for rows that don't exist). The live count only
+        // ever *reduces* the visible rows below capacity, never grows them.
+        //
+        // The list viewport is sized to EXACTLY `fit_rows * ROW_H` (no extra
+        // breath): with one result the panel hugs that single row, and at
+        // capacity the last row's bottom aligns with the viewport bottom so it
+        // is never clipped. The trailing padding around the list is the
+        // `results_pad` already accounted for in `panel_h`.
+        let list_area = max_panel_h - search_bar_h - chips_h - results_pad;
+        let list_capacity = (list_area / ROW_H).max(1.0) as usize;
+        let grid_capacity_items =
+            ((list_area / GRID_ROW_H).max(1.0) as usize * GRID_COLS).min(self.view.rows.len());
+        let fit_rows = if browsing_grid {
+            grid_capacity_items
+        } else {
+            list_capacity.min(self.view.rows.len())
+        };
         let results_h = if source_list {
             SOURCE_LIST_H
         } else if browsing_grid {
             let grid_rows = fit_rows.div_ceil(GRID_COLS);
-            (grid_rows as f32 * GRID_ROW_H + LIST_BREATH)
-                .min(max_panel_h - search_bar_h - chips_h - results_pad)
+            (grid_rows as f32 * GRID_ROW_H).min(list_area)
         } else if fit_rows == 0 {
             NO_MATCH_H
         } else {
-            (fit_rows as f32 * ROW_H + LIST_BREATH)
-                .min(max_panel_h - search_bar_h - chips_h - results_pad)
+            (fit_rows as f32 * ROW_H).min(list_area)
         };
         let panel_h = if source_list {
             // Fixed height for the overlay menu; the input box stays put.
@@ -1105,10 +1017,6 @@ impl Render for Launcher {
         } else {
             search_bar_h
         };
-        if expanded {
-            self.keep_selected_visible(browsing_grid, window);
-            self.step_scroll(window, cx);
-        }
         let motion = motion_spring(self.view.motion_ms);
         let open_gen = self.open_gen;
 
@@ -1148,7 +1056,7 @@ impl Render for Launcher {
                             range
                                 .map(|row_i| {
                                     let mut row =
-                                        div().flex().flex_row().gap(px(10.)).p(px(8.)).w_full();
+                                        div().flex().flex_row().gap(px(10.)).w_full();
                                     for col in 0..GRID_COLS {
                                         let i = row_i * GRID_COLS + col;
                                         row = row.child(this.tile(i, &t_grid, cx));
@@ -1166,8 +1074,7 @@ impl Render for Launcher {
                 let n = self.view.rows.len();
                 let t_list = t.clone();
                 let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
-                let list_h = (fit_rows as f32 * ROW_H + LIST_BREATH)
-                    .min(max_panel_h - search_bar_h - chips_h - results_pad);
+                let list_h = (fit_rows as f32 * ROW_H).min(list_area);
 
                 results = results.child(
                     uniform_list(

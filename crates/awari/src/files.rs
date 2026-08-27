@@ -1089,6 +1089,72 @@ mod tests {
     }
 
     #[test]
+    fn transient_path_search_returns_hits() {
+        use std::collections::VecDeque;
+        let base =
+            std::env::temp_dir().join(format!("awari_transient_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("aw_foo.rs"), b"x").unwrap();
+        std::fs::write(base.join("bar.txt"), b"y").unwrap();
+        let nested = base.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("aw_nested.rs"), b"z").unwrap();
+
+        let pickers: Vec<SharedFilePicker> = Vec::new();
+        let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
+        let mut transient_order: VecDeque<PathBuf> = VecDeque::new();
+        let parser = QueryParser::<fff_search::FileSearchConfig>::default();
+        let mut caches = RegexCaches { main: None, term: None };
+        let opts = FilesOptions {
+            index_lockfiles: false,
+            regex: false,
+        };
+
+        // First call builds the transient picker (async index); second call after
+        // the index settles should return hits.
+        let _ = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            &base.display().to_string(),
+            &opts,
+            &mut caches,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let browse = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            &base.display().to_string(),
+            &opts,
+            &mut caches,
+        );
+        let term_q = format!("{}/aw", base.display());
+        let term = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            &term_q,
+            &opts,
+            &mut caches,
+        );
+        eprintln!(
+            "TRANSIENT browse(base)={} term('aw')={}",
+            browse.len(),
+            term.len()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            !browse.is_empty() || !term.is_empty(),
+            "transient path search returned nothing for {}",
+            base.display()
+        );
+    }
+
+    #[test]
     fn path_query_dir_resolves_existing_directory() {
         let base =
             std::env::temp_dir().join(format!("awari_pathq_existing_{}", std::process::id()));

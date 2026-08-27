@@ -19,12 +19,6 @@ pub const LAUNCHER_H: f32 = 1080.0;
 /// Pause after the last keystroke before results (and panel height) appear.
 const RESULTS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// Spring driving list scroll-to-selection: near-critical, slight overshoot for
-/// a buttery glide that retargets without restarting.
-const SCROLL_SPRING: SpringConfig = SpringConfig::new(300.0, 32.0, 1.0);
-/// Settled tolerance (px) for the scroll spring.
-const SCROLL_EPSILON: f32 = 0.5;
-
 /// Critically damped spring that settles in about `duration_ms`.
 fn motion_spring(duration_ms: u32) -> SpringConfig {
     if duration_ms == 0 {
@@ -44,10 +38,6 @@ const GRID_ROW_H: f32 = 88.0;
 /// height formula always matches the actual rendered rows — no per-keystroke
 /// measurement, no clipping, no spurious resize.
 const ROW_H: f32 = 60.0;
-/// Breathing room below the last row so one (or a few) results are fully
-/// visible with slack — absorbs the sub-pixel overflow that would otherwise
-/// let the list scroll a hair.
-const LIST_BREATH: f32 = 8.0;
 /// Content height of the "no matches" block (py(28)*2 + ~text).
 const NO_MATCH_H: f32 = 76.0;
 /// Content height of the empty-state source list (3 rows: Apps / Files /
