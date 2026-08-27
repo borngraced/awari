@@ -972,10 +972,10 @@ impl Render for Launcher {
         let expanded = self.fit_expanded;
         let max_panel_h: f32 = 500.0;
         let search_bar_h: f32 = SEARCH_H;
-        let chips_h: f32 = if expanded { 36.0 } else { 0.0 };
+        let chips_h: f32 = 0.0;
         // launch-results contributes p(8)+p(8)+mb(8) = 24px of vertical space
         // around the list that the panel height must include.
-        let results_pad: f32 = 24.0;
+        let results_pad: f32 = 14.0;
 
         // Visible row count is a fixed *capacity* derived from the panel height,
         // not a snapshot of the current result count. This is what prevents both
@@ -1029,12 +1029,13 @@ impl Render for Launcher {
             .min_h_0();
         if source_list {
             results = results
-                .p(px(6.))
-                .mb(px(6.))
+                .px(px(8.))
+                .pt(px(8.))
+                .pb(px(6.))
                 .w_full()
                 .child(self.source_list_el(&t, cx));
         } else {
-            results = results.p(px(8.)).mb(px(8.)).w_full();
+            results = results.px(px(8.)).pt(px(8.)).pb(px(6.)).w_full();
             if self.view.rows.is_empty() {
                 results = results.child(
                     div()
