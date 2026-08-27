@@ -294,22 +294,28 @@ impl WgpuRenderer {
         };
 
         let mut ctx_ref = gpu_context.borrow_mut();
-        let context = match ctx_ref.as_mut() {
+        let (context, surface) = match ctx_ref.as_mut() {
             Some(context) => {
                 context.check_compatible_with_surface(&surface)?;
-                context
+                (context, surface)
             }
             None => match WgpuContext::new(instance, &surface, compositor_gpu) {
-                Ok(context) => ctx_ref.insert(context),
+                Ok(context) => (ctx_ref.insert(context), surface),
                 Err(lean_error) => {
                     // The lean instance (Vulkan-only, ICD-filtered) found no usable
                     // adapter — e.g. a machine with no Vulkan driver or a driver the
                     // filter does not recognize. Retry with the full instance so
                     // those systems keep the previous behaviour.
+                    //
+                    // The lean probe surface is dropped first: only one surface may
+                    // reference the window handle at a time, and reusing it across
+                    // instances is compositor-sensitive (and would mismatch the full
+                    // instance's device during configuration).
                     log::warn!(
                         "Lean GPU context creation failed ({lean_error}); retrying with a \
                          full (unfiltered Vulkan + GL) instance"
                     );
+                    drop(surface);
                     WgpuContext::restore_full_icd_selection();
                     let full_instance =
                         WgpuContext::instance_unrestricted(Box::new(window.clone()));
@@ -327,7 +333,7 @@ impl WgpuRenderer {
                     };
                     let context = WgpuContext::new(full_instance, &full_surface, compositor_gpu)
                         .context("No usable GPU adapter on this system")?;
-                    ctx_ref.insert(context)
+                    (ctx_ref.insert(context), full_surface)
                 }
             },
         };
@@ -2072,6 +2078,32 @@ impl WgpuRenderer {
         // Release surface-bound GPU resources eagerly so the underlying native
         // window can be destroyed before the renderer itself is dropped.
         self.resources.take();
+    }
+
+    /// Returns true when the renderer's GPU resources have been released for
+    /// idle by [`release_for_idle`](Self::release_for_idle) and have not yet
+    /// been rebuilt.
+    pub fn is_released(&self) -> bool {
+        self.resources.is_none()
+    }
+
+    /// Release the window's surface, swapchain, pipelines, buffers, and atlas
+    /// textures while keeping the shared instance and device alive.
+    ///
+    /// Rendering pauses until the surface is rebuilt — either explicitly via
+    /// [`recover`](Self::recover) or implicitly on the next draw through the
+    /// platform window. Stopping presentation also lets the compositor drop
+    /// the hidden overlay's buffers, so idle RSS and GPU memory return toward
+    /// the pre-launcher baseline while reopening avoids the full GPU re-init.
+    pub fn release_for_idle(&mut self) {
+        if self.resources.is_none() {
+            return;
+        }
+        self.surface_configured = false;
+        self.needs_redraw = true;
+        self.resources.take();
+        self.atlas.clear();
+        log::info!("Released GPU surface and atlas for idle");
     }
 
     /// Returns true if the GPU device was lost and recovery is needed.

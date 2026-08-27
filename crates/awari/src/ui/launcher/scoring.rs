@@ -383,7 +383,7 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
         cached_app_rows,
         cached_win_rows,
         prefix,
-        calc,
+        calc: _calc,
     } = params;
     let q = query.trim();
 
@@ -490,13 +490,6 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
             );
         }
         push_capped(&mut out, ranked_cap, win_rows);
-    }
-    // Fallback: nothing matched a non-path query -> offer to run it as a
-    // shell command, mirroring the `>` command-mode trigger. A valid
-    // calculator expression never reaches here (it surfaces as an inline ghost,
-    // not a list row), so it must not spawn a "run in terminal" fallback.
-    if out.is_empty() && !empty && calc.is_none() && !crate::files::is_path_shaped(q) {
-        out.extend(command_mode_rows(q));
     }
     out
 }

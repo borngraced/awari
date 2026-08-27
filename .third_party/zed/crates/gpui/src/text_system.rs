@@ -333,6 +333,20 @@ impl TextSystem {
         }
     }
 
+    /// Number of cached glyph-raster-bounds entries, for memory diagnostics.
+    #[doc(hidden)]
+    pub fn debug_raster_bounds_len(&self) -> usize {
+        self.raster_bounds.read().len()
+    }
+
+    /// Drop every cached glyph-raster-bounds entry. These are per-(glyph, font,
+    /// size) measurement records that are otherwise retained for the life of the
+    /// process; clearing them at idle returns that CPU memory (they repopulate
+    /// trivially on the next render).
+    pub fn clear_raster_bounds(&self) {
+        self.raster_bounds.write().clear();
+    }
+
     pub(crate) fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,

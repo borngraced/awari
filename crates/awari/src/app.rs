@@ -8,6 +8,7 @@ use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 
 use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,6 +30,34 @@ pub(crate) fn boot_rss_mib() -> usize {
         }
     }
     0
+}
+
+/// Dev-only probe: when `AWARI_PROBE_QUERIES` points at a text file, consume
+/// one query line per launcher open and run it, so memory growth from
+/// sequential searches can be measured without manual typing. No-op in normal
+/// use (env var unset).
+static PROBE_CONSUMED: AtomicUsize = AtomicUsize::new(0);
+/// Set once every line of the probe query file has been applied, so a captured
+/// session can quit cleanly at the right moment (for heap profiling).
+static PROBE_EXHAUSTED: AtomicBool = AtomicBool::new(false);
+fn apply_probe_query(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
+    let Some(path) = std::env::var_os("AWARI_PROBE_QUERIES") else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let queries: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let index = PROBE_CONSUMED.fetch_add(1, Ordering::Relaxed);
+    let Some(query) = queries.get(index) else {
+        PROBE_EXHAUSTED.store(true, Ordering::Relaxed);
+        return;
+    };
+    daemon.apply_launcher_cmd(LauncherCmd::SetQuery { query: (*query).into() }, cx);
 }
 
 use awari_compositor::{
@@ -673,6 +702,7 @@ impl Daemon {
             if let Some(ft) = &mut self.files_tx {
                 self.files_seq = ft.invalidate();
             }
+            apply_probe_query(self, cx);
             let started = Instant::now();
             self.ensure_launcher_display(cx);
             eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());
@@ -773,8 +803,12 @@ impl Daemon {
                     }
                     if !d.keep_alive || d.quit_after_close {
                         cx.quit();
+                    } else if std::env::var("AWARI_QUIT_AT_IDLE").is_ok()
+                        && PROBE_EXHAUSTED.load(Ordering::Relaxed)
+                    {
+                        cx.quit();
                     } else if let Some(h) = d.launcher {
-                        let _ = h.update(cx, |l, window, cx| {
+                        let _ = h.update(cx, |l, window, _cx| {
                             l.closing = false;
                             // After the fade completes the surface is hidden, so
                             // drop gpui's append-only sprite atlas (icons + text
@@ -782,8 +816,41 @@ impl Daemon {
                             // on exit instead of leaving the last session's atlas
                             // resident until the next open.
                             window.clear_sprite_atlas();
-                            cx.notify();
+                            // Stop presenting the hidden overlay entirely: drop the
+                            // wgpu surface/swapchain/pipelines and reset the GPU
+                            // atlas while keeping the shared device live. The next
+                            // open rebuilds the surface on its first drawn frame.
+                            //
+                            // Deliberately no cx.notify(): the overlay is hidden, so
+                            // nothing needs repainting, and a redraw here would make
+                            // the draw path rebuild the surface immediately, undoing
+                            // the idle release. The reopen draw recovers on its own.
+                            window.release_gpu_for_idle();
                         });
+                        // Dev-only memory attribution: report the live size of the
+                        // main candidate caches at idle and (optionally) prune them,
+                        // controlled by AWARI_PRUNE={rows,files,view,none}.
+                        if std::env::var("AWARI_PROBE_QUERIES").is_ok() {
+                            let rows_bytes = d
+                                .last_rows
+                                .as_ref()
+                                .map(|r| std::mem::size_of_val(&**r))
+                                .unwrap_or(0);
+                            let hits_bytes = d.file_hits.len();
+                            tracing::info!(
+                                rows_bytes,
+                                hits_bytes,
+                                "idle: candidate cache sizes"
+                            );
+                        }
+                        if std::env::var("AWARI_PRUNE").as_deref() == Ok("rows") {
+                            d.last_rows = None;
+                            d.appwin_cache = None;
+                            d.file_hits.clear();
+                        }
+                        if std::env::var("AWARI_TRIM").is_ok() {
+                            unsafe { libc::malloc_trim(0) };
+                        }
                     }
                 });
             }

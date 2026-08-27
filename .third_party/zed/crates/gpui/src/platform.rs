@@ -852,6 +852,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// always-mapped overlay can take Exclusive focus while open and release
     /// it (None) when dismissed.
     fn set_keyboard_interactivity(&self, _interactivity: crate::layer_shell::KeyboardInteractivity) {}
+    /// Release the window's GPU surface, swapchain, and atlas textures while
+    /// keeping the shared instance and device alive.
+    ///
+    /// No-op by default. Implemented by platforms that can rebuild the surface
+    /// on demand (currently the Wayland backend), which lets a hidden overlay
+    /// return its GPU memory while staying cheap to reopen.
+    fn release_gpu_for_idle(&self) {}
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
         None
     }

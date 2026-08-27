@@ -1840,6 +1840,11 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    fn release_gpu_for_idle(&self) {
+        let mut state = self.borrow_mut();
+        state.renderer.release_for_idle();
+    }
+
     fn zoom(&self) {
         let state = self.borrow();
         if let Some(toplevel) = state.surface_state.toplevel() {
@@ -1932,6 +1937,29 @@ impl PlatformWindow for WaylandWindow {
 
             state.redraw_requested = true;
             return;
+        }
+
+        // The surface was released for idle (hidden overlay). Rebuild it on the
+        // first draw that actually presents, keeping the shared device alive.
+        if state.renderer.is_released() {
+            let raw_window = RawWindow {
+                window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
+                display: state
+                    .surface
+                    .backend()
+                    .upgrade()
+                    .unwrap()
+                    .display_ptr()
+                    .cast::<std::ffi::c_void>(),
+            };
+            match state.renderer.recover(&raw_window) {
+                Ok(()) => {}
+                Err(err) => {
+                    log::warn!("GPU restore after idle failed, will retry on next frame: {err}");
+                    state.redraw_requested = true;
+                    return;
+                }
+            }
         }
 
         // Surface state changed during this GPUI tick is included in this presentation.

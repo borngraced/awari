@@ -2183,6 +2183,16 @@ impl Window {
         self.platform_window.set_input_region(region);
     }
 
+    /// Release this window's GPU surface, swapchain, and atlas textures while
+    /// keeping the GPU instance and device alive.
+    ///
+    /// Rendering pauses until the surface is re-acquired on the next draw.
+    /// Linux Wayland only; a no-op on other platforms. Useful when a hidden
+    /// overlay (e.g. a launcher keep-alive) should stop presenting buffers.
+    pub fn release_gpu_for_idle(&self) {
+        self.platform_window.release_gpu_for_idle();
+    }
+
     /// Return the `WindowBounds` to indicate that how a window should be opened
     /// after it has been closed
     pub fn window_bounds(&self) -> WindowBounds {

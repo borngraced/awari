@@ -72,8 +72,13 @@ static ICD_FILTER_APPLIED: AtomicBool = AtomicBool::new(false);
 /// Manifest filename keywords that identify software renderers. These are never
 /// selected by the lean instance; if no hardware driver is installed, the
 /// filtered list ends up empty and the loader runs unrestricted.
+///
+/// `dzn` ("Dozen") is Mesa's Vulkan-on-DX12 translator: on Linux it is a
+/// developer-only fallback with no BIOS/compositor story, and any machine that
+/// could use it also ships a real driver (`anv` on Intel), so excluding it here
+/// keeps the lean selection on the hardware driver.
 const SOFTWARE_RENDERER_HINTS: &[&str] =
-    &["lvp", "lavapipe", "llvmpipe", "swrast", "swiftshader"];
+    &["lvp", "lavapipe", "llvmpipe", "swrast", "swiftshader", "dzn"];
 
 impl WgpuContext {
     #[cfg(not(target_family = "wasm"))]
@@ -360,6 +365,12 @@ impl WgpuContext {
     /// Set `VK_DRIVER_FILES` to the installed ICD manifests that match the PCI
     /// vendor(s) detected from the DRM render nodes, excluding software drivers.
     /// Does nothing when the user already selects drivers explicitly.
+    ///
+    /// `VK_DRIVER_FILES` requires a loader >= 1.3 (it replaced `VK_ICD_FILENAMES`).
+    /// On older loaders it is ignored, so every ICD is exposed; the unrestricted
+    /// fallback in `WgpuRenderer::new` preserves the previous behaviour, and we do
+    /// not also set `VK_ICD_FILENAMES` because modern loaders log a warning when
+    /// both variables are present.
     #[cfg(target_os = "linux")]
     fn apply_icd_filter(vendor_ids: &[u32]) {
         if std::env::var_os("VK_DRIVER_FILES").is_some()
