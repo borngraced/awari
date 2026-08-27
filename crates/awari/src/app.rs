@@ -176,8 +176,10 @@ impl Daemon {
         // keyboard None, no input region) so wgpu/fonts warm at boot.
         daemon.update(cx, |d, cx| {
             d.keep_alive = matches!(gpu_mode, GpuMode::KeepAlive);
-            d.ensure_launcher(cx);
-            eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());
+            // Overlay (wgpu device, shaders, fonts, sprite/glyph atlas) is
+            // created lazily on the first `set_launcher_open`, not at boot, so a
+            // resident hidden launcher sits at the binary + file-index baseline
+            // instead of paying the ~36 MiB GPU warm-up up front.
             if matches!(start_state, StartState::Open) {
                 d.set_launcher_open(true, cx);
             }
@@ -673,6 +675,7 @@ impl Daemon {
             }
             let started = Instant::now();
             self.ensure_launcher_display(cx);
+            eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());
             if let Some(h) = self.launcher {
                 let generation = self.launcher_gen;
                 let shell = cx.entity().downgrade();

@@ -2,6 +2,9 @@
 use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
 use gpui_util::ResultExt;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
@@ -61,6 +64,16 @@ pub struct CompositorGpuHint {
     pub vendor_id: u32,
     pub device_id: u32,
 }
+
+/// Set when [`WgpuContext::instance`] restricted the Vulkan loader, so the
+/// fallback path can undo it before creating an unrestricted instance.
+static ICD_FILTER_APPLIED: AtomicBool = AtomicBool::new(false);
+
+/// Manifest filename keywords that identify software renderers. These are never
+/// selected by the lean instance; if no hardware driver is installed, the
+/// filtered list ends up empty and the loader runs unrestricted.
+const SOFTWARE_RENDERER_HINTS: &[&str] =
+    &["lvp", "lavapipe", "llvmpipe", "swrast", "swiftshader"];
 
 impl WgpuContext {
     #[cfg(not(target_family = "wasm"))]
@@ -286,15 +299,221 @@ impl WgpuContext {
         ))
     }
 
+    /// Create a lean GPU instance.
+    ///
+    /// On Linux this restricts the Vulkan loader to the ICD manifests that match
+    /// the installed PCI GPUs (so software/emulation drivers like lavapipe and
+    /// dzn never get mapped at `vkCreateInstance`) and disables the GL backend
+    /// so the EGL/gallium stack is not loaded just to enumerate a GL adapter.
+    /// Every failure path falls back to [`Self::instance_unrestricted`], which
+    /// restores the previous behaviour on machines this filter does not know.
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
+        #[cfg(target_os = "linux")]
+        {
+            let vendor_ids = Self::detect_render_node_vendors();
+            Self::apply_icd_filter(&vendor_ids);
+            Self::make_instance(display, wgpu::Backends::VULKAN)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::instance_unrestricted(display)
+        }
+    }
+
+    /// Create an instance the way upstream did: every supported backend, with no
+    /// loader restriction. Used as the fallback when the lean instance finds no
+    /// usable adapter, and on non-Linux platforms.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn instance_unrestricted(
+        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+    ) -> wgpu::Instance {
+        Self::make_instance(display, wgpu::Backends::VULKAN | wgpu::Backends::GL)
+    }
+
+    /// Undo the loader restriction applied by [`Self::instance`] so a fallback
+    /// instance can re-enumerate every registered driver.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn restore_full_icd_selection() {
+        if ICD_FILTER_APPLIED.swap(false, Ordering::Relaxed) {
+            // SAFETY: GPU startup runs on the main GUI thread before any other
+            // thread creates a GPU context, and the fallback instance is created
+            // immediately after this call. No concurrent code observes the value.
+            unsafe { std::env::remove_var("VK_DRIVER_FILES") };
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn make_instance(
+        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display: Some(display),
         })
+    }
+
+    /// Set `VK_DRIVER_FILES` to the installed ICD manifests that match the PCI
+    /// vendor(s) detected from the DRM render nodes, excluding software drivers.
+    /// Does nothing when the user already selects drivers explicitly.
+    #[cfg(target_os = "linux")]
+    fn apply_icd_filter(vendor_ids: &[u32]) {
+        if std::env::var_os("VK_DRIVER_FILES").is_some()
+            || std::env::var_os("VK_LOADER_DRIVERS_SELECT").is_some()
+        {
+            return;
+        }
+        let Some(manifests) = Self::filtered_icd_files(vendor_ids) else {
+            return;
+        };
+        let selection = manifests
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        // SAFETY: single-threaded GUI startup; the restricted value is observed
+        // only by the Vulkan loader during the `vkCreateInstance` that follows.
+        unsafe { std::env::set_var("VK_DRIVER_FILES", selection) };
+        ICD_FILTER_APPLIED.store(true, Ordering::Relaxed);
+        log::info!(
+            "Restricted Vulkan ICDs ({}) to the driver(s) matching the detected GPUs",
+            manifests.len()
+        );
+    }
+
+    /// PCI vendor IDs of every DRI render node on the system.
+    #[cfg(target_os = "linux")]
+    fn detect_render_node_vendors() -> Vec<u32> {
+        let mut vendors = BTreeSet::new();
+        let Ok(entries) = fs::read_dir("/sys/class/drm") else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with("renderD") && !name.starts_with("card") {
+                continue;
+            }
+            let vendor_path = entry.path().join("device").join("vendor");
+            let Ok(raw) = fs::read_to_string(vendor_path) else {
+                continue;
+            };
+            if let Some(value) = raw.trim().strip_prefix("0x") {
+                if let Ok(id) = u32::from_str_radix(value, 16) {
+                    // 0xffff is a dummy placeholder; 0x10005 is the software
+                    // renderer vendor (llvmpipe/lavapipe), which drives nothing
+                    // worth selecting (its ICD is excluded below anyway).
+                    if id != 0xffff && id != 0x10005 {
+                        vendors.insert(id);
+                    }
+                }
+            }
+        }
+        vendors.into_iter().collect()
+    }
+
+    /// Driver name keywords associated with the given PCI vendor IDs. These
+    /// match the manifest filenames shipped by Mesa and the proprietary drivers.
+    #[cfg(target_os = "linux")]
+    fn driver_keywords(vendor_ids: &[u32]) -> Vec<&'static str> {
+        let mut keywords = BTreeSet::new();
+        for &vendor in vendor_ids {
+            let keys: &[&str] = match vendor {
+                0x1002 => &["radeon", "amdvlk"],
+                0x8086 => &["intel", "anv"],
+                0x10de => &["nvidia", "nouveau"],
+                0x13b5 => &["panfrost", "mali"],
+                0x106b => &["asahi"],
+                0x14e4 => &["v3d", "broadcom"],
+                0x5143 => &["freedreno", "qcom"],
+                0x1af4 => &["virtio", "venus"],
+                0x1010 => &["powervr"],
+                0x1ae0 => &["goldfish", "venus"],
+                _ => continue,
+            };
+            keywords.extend(keys.iter().copied());
+        }
+        keywords.into_iter().collect()
+    }
+
+    /// Whether an ICD manifest is for the running process's architecture. Arch-
+    /// suffixed manifests (e.g. `intel_icd.x86_64.json`) only count when the
+    /// suffix matches; unsuffixed manifests (e.g. `nvidia_icd.json`) always do.
+    #[cfg(target_os = "linux")]
+    fn manifest_matches_arch(name: &str) -> bool {
+        const OTHER_ARCHES: &[&str] = &[
+            "x86", "i686", "i586", "aarch64", "arm", "hppa", "mips", "mips64", "ppc64le", "riscv64",
+            "s390x", "sh4", "sparc64", "loongarch64",
+        ];
+        let name = name.strip_suffix(".json").unwrap_or(name);
+        let Some(idx) = name.rfind('.') else {
+            return true;
+        };
+        let suffix = &name[idx + 1..];
+        suffix == std::env::consts::ARCH || !OTHER_ARCHES.contains(&suffix)
+    }
+
+    /// Manifests installed on this system that match any detected vendor and that
+    /// are not software renderers. Returns `None` when no safe selection exists.
+    #[cfg(target_os = "linux")]
+    fn filtered_icd_files(vendor_ids: &[u32]) -> Option<Vec<PathBuf>> {
+        let keywords = Self::driver_keywords(vendor_ids);
+        if keywords.is_empty() {
+            return None;
+        }
+        let mut dirs = Vec::new();
+        if let Ok(additional) = std::env::var("VK_DRIVERS_PATH") {
+            dirs.extend(additional.split(':').filter(|dir| !dir.is_empty()).map(PathBuf::from));
+        }
+        if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+            dirs.push(PathBuf::from(config).join("vulkan/icd.d"));
+        }
+        dirs.push(PathBuf::from("/etc/vulkan/icd.d"));
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            dirs.push(PathBuf::from(data).join("vulkan/icd.d"));
+        }
+        dirs.push(PathBuf::from("/usr/local/share/vulkan/icd.d"));
+        dirs.push(PathBuf::from("/usr/share/vulkan/icd.d"));
+
+        let mut chosen = Vec::new();
+        let mut seen = BTreeSet::new();
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".json") || !seen.insert(path.clone()) {
+                    continue;
+                }
+                if !Self::manifest_matches_arch(name) {
+                    continue;
+                }
+                let lowered = name.to_lowercase();
+                if SOFTWARE_RENDERER_HINTS
+                    .iter()
+                    .any(|hint| lowered.contains(hint))
+                {
+                    continue;
+                }
+                if keywords.iter().any(|keyword| lowered.contains(keyword)) {
+                    chosen.push(path);
+                }
+            }
+        }
+        if chosen.is_empty() {
+            None
+        } else {
+            Some(chosen)
+        }
     }
 
     pub fn check_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> anyhow::Result<()> {
@@ -584,7 +803,7 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pci_id;
+    use super::{driver_keywords, manifest_matches_arch, parse_pci_id};
 
     #[test]
     fn test_parse_device_id() {
@@ -602,5 +821,39 @@ mod tests {
             parse_pci_id(&format!("{:#x}", 0x1234)).unwrap(),
             parse_pci_id(&format!("{:#X}", 0x1234)).unwrap(),
         );
+    }
+
+    #[test]
+    fn vendor_keywords_cover_the_common_drivers() {
+        assert!(driver_keywords(&[0x8086]).iter().any(|k| *k == "intel"));
+        assert!(driver_keywords(&[0x8086]).iter().any(|k| *k == "anv"));
+        assert!(driver_keywords(&[0x1002]).iter().any(|k| *k == "radeon"));
+        assert!(driver_keywords(&[0x10de]).iter().any(|k| *k == "nvidia"));
+        assert!(driver_keywords(&[0x1234]).is_empty());
+    }
+
+    #[test]
+    fn manifest_arch_filtering_accepts_only_the_running_arch() {
+        assert!(manifest_matches_arch("nvidia_icd.json"));
+        assert!(manifest_matches_arch(&format!(
+            "intel_icd.{}.json",
+            std::env::consts::ARCH
+        )));
+        assert!(!manifest_matches_arch(&format!(
+            "intel_icd.{}.json",
+            alternate_arch()
+        )));
+    }
+
+    fn alternate_arch() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => "aarch64",
+            "aarch64" => "x86_64",
+            "i686" => "x86_64",
+            other => match other {
+                "arm" => "x86_64",
+                _ => "i686",
+            },
+        }
     }
 }

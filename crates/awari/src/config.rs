@@ -355,7 +355,19 @@ fn is_true(val: &str) -> bool {
 }
 
 fn looks_like_key(s: &str) -> bool {
-    matches!(s, "windows" | "files" | "reduced" | "accent")
+    matches!(
+        s,
+        "windows"
+            | "files"
+            | "reduced"
+            | "accent"
+            | "roots"
+            | "index-lockfiles"
+            | "index_lockfiles"
+            | "regex"
+            | "max-results"
+            | "max_results"
+    )
 }
 
 fn expand_root(raw: &str) -> Option<PathBuf> {
