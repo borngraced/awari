@@ -160,6 +160,7 @@ pub(crate) fn start_child(
     if guard.is_some() {
         return;
     }
+
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -168,21 +169,29 @@ pub(crate) fn start_child(
         }
     };
     let mut cmd = Command::new(exe);
+
     cmd.arg("gui");
+
     if keep_alive {
         cmd.arg("--hidden");
     } else {
         cmd.arg("--no-keep-alive");
     }
+
     let (out, err) = if child_log_fd >= 0 {
         unsafe {
             let o = libc::dup(child_log_fd);
             let e = libc::dup(child_log_fd);
+
             if o >= 0 && e >= 0 {
                 (Stdio::from_raw_fd(o), Stdio::from_raw_fd(e))
             } else {
-                if o >= 0 { libc::close(o); }
-                if e >= 0 { libc::close(e); }
+                if o >= 0 {
+                    libc::close(o);
+                }
+                if e >= 0 {
+                    libc::close(e);
+                }
                 (Stdio::null(), Stdio::null())
             }
         }

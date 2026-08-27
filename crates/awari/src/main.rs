@@ -85,7 +85,7 @@ fn gui_main(args: &[String]) {
     };
 
     application().run(move |cx| {
-        gpui_base::init(cx);
+        // gpui_base::init(cx);
         app::Daemon::start(
             cx,
             match backend {
