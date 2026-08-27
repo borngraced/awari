@@ -13,6 +13,24 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Resident set size in MiB (Linux /proc/self/status), for boot tracing.
+pub(crate) fn boot_rss_mib() -> usize {
+    if let Ok(s) = fs::read_to_string("/proc/self/status") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                if let Some(kb) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    return kb / 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
 use awari_compositor::{
     Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
 };
@@ -148,6 +166,7 @@ impl Daemon {
         gpu_mode: GpuMode,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
+        eprintln!("[boot] daemon-start rss={}MiB", boot_rss_mib());
         let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, stats, cfg));
         // Prewarm: build the overlay now (wgpu device, shaders, fonts) so
         // the first Super press costs a frame instead of full stack init.
@@ -158,6 +177,7 @@ impl Daemon {
         daemon.update(cx, |d, cx| {
             d.keep_alive = matches!(gpu_mode, GpuMode::KeepAlive);
             d.ensure_launcher(cx);
+            eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());
             if matches!(start_state, StartState::Open) {
                 d.set_launcher_open(true, cx);
             }
@@ -205,6 +225,7 @@ impl Daemon {
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
     ) -> Self {
+        eprintln!("[boot] pre-files rss={}MiB", boot_rss_mib());
         let (files_tx, files_rx) = if cfg.sources.files {
             let (tx, rx) = crate::files::Files::spawn(
                 cfg.files.resolved_roots(),
@@ -217,6 +238,7 @@ impl Daemon {
         } else {
             (None, None)
         };
+        eprintln!("[boot] post-files rss={}MiB", boot_rss_mib());
         let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
         let mut daemon = Self {
             compositor,
@@ -256,6 +278,11 @@ impl Daemon {
             spawn_files_pump(cx, files_rx);
         }
         spawn_apps_pump(cx, apps_rx);
+        eprintln!("[boot] daemon-new-done rss={}MiB", boot_rss_mib());
+        thread::spawn(|| {
+            thread::sleep(Duration::from_secs(2));
+            eprintln!("[boot] settled-2s rss={}MiB", boot_rss_mib());
+        });
         // Scan `.desktop` files off the bootstrap path so the overlay prewarm
         // (wgpu device, shaders, fonts) runs first; apps swap in when ready.
         thread::Builder::new()
@@ -629,6 +656,7 @@ impl Daemon {
         self.launcher_gen += 1;
         if open {
             self.launcher_open = true;
+            eprintln!("[boot] launcher-open rss={}MiB", boot_rss_mib());
             // Tell the daemon the overlay is now actually visible, so its
             // `visible` flag stays truthful for the next toggle decision.
             notify(ClientRequest::LauncherShown);
@@ -655,6 +683,10 @@ impl Daemon {
                     }
                     let _ = h.update(cx, |l, window, _| {
                         l.closing = false;
+                        // Reset gpui's sprite atlas (icons + text glyphs) on every
+                        // open so its append-only texture pages don't accumulate
+                        // across sessions while the overlay window stays alive.
+                        window.clear_sprite_atlas();
                         l.arm_open_timer(started);
                         window.set_keyboard_interactivity(
                             gpui::layer_shell::KeyboardInteractivity::Exclusive,
@@ -714,6 +746,7 @@ impl Daemon {
             }
             let _ = h.update(cx, |l, window, cx| {
                 l.begin_close(cx);
+                l.clear_icon_cache(cx);
                 window.set_input_region(Some(&[]));
                 window.set_keyboard_interactivity(gpui::layer_shell::KeyboardInteractivity::None);
                 cx.notify();
@@ -738,8 +771,14 @@ impl Daemon {
                     if !d.keep_alive || d.quit_after_close {
                         cx.quit();
                     } else if let Some(h) = d.launcher {
-                        let _ = h.update(cx, |l, _window, cx| {
+                        let _ = h.update(cx, |l, window, cx| {
                             l.closing = false;
+                            // After the fade completes the surface is hidden, so
+                            // drop gpui's append-only sprite atlas (icons + text
+                            // glyphs) too. This returns RSS to the launch baseline
+                            // on exit instead of leaving the last session's atlas
+                            // resident until the next open.
+                            window.clear_sprite_atlas();
                             cx.notify();
                         });
                     }

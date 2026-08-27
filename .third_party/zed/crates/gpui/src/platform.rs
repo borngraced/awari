@@ -1335,6 +1335,11 @@ pub trait PlatformAtlas {
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
 
+    /// Drops every cached atlas texture and tile so a consumer that keeps its
+    /// window alive across sessions can return to a baseline memory footprint.
+    /// Default is a no-op for platforms that do not override it.
+    fn clear(&self) {}
+
     #[cfg(any(test, feature = "test-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false

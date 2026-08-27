@@ -86,6 +86,7 @@ fn gui_main(args: &[String]) {
 
     application().run(move |cx| {
         // gpui_base::init(cx);
+        eprintln!("[boot] pre-gpui rss={}MiB", app::boot_rss_mib());
         app::Daemon::start(
             cx,
             match backend {

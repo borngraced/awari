@@ -24,6 +24,11 @@ use awari_ipc::state_dir;
 /// virtualizes, so this is a search-cost cap, not a paint cap.
 const PER_ROOT_ROWS: usize = 200;
 
+/// Hard cap on file-search results returned to the launcher per query. The panel
+/// shows only a handful of rows, so anything beyond this is pure search cost
+/// (and, for an empty-query browse, index memory) with no visible benefit.
+const MAX_FILE_RESULTS: usize = 30;
+
 /// Cap on the number of distinct path-shaped directories we keep an in-memory
 /// index for. Path navigation (`~/dev/`) builds a `SharedFilePicker` per
 /// directory; without a cap this map grows for every directory the user ever
@@ -754,7 +759,7 @@ fn search_all(
             opts.index_lockfiles,
         ));
     }
-    let cap = PER_ROOT_ROWS.saturating_mul(merged.len().max(1));
+    let cap = MAX_FILE_RESULTS;
     merge_scored(merged, cap)
 }
 
@@ -786,7 +791,7 @@ fn search_one(
     };
     let query = parser.parse(fff_query);
     let needle_chars: Vec<char> = fff_query.to_lowercase().chars().collect();
-    let fff_limit = PER_ROOT_ROWS * 2;
+    let fff_limit = MAX_FILE_RESULTS;
     let results = p.fuzzy_search(
         &query,
         None,

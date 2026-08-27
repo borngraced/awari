@@ -4644,6 +4644,13 @@ impl Window {
         Ok(())
     }
 
+    /// Drops every cached sprite-atlas texture and tile (icons and text glyphs).
+    /// Call when a long-lived overlay is (re)shown so gpui's append-only atlas
+    /// does not accumulate glyph/icon pages across sessions.
+    pub fn clear_sprite_atlas(&mut self) {
+        self.sprite_atlas.clear();
+    }
+
     /// Returns whether every frame of an image is present in the sprite atlas.
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_image_atlas_entry(&self, data: &RenderImage) -> bool {

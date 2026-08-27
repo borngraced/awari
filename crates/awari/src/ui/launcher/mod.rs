@@ -8,6 +8,7 @@ pub mod scoring;
 mod tests;
 pub mod types;
 pub mod view;
+mod icon_cache;
 
 pub use scoring::*;
 pub use types::*;
@@ -18,6 +19,12 @@ pub const LAUNCHER_H: f32 = 1080.0;
 
 /// Pause after the last keystroke before results (and panel height) appear.
 const RESULTS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Delay before a typed query is sent to the daemon to run a (potentially heavy)
+/// fuzzy file search. Sending on every keystroke re-runs the search per
+/// character; this collapses a burst of typing into one search after the user
+/// pauses. Commit keys (Enter) flush immediately instead.
+const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Critically damped spring that settles in about `duration_ms`.
 fn motion_spring(duration_ms: u32) -> SpringConfig {

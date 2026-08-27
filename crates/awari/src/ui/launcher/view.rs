@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{
-    AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    AnimationExt, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Render,
     ScrollStrategy, SharedString, SpringAnimation, Styled, StyledImage, StyledText, Task,
     UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
@@ -10,11 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::icon_cache::{BoundedImageCache, ICON_GPU_RETENTION};
 use super::scoring::*;
 use super::types::*;
 use super::{
     GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H,
-    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H, motion_spring,
+    QUERY_DEBOUNCE, RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H, motion_spring,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -123,6 +124,7 @@ struct ActionMenu {
 
 pub struct Launcher {
     pub shell: WeakEntity<Daemon>,
+    icon_cache: Entity<BoundedImageCache>,
     view: LauncherView,
     cursor: usize,
     caret_on: bool,
@@ -168,6 +170,11 @@ pub struct Launcher {
     /// Invalidates in-flight debounce tasks. Dropping the Task does not
     /// cancel the executor timer, so a generation check is required.
     reveal_gen: u64,
+    /// Task that sends the typed query to the daemon after `QUERY_DEBOUNCE` of
+    /// quiet typing, so the (heavy) file search runs once per pause, not per key.
+    query_debounce: Option<Task<()>>,
+    /// Invalidates in-flight query-send debounce tasks (see `reveal_gen`).
+    query_gen: u64,
     /// True after a local edit until a daemon snapshot with the same query
     /// arrives. Stale snapshots must not overwrite the input buffer.
     local_query_dirty: bool,
@@ -183,8 +190,9 @@ impl Launcher {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let this = Self {
             shell,
+            icon_cache: BoundedImageCache::new(ICON_GPU_RETENTION, cx),
             view: LauncherView::closed(theme),
             cursor: 0,
             caret_on: true,
@@ -206,15 +214,23 @@ impl Launcher {
             fit_expanded: false,
             height_debounce: None,
             reveal_gen: 0,
+            query_debounce: None,
+            query_gen: 0,
             local_query_dirty: false,
             open_gen: 0,
-        }
+        };
+        this
+    }
+
+    /// Release every cached icon texture so a hidden, resident overlay holds
+    /// zero icon memory. Rows re-decode on the next show.
+    pub(crate) fn clear_icon_cache(&mut self, cx: &mut Context<Self>) {
+        self.icon_cache.update(cx, |cache, cx| cache.clear(cx));
     }
 
     pub fn apply_view(&mut self, incoming: LauncherView, cx: &mut Context<Self>) {
         let was_open = self.view.open;
         let opening = incoming.open && !was_open;
-
         if opening {
             self.cursor = 0;
             self.local_query_dirty = false;
@@ -378,6 +394,36 @@ impl Launcher {
             });
         });
         self.height_debounce = Some(debounce);
+    }
+
+    /// Send the current query to the daemon after `QUERY_DEBOUNCE` of quiet
+    /// typing, so a burst of keystrokes triggers one file search instead of one
+    /// per character. Cancel any prior pending send via the generation counter.
+    fn schedule_query_post(&mut self, cx: &mut Context<Self>) {
+        self.query_gen = self.query_gen.wrapping_add(1);
+        self.query_debounce.take();
+        let ticket = self.query_gen;
+        let debounce = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(QUERY_DEBOUNCE).await;
+            let _ = this.update(cx, |l, cx| {
+                if l.query_gen != ticket {
+                    return;
+                }
+                let query = l.view.query.clone();
+                post(l, cx, LauncherCmd::SetQuery { query });
+            });
+        });
+        self.query_debounce = Some(debounce);
+    }
+
+    /// Send the current query to the daemon now, cancelling any pending debounced
+    /// send. Used on commit keys (Enter) and activation so the daemon never
+    /// acts on a stale query.
+    fn flush_query_post(&mut self, cx: &mut Context<Self>) {
+        self.query_gen = self.query_gen.wrapping_add(1);
+        self.query_debounce.take();
+        let query = self.view.query.clone();
+        post(self, cx, LauncherCmd::SetQuery { query });
     }
 
     /// Begin the close animation without discarding the current content.
@@ -778,6 +824,7 @@ impl Launcher {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
+                    this.flush_query_post(cx);
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
@@ -825,6 +872,7 @@ impl Launcher {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
+                    this.flush_query_post(cx);
                     post(this, cx, LauncherCmd::Activate { index: i });
                 }),
             )
@@ -1068,7 +1116,7 @@ impl Render for Launcher {
                         }),
                     )
                     .track_scroll(&self.scroll)
-                    .h(px(n as f32 * GRID_ROW_H)),
+                    .h(px(results_h)),
                 );
             } else {
                 let n = self.view.rows.len();
@@ -1287,6 +1335,7 @@ impl Render for Launcher {
                         return;
                     }
                     cx.stop_propagation();
+                    this.flush_query_post(cx);
                     post(
                         this,
                         cx,
@@ -1336,10 +1385,10 @@ impl Render for Launcher {
                     }
                     return;
                 }
-                if let Some(query) = this.edit(&ev.keystroke) {
+                if this.edit(&ev.keystroke).is_some() {
                     cx.stop_propagation();
                     this.on_query_typed(cx);
-                    post(this, cx, LauncherCmd::SetQuery { query });
+                    this.schedule_query_post(cx);
                 }
                 cx.notify();
             }))
@@ -1357,6 +1406,9 @@ impl Render for Launcher {
                     )
                     .child(
                         div()
+                            .image_cache(self.icon_cache.clone())
+                            .child(
+                                div()
                             .id("launcher-panel")
                             .relative()
                             .w(px(panel_w))
@@ -1459,7 +1511,7 @@ impl Render for Launcher {
                                         .mt(px((p - 1.0) * 12.0))
                                 },
                             ),
-                    ),
+                    )),
             )
     }
 }

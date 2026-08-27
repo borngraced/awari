@@ -127,6 +127,10 @@ impl PlatformAtlas for WgpuAtlas {
         }
     }
 
+    fn clear(&self) {
+        WgpuAtlas::clear(self);
+    }
+
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
