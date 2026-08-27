@@ -60,6 +60,23 @@ fn apply_probe_query(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
     daemon.apply_launcher_cmd(LauncherCmd::SetQuery { query: (*query).into() }, cx);
 }
 
+/// Dev-only probe: when `AWARI_PROBE_CATEGORY=apps|files|windows` is set, each
+/// launcher open lands directly on that source tab (empty query), so the Apps
+/// icon grid — the heaviest panel — can be driven from a script for memory
+/// measurement. No-op in normal use (env var unset).
+fn apply_probe_category(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
+    let Ok(category) = std::env::var("AWARI_PROBE_CATEGORY") else {
+        return;
+    };
+    let category = match category.as_str() {
+        "apps" => launcher::Category::Apps,
+        "files" => launcher::Category::Files,
+        "windows" => launcher::Category::Windows,
+        _ => return,
+    };
+    daemon.apply_launcher_cmd(LauncherCmd::SetCategory { category }, cx);
+}
+
 use awari_compositor::{
     Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
 };
@@ -703,6 +720,7 @@ impl Daemon {
                 self.files_seq = ft.invalidate();
             }
             apply_probe_query(self, cx);
+            apply_probe_category(self, cx);
             let started = Instant::now();
             self.ensure_launcher_display(cx);
             eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());

@@ -122,6 +122,10 @@ pub struct WaylandWindowState {
     handle: AnyWindowHandle,
     active: bool,
     hovered: bool,
+    /// Tracks whether the overlay is currently shown/interactive. `false`
+    /// while hidden (release for idle) so a stray redraw cannot resurrect a
+    /// released surface; flipped by `set_keyboard_interactivity`.
+    visible: bool,
     redraw_requested: bool,
     presentation: PresentationState,
     pending_frame_callback: Option<wl_callback::WlCallback>,
@@ -622,6 +626,7 @@ impl WaylandWindowState {
             handle,
             active: false,
             hovered: false,
+            visible: false,
             redraw_requested: false,
             presentation: PresentationState::Unpresented,
             pending_frame_callback: None,
@@ -1830,7 +1835,11 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn set_keyboard_interactivity(&self, interactivity: KeyboardInteractivity) {
-        let state = self.borrow();
+        let mut state = self.borrow_mut();
+        // The launcher is the only user: Exclusive marks it shown, None hides
+        // it. Downgrading to OnDemand (or any non-None value) is still treated
+        // as visible/interactive for the idle-release gate.
+        state.visible = interactivity != KeyboardInteractivity::None;
         if let WaylandSurfaceState::LayerShell(ls) = &state.surface_state {
             ls.layer_surface
                 .set_keyboard_interactivity(super::layer_shell::wayland_keyboard_interactivity(
@@ -1942,6 +1951,14 @@ impl PlatformWindow for WaylandWindow {
         // The surface was released for idle (hidden overlay). Rebuild it on the
         // first draw that actually presents, keeping the shared device alive.
         if state.renderer.is_released() {
+            // A stray redraw while hidden (fade tail, caret tick, late notify)
+            // must not resurrect a released surface: it would hand the
+            // compositor a fresh hidden frame and undo the idle release. Absorb
+            // it and stay released until the window is interactive again.
+            if !state.visible {
+                state.redraw_requested = false;
+                return;
+            }
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
                 display: state

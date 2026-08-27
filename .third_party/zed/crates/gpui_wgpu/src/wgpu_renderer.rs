@@ -2179,7 +2179,14 @@ impl WgpuRenderer {
         let context = ctx_ref.as_ref().expect("context should exist");
 
         self.resources = None;
-        self.atlas.handle_device_lost(context);
+        // Only reset the atlas when the underlying context was recreated. On an
+        // idle-release reopen the device/context is untouched, so its texture
+        // views stay valid and the frame that just uploaded fresh sprite tiles
+        // keeps them: wiping storage here would orphan those ids and panic the
+        // immediate draw (index out of bounds in get_texture_info).
+        if needs_new_context {
+            self.atlas.handle_device_lost(context);
+        }
 
         *self = Self::new_internal(
             Some(gpu_context.clone()),
