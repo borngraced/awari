@@ -50,6 +50,10 @@ const ROW_H: f32 = 60.0;
 const LIST_BREATH: f32 = 8.0;
 /// Content height of the "no matches" block (py(28)*2 + ~text).
 const NO_MATCH_H: f32 = 76.0;
+/// Content height of the empty-state source list (3 rows: Apps / Files /
+/// Windows). Inset 6px + 3×row(~36) + 2×gap(2) + 6px ≈ 124; a little slack
+/// avoids any clipping when the font metrics push a row a hair taller.
+const SOURCE_LIST_H: f32 = 134.0;
 /// Minimum scale while the overlay is closed, so it eases in/out from ~92%.
 const SCALE_MIN: f32 = 0.92;
 const SEARCH_H: f32 = 50.0;

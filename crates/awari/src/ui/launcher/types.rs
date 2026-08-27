@@ -36,10 +36,6 @@ impl Category {
             Self::Windows => "Windows",
         }
     }
-
-    pub(crate) fn all() -> [Category; 4] {
-        [Self::Apps, Self::Files, Self::Commands, Self::Windows]
-    }
 }
 #[derive(Clone)]
 pub enum LauncherCmd {

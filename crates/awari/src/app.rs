@@ -428,7 +428,9 @@ impl Daemon {
             rows
         };
 
-        if self.launcher_selected >= rows.len() {
+        let source_active = self.launcher_query.trim().is_empty()
+            && self.launcher_category == launcher::Category::All;
+        if !source_active && self.launcher_selected >= rows.len() {
             self.launcher_selected = rows.len().saturating_sub(1);
         }
 
@@ -576,6 +578,7 @@ impl Daemon {
                 if self.launcher_category != category {
                     self.launcher_category = category;
                     self.launcher_selected = 0;
+                    self.refresh_file_hits();
                     self.sync_launcher(cx);
                 }
             }
@@ -753,15 +756,40 @@ impl Daemon {
             self.history_step(key == "down" || key == "arrowdown", cx);
             return;
         }
+        // The empty-state source menu (Apps / Files / Windows) navigates a
+        // separate 3-row selection instead of the result list.
+        let source_active = self.launcher_query.trim().is_empty()
+            && self.launcher_category == launcher::Category::All;
         match key.as_str() {
             "escape" | "esc" => self.dismiss_launcher(cx),
-            "enter" | "return" => self.activate_launcher_row(cx),
+            "enter" | "return" => {
+                if source_active {
+                    let category = match self.launcher_selected {
+                        1 => launcher::Category::Files,
+                        2 => launcher::Category::Windows,
+                        _ => launcher::Category::Apps,
+                    };
+                    self.launcher_category = category;
+                    self.launcher_selected = 0;
+                    self.sync_launcher(cx);
+                } else {
+                    self.activate_launcher_row(cx);
+                }
+            }
             "up" | "arrowup" => {
-                self.launcher_selected = self.launcher_selected.saturating_sub(1);
+                if source_active {
+                    self.launcher_selected = self.launcher_selected.saturating_sub(1).min(2);
+                } else {
+                    self.launcher_selected = self.launcher_selected.saturating_sub(1);
+                }
                 self.sync_launcher(cx);
             }
             "down" | "arrowdown" => {
-                self.launcher_selected = self.launcher_selected.saturating_add(1);
+                if source_active {
+                    self.launcher_selected = (self.launcher_selected + 1).min(2);
+                } else {
+                    self.launcher_selected = self.launcher_selected.saturating_add(1);
+                }
                 self.sync_launcher(cx);
             }
             _ => {}
@@ -803,10 +831,13 @@ impl Daemon {
                 }
             }
         };
+
         self.history_cursor = next;
+
         if let Some(idx) = next {
             self.launcher_query = self.query_history[idx].clone();
         }
+
         self.launcher_selected = 0;
         self.refresh_file_hits();
         self.sync_launcher(cx);
@@ -891,6 +922,11 @@ impl Daemon {
         if let Some(ft) = &mut self.files_tx {
             if !self.launcher_query.trim().is_empty() {
                 self.files_seq = ft.query(&self.launcher_query);
+            } else if self.launcher_category == launcher::Category::Files {
+                // Empty query in the Files category is a browse: fff-search
+                // returns frecency-ranked files, so the list shows "recent and
+                // frequent" without typing.
+                self.files_seq = ft.query("");
             } else {
                 self.files_seq = ft.invalidate();
             }
@@ -980,6 +1016,9 @@ impl Daemon {
         }
         self.dismiss_launcher(cx);
         if let launcher::RowKind::File { path } = kind {
+            if let Some(files) = &self.files_tx {
+                files.record_open(&path);
+            }
             crate::files::activate(&path);
             return;
         }

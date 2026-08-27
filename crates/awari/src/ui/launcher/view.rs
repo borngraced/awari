@@ -2,8 +2,8 @@ use gpui::prelude::*;
 use gpui::{
     AnimationExt, AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Point, Render,
-    SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText,
-    Task, UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
+    SharedString, SpringAnimation, SpringState, Styled, StyledImage, StyledText, Task,
+    UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H, RESULTS_DEBOUNCE,
-    ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H, motion_spring,
+    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, LIST_BREATH, NO_MATCH_H,
+    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SCROLL_EPSILON, SCROLL_SPRING, SEARCH_H, SOURCE_LIST_H,
+    motion_spring,
 };
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -52,6 +53,14 @@ pub(crate) enum RevealAction {
 
 pub(crate) fn wants_results(query: &str, category: Category, has_calc: bool) -> bool {
     !has_calc && (!query.trim().is_empty() || category != Category::All)
+}
+
+/// The empty-state source menu (Apps / Files / Windows) is visible only at the
+/// top level with no query and no calculator result. Visibility tracks the
+/// query instantly: shown the moment it empties, hidden the instant a char is
+/// typed — there is no debounce on the hide path.
+pub(crate) fn source_menu_visible(query_empty: bool, category: Category, has_calc: bool) -> bool {
+    query_empty && category == Category::All && !has_calc
 }
 
 /// Results stay hidden while the query is changing. A pause reveals them
@@ -126,7 +135,9 @@ pub struct Launcher {
     scroll_last: Instant,
     open_started: Option<Instant>,
     pub(crate) closing: bool,
-    hovered_chip: Option<Category>,
+    /// Hovered source-list row (empty-state menu), tracked separately from the
+    /// keyboard selection so mouse hover can highlight without stealing focus.
+    hovered_source: Option<usize>,
     /// Last row index we posted a `Select` for, so pointer-move spam over the
     /// same row doesn't round-trip through the daemon.
     last_select: Option<usize>,
@@ -192,7 +203,7 @@ impl Launcher {
             scroll_last: Instant::now(),
             open_started: None,
             closing: false,
-            hovered_chip: None,
+            hovered_source: None,
             last_select: None,
             last_input_open: None,
             focused: false,
@@ -283,8 +294,11 @@ impl Launcher {
         self.view.motion_ms = incoming.motion_ms;
         self.last_select = Some(self.view.selected);
 
-        let wants =
-            wants_results(&self.view.query, self.view.category, self.view.calc.is_some());
+        let wants = wants_results(
+            &self.view.query,
+            self.view.category,
+            self.view.calc.is_some(),
+        );
         match reveal_action(wants, daemon_query, category_changed) {
             RevealAction::Collapse => self.hide_results(),
             RevealAction::Debounce => self.schedule_results_reveal(cx),
@@ -321,7 +335,11 @@ impl Launcher {
     fn on_query_typed(&mut self, cx: &mut Context<Self>) {
         self.local_query_dirty = true;
         self.view.calc = crate::math::evaluate(&self.view.query);
-        if wants_results(&self.view.query, self.view.category, self.view.calc.is_some()) {
+        if wants_results(
+            &self.view.query,
+            self.view.category,
+            self.view.calc.is_some(),
+        ) {
             self.schedule_results_reveal(cx);
         } else {
             self.hide_results();
@@ -808,7 +826,10 @@ impl Launcher {
         }
 
         let now = Instant::now();
-        let dt = now.duration_since(self.scroll_last).as_secs_f32().clamp(0.0, 0.032);
+        let dt = now
+            .duration_since(self.scroll_last)
+            .as_secs_f32()
+            .clamp(0.0, 0.032);
         self.scroll_last = now;
         let next = SCROLL_SPRING.step(self.scroll_spring, target_y, dt);
         let settled = SCROLL_SPRING.is_settled(next, target_y, SCROLL_EPSILON);
@@ -878,13 +899,7 @@ impl Launcher {
             .into_any_element()
     }
 
-    fn list_row(
-        &self,
-        i: usize,
-        t: &Theme,
-        q: &[char],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn list_row(&self, i: usize, t: &Theme, q: &[char], cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.view.rows.get(i) else {
             return div().id(("launch-row-empty", i)).into_any_element();
         };
@@ -943,6 +958,74 @@ impl Launcher {
             )
             .into_any_element()
     }
+
+    /// Empty-state menu: a fixed, overlay-style list of the three sources
+    /// (Apps / Files / Windows). Shown only when the query is empty and we are
+    /// at the top level (`Category::All`). Highlights the keyboard-selected
+    /// row (`view.selected`) or the mouse-hovered row; clicking a row enters
+    /// that category's browse view.
+    fn source_list_el(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity();
+        let cats = [Category::Apps, Category::Files, Category::Windows];
+        let subtitles = [
+            "Browse installed apps",
+            "Recent and frequent",
+            "Currently open windows",
+        ];
+        let sel = self.view.selected;
+        let hover = self.hovered_source;
+        div().id("source-list").flex_col().gap(px(2.)).children(
+            cats.iter()
+                .enumerate()
+                .map(|(i, &c)| {
+                    let this = this.clone();
+                    let selected = sel == i || hover == Some(i);
+                    div()
+                        .id(("source-row", i as u64))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .py(px(9.))
+                        .rounded(px(8.))
+                        .when(selected, |el| el.bg(t.ghost()))
+                        .on_hover(move |h: &bool, _window, cx: &mut App| {
+                            this.update(cx, |l, cx| {
+                                if *h {
+                                    l.hovered_source = Some(i);
+                                } else if l.hovered_source == Some(i) {
+                                    l.hovered_source = None;
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                post(this, cx, LauncherCmd::SetCategory { category: c });
+                            }),
+                        )
+                        .child(
+                            div()
+                                .w(px(18.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(c.icon().element_px(t.muted(), 17.0)),
+                        )
+                        .child(div().text_size(px(14.)).text_color(t.fg()).child(c.label()))
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(t.muted())
+                                .child(subtitles[i]),
+                        )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
 impl Render for Launcher {
@@ -983,19 +1066,12 @@ impl Render for Launcher {
         let panel_w = LAUNCHER_W.min(win_w * 0.92).max(280.0);
         let q_empty = self.view.query.trim().is_empty();
         let cat = self.view.category;
-        let active_cat = if cat != Category::All {
-            cat
-        } else if q_empty {
-            Category::All
-        } else {
-            self.view
-                .rows
-                .get(self.view.selected)
-                .or_else(|| self.view.rows.first())
-                .map(row_category)
-                .unwrap_or(Category::All)
-        };
         let browsing_grid = cat == Category::Apps && q_empty;
+        // Empty-state source menu: only at the top level with no query. It is
+        // an overlay below the search bar and must never resize/reposition the
+        // input box or the window — visibility tracks the query instantly
+        // (shown the moment it empties, hidden the instant a char is typed).
+        let source_list = source_menu_visible(q_empty, cat, self.view.calc.is_some());
         let expanded = self.fit_expanded;
         let max_panel_h: f32 = 500.0;
         let search_bar_h: f32 = SEARCH_H;
@@ -1008,7 +1084,9 @@ impl Render for Launcher {
         // panel does not resize per keystroke; the list content below still
         // uses the live row count.
         let fit_rows = self.fit_rows;
-        let results_h = if browsing_grid {
+        let results_h = if source_list {
+            SOURCE_LIST_H
+        } else if browsing_grid {
             let grid_rows = fit_rows.div_ceil(GRID_COLS);
             (grid_rows as f32 * GRID_ROW_H + LIST_BREATH)
                 .min(max_panel_h - search_bar_h - chips_h - results_pad)
@@ -1018,7 +1096,11 @@ impl Render for Launcher {
             (fit_rows as f32 * ROW_H + LIST_BREATH)
                 .min(max_panel_h - search_bar_h - chips_h - results_pad)
         };
-        let panel_h = if expanded {
+        let panel_h = if source_list {
+            // Fixed height for the overlay menu; the input box stays put.
+            // The +2 absorbs the panel's 1px borders so nothing clips.
+            (search_bar_h + 6.0 + results_h + 6.0 + 2.0).clamp(search_bar_h, max_panel_h)
+        } else if expanded {
             (search_bar_h + chips_h + results_pad + results_h).clamp(search_bar_h, max_panel_h)
         } else {
             search_bar_h
@@ -1036,126 +1118,72 @@ impl Render for Launcher {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .min_h_0()
-            .p(px(8.))
-            .mb(px(8.));
-        results = results.w_full();
-        if self.view.rows.is_empty() {
-            results = results.child(
-                div()
-                    .px(px(12.))
-                    .py(px(28.))
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(t.faint())
-                    .child("no matches"),
-            );
-        } else if browsing_grid {
-            let n = self.view.rows.len().div_ceil(GRID_COLS);
-            let t_grid = t.clone();
-            results = results.child(
-                uniform_list(
-                    "launch-grid",
-                    n,
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        range
-                            .map(|row_i| {
-                                let mut row =
-                                    div().flex().flex_row().gap(px(10.)).p(px(8.)).w_full();
-                                for col in 0..GRID_COLS {
-                                    let i = row_i * GRID_COLS + col;
-                                    row = row.child(this.tile(i, &t_grid, cx));
-                                }
-                                row
-                            })
-                            .collect()
-                    }),
-                )
-                .track_scroll(&self.scroll)
-                .flex_1()
-                .h_full(),
-            );
+            .min_h_0();
+        if source_list {
+            results = results
+                .p(px(6.))
+                .mb(px(6.))
+                .w_full()
+                .child(self.source_list_el(&t, cx));
         } else {
-            let n = self.view.rows.len();
-            let t_list = t.clone();
-            let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
-            let list_h = (fit_rows as f32 * ROW_H + LIST_BREATH)
-                .min(max_panel_h - search_bar_h - chips_h - results_pad);
-
-            results = results.child(
-                uniform_list(
-                    "launch-list",
-                    n,
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        range
-                            .map(|i| this.list_row(i, &t_list, &q_chars, cx))
-                            .collect()
-                    }),
-                )
-                .track_scroll(&self.scroll)
-                .flex_1()
-                .h(px(list_h)),
-            );
-        }
-
-        let mut cat_icons = div().flex().flex_none().items_center().gap(px(6.));
-        let this = cx.entity();
-        let files_enabled = self.view.files_enabled;
-        let windows_enabled = self.view.windows_enabled;
-        for c in Category::all() {
-            if c == Category::Files && !files_enabled {
-                continue;
-            }
-            if c == Category::Windows && !windows_enabled {
-                continue;
-            }
-            let active = active_cat == c;
-            let cc = c;
-            let this = this.clone();
-            let icon_col = if active { t.accent() } else { t.muted() };
-            let text_col = if active { t.accent() } else { t.muted() };
-            cat_icons = cat_icons.child(
-                div()
-                    .id(("cat-chip", c as u64))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(999.))
-                    .cursor_pointer()
-                    .when(active, |el| el.bg(t.select()))
-                    .on_hover(move |h: &bool, _window, cx: &mut App| {
-                        this.update(cx, |l, cx| {
-                            if *h {
-                                l.hovered_chip = Some(cc);
-                            } else if l.hovered_chip == Some(cc) {
-                                l.hovered_chip = None;
-                            }
-                            cx.notify();
-                        });
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            let next = if this.view.category == cc {
-                                Category::All
-                            } else {
-                                cc
-                            };
-                            post(this, cx, LauncherCmd::SetCategory { category: next });
+            results = results.p(px(8.)).mb(px(8.)).w_full();
+            if self.view.rows.is_empty() {
+                results = results.child(
+                    div()
+                        .px(px(12.))
+                        .py(px(28.))
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(t.faint())
+                        .child("no matches"),
+                );
+            } else if browsing_grid {
+                let n = self.view.rows.len().div_ceil(GRID_COLS);
+                let t_grid = t.clone();
+                results = results.child(
+                    uniform_list(
+                        "launch-grid",
+                        n,
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            range
+                                .map(|row_i| {
+                                    let mut row =
+                                        div().flex().flex_row().gap(px(10.)).p(px(8.)).w_full();
+                                    for col in 0..GRID_COLS {
+                                        let i = row_i * GRID_COLS + col;
+                                        row = row.child(this.tile(i, &t_grid, cx));
+                                    }
+                                    row
+                                })
+                                .collect()
                         }),
                     )
-                    .child(c.icon().element_px(icon_col, 14.0))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(text_col)
-                            .child(c.label()),
-                    ),
-            );
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .h_full(),
+                );
+            } else {
+                let n = self.view.rows.len();
+                let t_list = t.clone();
+                let q_chars: Vec<char> = self.view.query.trim().to_lowercase().chars().collect();
+                let list_h = (fit_rows as f32 * ROW_H + LIST_BREATH)
+                    .min(max_panel_h - search_bar_h - chips_h - results_pad);
+
+                results = results.child(
+                    uniform_list(
+                        "launch-list",
+                        n,
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            range
+                                .map(|i| this.list_row(i, &t_list, &q_chars, cx))
+                                .collect()
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .h(px(list_h)),
+                );
+            }
         }
 
         let action_menu_el = self.action_menu.as_ref().map(|menu| {
@@ -1418,9 +1446,7 @@ impl Render for Launcher {
                     .ml(px(offset_x))
                     .with_spring(
                         ("launcher-panel-h", open_gen),
-                        SpringAnimation::new(motion)
-                            .to(panel_h)
-                            .from(SEARCH_H),
+                        SpringAnimation::new(motion).to(panel_h).from(SEARCH_H),
                         |el, h| el.h(px(h)),
                     )
                     .child(
@@ -1493,7 +1519,7 @@ impl Render for Launcher {
                                             }
                                         }),
                                     )
-                                    .child(Icon::Search.element_px(t.muted(), 20.0))
+                                    .child(Icon::Search.element_px(t.muted(), 25.0))
                                     .child(
                                         div()
                                             .id("query-wrap")
@@ -1517,19 +1543,7 @@ impl Render for Launcher {
                                             }),
                                     ),
                             )
-                            .when(expanded, |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        .px(px(20.))
-                                        .py(px(8.))
-                                        .child(cat_icons),
-                                )
-                                .child(results_body)
-                            })
+                            .when(expanded || source_list, |el| el.child(results_body))
                             .with_spring(
                                 ("launcher-panel", open_gen),
                                 SpringAnimation::new(motion).to(target).from(0.0),

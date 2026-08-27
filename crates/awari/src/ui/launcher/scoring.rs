@@ -3,18 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::desktop::DesktopApp;
-use crate::files::FileHit;
 use super::types::*;
 use super::view::build_subtitle;
-pub fn row_category(r: &LauncherRow) -> Category {
-    match r.kind {
-        RowKind::App { .. } => Category::Apps,
-        RowKind::File { .. } => Category::Files,
-        RowKind::Window { .. } => Category::Windows,
-        RowKind::Command { .. } => Category::Commands,
-    }
-}
+use crate::desktop::DesktopApp;
+use crate::files::FileHit;
 
 pub fn push_capped(
     out: &mut Vec<LauncherRow>,
@@ -188,9 +180,7 @@ pub fn open_file_row(p: &Path, is_direct: bool) -> LauncherRow {
         let name = lossy.as_deref().unwrap_or(&fallback);
         SharedString::from(name)
     };
-    let kind = RowKind::File {
-        path: Arc::from(p),
-    };
+    let kind = RowKind::File { path: Arc::from(p) };
     LauncherRow {
         subtitle: build_subtitle(&kind),
         kind,
@@ -466,9 +456,9 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
 
     let mut out: Vec<LauncherRow> = Vec::new();
     if files_only {
-        if !empty {
-            push_capped(&mut out, Some(file_max), files.iter().map(file_row));
-        }
+        // Empty query in the Files category is a frecency browse; show the
+        // ranked files without requiring a typed filter.
+        push_capped(&mut out, Some(file_max), files.iter().map(file_row));
         return out;
     }
     if apps_only {

@@ -184,6 +184,35 @@ fn files_chip_returns_every_hit() {
 }
 
 #[test]
+fn files_empty_query_shows_browse() {
+    let files: Vec<FileHit> = (0..12)
+        .map(|i| FileHit {
+            path: Arc::from(PathBuf::from(format!("/tmp/f{i}"))),
+        })
+        .collect();
+    // Empty query in the Files category is a frecency browse: every hit is
+    // shown (capped by file_max), not gated behind a typed filter.
+    let out = filter_rows(FilterParams {
+        query: "",
+        apps: &[],
+        windows: &[],
+        files: &files,
+        recents: &[],
+        app_usage: &Default::default(),
+        app_icons: &Default::default(),
+        category: Category::Files,
+        file_max: 50,
+        total_max: 30,
+        cached_app_rows: None,
+        cached_win_rows: None,
+        prefix: None,
+        calc: None,
+    });
+    assert_eq!(out.len(), 12);
+    assert!(out.iter().all(|r| matches!(r.kind, RowKind::File { .. })));
+}
+
+#[test]
 fn commands_chip_runs_query() {
     let out = filter_rows(FilterParams {
         query: "x",
@@ -348,6 +377,20 @@ fn reveal_waits_for_query_pause() {
     assert!(wants_results("a", Category::All, false));
     assert!(wants_results("", Category::Apps, false));
     assert!(!wants_results("2+2", Category::All, true));
+}
+
+#[test]
+fn source_menu_shows_only_when_empty_and_top_level() {
+    // Visible: empty query at the top level, no calculator result.
+    assert!(source_menu_visible(true, Category::All, false));
+    // Hidden the instant a char is typed.
+    assert!(!source_menu_visible(false, Category::All, false));
+    // Hidden inside a category browse (even when empty).
+    assert!(!source_menu_visible(true, Category::Apps, false));
+    assert!(!source_menu_visible(true, Category::Files, false));
+    assert!(!source_menu_visible(true, Category::Windows, false));
+    // Hidden when a calculator result is showing.
+    assert!(!source_menu_visible(true, Category::All, true));
 }
 
 #[test]
