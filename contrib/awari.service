@@ -1,5 +1,5 @@
 [Unit]
-Description=Àwárí — A blazingly fast launcher for Wayland compositors
+Description=Awari Wayland launcher
 PartOf=graphical-session.target
 After=graphical-session.target
 

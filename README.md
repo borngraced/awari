@@ -2,7 +2,7 @@
   <img src="crates/awari/assets/awa-logo.svg" width="240" alt="Àwárí logo">
 </p>
 
-# Àwárí
+# Àwárí (experimental)
 
 Awari is a Wayland launcher. Built with
 [GPUI](https://github.com/zed-industries/zed) and
@@ -108,9 +108,9 @@ Linux + Wayland compositor (best on niri, Hyprland, sway, river, labwc via
 
 ```sh
 # Debian/Ubuntu
-sudo apt install libwayland-dev libxkbcommon-dev libegl-dev pkg-config
+sudo apt install libwayland-dev libegl-dev pkg-config
 # Fedora
-sudo dnf install wayland-devel libxkbcommon-devel mesa-libEGL-devel
+sudo dnf install wayland-devel mesa-libEGL-devel
 
 cargo test
 cargo run -p awari
@@ -119,7 +119,7 @@ awari ping
 
 ## Install
 
-`awari` isn't on crates.io — it depends on a vendored, patched GPUI under
+`awari` isn't on crates.io because it depends on a vendored, patched GPUI under
 `.third_party/zed` (a local `[patch]` can't be published). Install from git:
 
 ```sh

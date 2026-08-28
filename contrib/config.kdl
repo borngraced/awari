@@ -6,7 +6,7 @@
 // Pick a built-in palette by name (case-insensitive), then override tokens:
 //   awari (default) · ash · ember · verdant · paper · mono
 //   nord · tokyonight · catppuccin · gruvbox
-// Colors accept #RGB, #RRGGBB, or #RRGGBBAA — no url() or named CSS colors.
+// Colors accept #RGB, #RRGGBB, or #RRGGBBAA, with no url() or named CSS colors.
 theme {
     name "awari"               // preset; omit to define every color by hand
 
