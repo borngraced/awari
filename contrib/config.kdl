@@ -38,13 +38,26 @@ files {
     // `/` is ignored; `~` expands to $HOME. Never index all of `/`.
     index_lockfiles false     // show Cargo.lock, package-lock.json, *.lock, …
     regex           false     // treat file queries as regex (the `r:` prefix forces it per-query)
+    max-results     50        // max file rows shown
+}
+
+// ── fff ──────────────────────────────────────────────────────────────
+// Options passed to the fff-search file indexers. The search root is always
+// `files.roots`, and home scanning is automatic when a root is `$HOME`, so
+// those two are not configurable.
+fff {
+    watch true             // background file watcher keeps the index warm
+    fs-root-scanning true  // allow indexing the filesystem root
+    mmap-cache false       // pre-populate mmap caches for top-frecency files
+    content-indexing false // build a content index for content-aware filtering
+    follow-symlinks false  // index through symbolic links
 }
 
 // ── Sources ───────────────────────────────────────────────────────────
-// Hide a backend without recompiling.
+// Hide a backend without recompiling. Apps are always indexed and cannot be
+// turned off.
 sources {
     windows true
-    apps    true
     files   true
 }
 
@@ -53,3 +66,7 @@ motion {
     reduced     false          // skip animations entirely
     duration-ms 140            // open/close length; clamped to 0..=1000
 }
+
+// ── Top-level ─────────────────────────────────────────────────────────
+max-results 30               // max total rows in the All view (apps + files + windows)
+keep-alive true              // GPU overlay stays in memory (hidden) between uses; false = exits on dismiss

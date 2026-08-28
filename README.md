@@ -13,7 +13,7 @@ frecency-ranked index that doesn't waste CPU cycles spawning subprocesses on
 every keystroke.
 
 By separating a tiny, GPU-free background daemon from a warm GPU overlay, Awari
-pops onto your screen in an unnoticeable ~19 ms while maintaining a lean idle
+pops onto your screen in an unnoticeable instant while maintaining a lean idle
 footprint. For ultra-low-spec hardware, it can easily drop down to a pure
 on-demand mode to free up every megabyte of RAM.
 
@@ -63,8 +63,9 @@ runtime just to draw a box, with files as an afterthought. Àwárí runs file se
 in-process via fff-search and ranks windows, apps, and files together, so there's
 no subprocess per character and you get whichever you meant. A GPU-free
 shell opens the overlay with a socket message; by default it's kept alive (hidden)
-for instant re-opens (~19 ms, ~77 MB idle), or torn down with `keep-alive = false`
-/ `--no-keep-alive` (~100 ms rebuild, 8.5 MB idle).
+for instant re-opens, or torn down with `keep-alive = false`
+/ `--no-keep-alive` for the leanest idle footprint (the interface rebuilds on
+the next open).
 
 ## Usage
 
@@ -87,8 +88,8 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
 ## Features
 
-- **Lightweight**: GPU-free background daemon; overlay kept alive hidden (~19 ms
-  re-open, ~77 MB idle) or dropped entirely (8.5 MB idle, ~100 ms rebuild).
+- **Lightweight**: GPU-free background daemon; overlay kept alive hidden for
+  instant re-opens, or dropped entirely for the leanest idle footprint.
 - **In-process search**: fff-search ranks by frecency with no per-keystroke
   subprocess; `matchq` scores windows/apps without per-keystroke allocation.
   IPC read-to-damage is under 2 ms p99.
@@ -181,6 +182,15 @@ files {
   roots "~/Documents" "~/Downloads" "~/code"   // omit/empty = XDG user dirs
   index_lockfiles false                        // show Cargo.lock, *.lock, …
   regex           false                        // file queries as regex (r: prefix forces it)
+  max-results     50                           // max file rows shown
+}
+
+fff {
+  watch true             // background file watcher
+  fs-root-scanning true  // allow indexing the filesystem root
+  mmap-cache false       // mmap pre-warm for top-frecency files
+  content-indexing false // content index for content-aware filtering
+  follow-symlinks false  // index through symbolic links
 }
 
 sources {

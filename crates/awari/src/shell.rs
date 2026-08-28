@@ -5,9 +5,9 @@
 //! flag `--no-keep-alive`):
 //! - Keep alive (default): a single `awari gui` is pre-spawned hidden and kept
 //!   warm; toggles send SIGUSR1 (show) / SIGUSR2 (hide). Re-opens are instant
-//!   but the GPU process stays in memory at ~tens of MB.
+//!   but the GPU process stays in memory while idle.
 //! - Drop: `awari gui` is spawned on open and quits on dismiss, so idle is a
-//!   few-MB shell; re-open rebuilds the interface (~100 ms).
+//!   tiny GPU-free shell; re-open rebuilds the interface.
 
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};

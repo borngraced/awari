@@ -17,8 +17,8 @@ use gpui::{
 };
 use std::collections::HashMap;
 use std::fs;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 
@@ -147,10 +147,6 @@ impl Daemon {
         daemon.update(cx, |d, cx| {
             d.keep_alive = matches!(gpu_mode, GpuMode::KeepAlive);
 
-            // Overlay (wgpu device, shaders, fonts, sprite/glyph atlas) is
-            // created lazily on the first `set_launcher_open`, not at boot, so a
-            // resident hidden launcher sits at the binary + file-index baseline
-            // instead of paying the ~36 MiB GPU warm-up up front.
             if matches!(start_state, StartState::Open) {
                 d.set_launcher_open(true, cx);
             }
@@ -203,6 +199,7 @@ impl Daemon {
                 crate::files::FilesOptions {
                     index_lockfiles: cfg.files.index_lockfiles,
                     regex: cfg.files.regex,
+                    fff: cfg.fff,
                 },
             );
             (Some(tx), Some(rx))
@@ -690,11 +687,6 @@ impl Daemon {
         self.history_cursor = None;
         self.history_live = None;
 
-        // Hide the surface (fade out) but keep it alive through the animation,
-        // then, in drop mode, quit after the fade completes. The grace period
-        // tracks the theme's motion duration so the close never cuts the fade
-        // short. A reopen during that window cancels the teardown and reuses
-        // the still-live surface.
         let Some(h) = self.launcher else {
             if !self.keep_alive || self.quit_after_close {
                 cx.quit();
@@ -972,9 +964,6 @@ impl Daemon {
     fn activate_launcher_row(&mut self, cx: &mut Context<Self>) {
         let q = self.launcher_query.trim();
 
-        // A valid calculator expression is the default action: there's nothing
-        // to launch, so copy the result and close (it surfaces as an inline
-        // ghost, never a list row).
         if let Some(result) = crate::math::evaluate(q) {
             cx.write_to_clipboard(ClipboardItem::new_string(result));
             self.dismiss_launcher(cx);

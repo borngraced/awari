@@ -90,6 +90,33 @@ files {
   `r:` prefix forces regex on a single query no matter what this setting says.
 - `max-results` (default `50`) controls how many file rows appear.
 
+### fff
+
+Toggles for the fff-search file indexers. The search root itself is always the
+configured `files.roots`, and home-directory scanning turns on automatically
+when a root is `$HOME`, so neither is configurable here.
+
+```kdl
+fff {
+    watch true             // background file watcher
+    fs-root-scanning true  // allow indexing the filesystem root
+    mmap-cache false       // pre-populate mmap caches for top-frecency files
+    content-indexing false // build a content index for content-aware filtering
+    follow-symlinks false  // index through symbolic links
+}
+```
+
+- `watch` (default `true`) spawns the background watcher that keeps the index
+  up to date.
+- `fs-root-scanning` (default `true`) permits `/` as a scan root.
+- `mmap-cache` (default `false`) and `content-indexing` (default `false`)
+  trade memory for faster subsequent filtering.
+- `follow-symlinks` (default `false`) indexes through symbolic links.
+
+The transient per-directory picker used for path navigation never spawns a
+watcher and never broadens scanning beyond the typed directory; it honors
+`mmap-cache`, `content-indexing`, and `follow-symlinks`.
+
 ### sources
 
 ```kdl
@@ -120,11 +147,10 @@ keep-alive true   // default: keep the GPU overlay in memory between uses
 Controls what happens to the GPU overlay after you dismiss the launcher:
 
 - `keep-alive true` (default): the overlay stays in memory, hidden, between
-  dismisses. Re-opens are instant (~19 ms) at the cost of holding the GPU
-  process in memory (~77 MB idle).
+  dismisses. Re-opens are instant, at the cost of holding the GPU process in
+  memory while idle.
 - `keep-alive false`: the overlay process exits on dismiss, leaving only the
-  tiny GPU-free shell (~8.5 MB idle). The next open rebuilds the interface
-  (~100 ms cold start).
+  tiny GPU-free shell. The next open rebuilds the interface (a cold start).
 
 The daemon flag `--no-keep-alive` forces drop mode regardless of this setting.
 `awari gui` inherits the mode from how the daemon launched it
@@ -169,6 +195,9 @@ theme {
 files {
     roots "~/code"
     max-results 80
+}
+fff {
+    watch true
 }
 sources {
     windows true

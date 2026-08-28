@@ -443,8 +443,6 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
 
     let mut out: Vec<LauncherRow> = Vec::new();
     if files_only {
-        // Empty query in the Files category is a frecency browse; show the
-        // ranked files without requiring a typed filter.
         push_capped(&mut out, Some(file_max), files.iter().map(file_row));
         return out;
     }
@@ -458,25 +456,18 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
     }
 
     if crate::files::is_path_shaped(q) {
-        // Explicit path navigation: files first, then apps, then windows.
+        return open_path_rows(q, file_max);
+    }
+
+    // Apps are the primary action: rank above files and windows.
+    push_capped(&mut out, ranked_cap, app_rows);
+    push_capped(&mut out, ranked_cap, win_rows);
+    if !empty {
         push_capped(
             &mut out,
             ranked_cap,
             files.iter().take(file_max).map(file_row),
         );
-        push_capped(&mut out, ranked_cap, app_rows);
-        push_capped(&mut out, ranked_cap, win_rows);
-    } else {
-        // Apps are the primary action: rank above files and windows.
-        push_capped(&mut out, ranked_cap, app_rows);
-        push_capped(&mut out, ranked_cap, win_rows);
-        if !empty {
-            push_capped(
-                &mut out,
-                ranked_cap,
-                files.iter().take(file_max).map(file_row),
-            );
-        }
     }
     out
 }

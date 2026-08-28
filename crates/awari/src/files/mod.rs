@@ -58,6 +58,8 @@ const CTRL_POLL: Duration = Duration::from_millis(100);
 pub struct FilesOptions {
     pub index_lockfiles: bool,
     pub regex: bool,
+    /// Toggles applied to every fff-search picker (see `config::FffConfig`).
+    pub fff: crate::config::FffConfig,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,7 +80,7 @@ impl Files {
         let (qtx, qrx) = std::sync::mpsc::channel::<(u64, String)>();
         let (rtx, rrx) = std::sync::mpsc::channel();
         let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<()>();
-        let (pickers, frecencies) = picker::build_root_pickers(&roots);
+        let (pickers, frecencies) = picker::build_root_pickers(&roots, opts.fff);
         if !pickers.is_empty() {
             std::thread::Builder::new()
                 .name("awari-files".into())

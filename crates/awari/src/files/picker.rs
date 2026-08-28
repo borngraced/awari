@@ -58,9 +58,11 @@ fn open_frecency(root: &std::path::Path) -> SharedFrecency {
 /// launcher opens (driving the "frequent" half of frecency ranking).
 pub(super) fn build_root_pickers(
     roots: &[PathBuf],
+    fff: crate::config::FffConfig,
 ) -> (Vec<SharedFilePicker>, Vec<(PathBuf, SharedFrecency)>) {
     let mut pickers = Vec::new();
     let mut frecencies = Vec::new();
+
     for root in roots {
         let shared = SharedFilePicker::default();
         let frecency = open_frecency(root);
@@ -71,15 +73,16 @@ pub(super) fn build_root_pickers(
             FilePickerOptions {
                 base_path: root.display().to_string(),
                 mode: FFFMode::Neovim,
-                watch: true,
+                watch: fff.watch,
                 enable_home_dir_scanning: home,
-                enable_fs_root_scanning: true,
-                enable_mmap_cache: false,
-                enable_content_indexing: false,
-                follow_symlinks: false,
+                enable_fs_root_scanning: fff.enable_fs_root_scanning,
+                enable_mmap_cache: fff.enable_mmap_cache,
+                enable_content_indexing: fff.enable_content_indexing,
+                follow_symlinks: fff.follow_symlinks,
                 cache_budget: ContentCacheBudget::from_overrides(0, ROOT_CACHE_BYTES, 0),
             },
         );
+
         match res {
             Ok(()) => {
                 pickers.push(shared);
@@ -129,9 +132,7 @@ pub(super) fn picker_loop(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        // Coalesce everything that arrived since `first`. If more than one
-        // query is in flight it's a typing burst, so debounce once and take the
-        // newest query; a lone query needs no artificial wait.
+
         let (latest, n) = coalesce(&qrx, first);
         let (seq, raw) = if n > 1 {
             thread::sleep(QUERY_DEBOUNCE);
@@ -159,6 +160,7 @@ pub(super) fn picker_loop(
             &opts,
             &mut regex_caches,
         );
+
         prev_raw = raw;
         if rtx.send((seq, hits)).is_err() {
             return;
@@ -248,13 +250,16 @@ fn search_all(
                 frecency,
                 FilePickerOptions {
                     base_path: dir.display().to_string(),
+                    // The transient picker never watches and never broadens
+                    // scanning beyond the typed directory, regardless of the
+                    // global fff toggles; the rest of the flags are honored.
                     mode: FFFMode::Neovim,
                     watch: false,
                     enable_home_dir_scanning: false,
                     enable_fs_root_scanning: false,
-                    enable_mmap_cache: false,
-                    enable_content_indexing: false,
-                    follow_symlinks: false,
+                    enable_mmap_cache: opts.fff.enable_mmap_cache,
+                    enable_content_indexing: opts.fff.enable_content_indexing,
+                    follow_symlinks: opts.fff.follow_symlinks,
                     cache_budget: ContentCacheBudget::from_overrides(
                         FILE_CACHE_BUDGET,
                         TRANSIENT_CACHE_BYTES,
@@ -489,6 +494,7 @@ mod tests {
         let opts = FilesOptions {
             index_lockfiles: false,
             regex: false,
+            fff: crate::config::FffConfig::default(),
         };
 
         // First call builds the transient picker (async index); second call
