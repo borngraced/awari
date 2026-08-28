@@ -4,17 +4,15 @@
 
 # Àwárí
 
-A blazingly fast launcher for Wayland compositors like niri and Hyprland, triggered in just 2.78 ms. Awari is
-powered by [fff-search](https://github.com/dmtrKovalenko/fff): an in-process,
-frecency-ranked index that doesn't waste CPU cycles spawning subprocesses on
-every keystroke.
+Awari is a Wayland launcher. The name means *discovery* in Yoruba. Built with
+[GPUI](https://github.com/zed-industries/zed) and
+[fff search](https://github.com/dmtrKovalenko/fff).
 
 By separating a tiny, GPU-free background daemon from a warm GPU overlay, Awari
 pops onto your screen in an unnoticeable instant while maintaining a lean idle
 footprint. For ultra-low-spec hardware, it can easily drop down to a pure
 on-demand mode to free up every megabyte of RAM.
 
-The name Awari is Yoruba for "discovery."
 
 ## Screenshots
 
