@@ -1,8 +1,39 @@
-<svg width="680" height="220" viewBox="0 0 680 220" xmlns="http://www.w3.org/2000/svg" role="img">
-<title>Awa wordmark</title>
-<desc>A geometric logotype spelling AWA as one unbroken line: a tall peak for the first A, a shallow low ripple for the W, and a tall peak for the second A in the brand lavender color.</desc>
-<path d="M220,170 L270,60 L320,170 L345,130 L370,170 L395,130 L420,170"
-fill="none" stroke="#1a1a1a" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M420,170 L470,60 L520,170"
-fill="none" stroke="#b4a0ff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 280" role="img" aria-label="awari">
+  <title>awari</title>
+  <style>
+    :root { color-scheme: light dark; }
+    .mark { stroke: #B4A0FF; }
+    .dot { fill: #B4A0FF; }
+    @media (prefers-color-scheme: dark) {
+      .mark { stroke: #B4A0FF; }
+      .dot { fill: #B4A0FF; }
+    }
+  </style>
+  <g
+    class="mark"
+    fill="none"
+    stroke="#B4A0FF"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <!-- a -->
+    <path d="M146 86 V194" />
+    <path d="M146 108 C146 86 86 86 86 132 C86 176 112 194 146 194" />
+
+    <!-- w -->
+    <path d="M186 86 L214 194 L242 98 L270 194 L298 86" />
+
+    <!-- a -->
+    <path d="M368 86 V194" />
+    <path d="M368 108 C368 86 308 86 308 132 C308 176 334 194 368 194" />
+
+    <!-- r -->
+    <path d="M408 86 V194" />
+    <path d="M408 86 C444 86 466 98 466 124" />
+
+    <!-- i -->
+    <path d="M516 86 V194" />
+  </g>
+  <rect class="dot" x="507" y="52" width="18" height="18" rx="3" fill="#B4A0FF" />
 </svg>
