@@ -156,7 +156,9 @@ fn parse_theme_body(body: &[String], t: &mut Theme) {
         let val = body[i + 1].as_str();
         match key {
             "font" => {
-                if !val.is_empty() && val != "default" {
+                if val.is_empty() || val == "default" {
+                    t.font = None;
+                } else {
                     t.font = Some(Arc::from(val));
                 }
                 i += 2;

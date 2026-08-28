@@ -182,9 +182,12 @@ theme {
 ```
 
 - `name` loads a preset, and any token you set below overrides it.
-- `font` and `font-size` set the UI typeface (8 to 64).
+- `font` and `font-size` set the UI typeface (8 to 64). The bundled JetBrains
+  Mono is the default; set any installed family to switch, or `font "default"`
+  to restore GPUI's system UI font. Fonts are embedded in the binary, so no
+  font is required on the host.
 - Available presets: `awari` (the default), `ash`, `ember`, `verdant`, `paper`,
-  `mono`, `tokyonight`, `catppuccin`, `gruvbox`.
+  `mono`, `nord`, `tokyonight`, `catppuccin`, `gruvbox`.
 - Color tokens: `accent`, `accent-dim` (alias `select`), `bg`, `panel`, `raise`
   (alias `hover` / `surface`), `border`, `text` (alias `fg`), `text-dim` (alias
   `muted`), `text-faint` (alias `faint`), `scrim`.

@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 <p align="center">
   <img src="crates/awari/assets/awa-logo.svg" width="240" alt="Àwárí logo">
 </p>
@@ -102,8 +99,10 @@ Category chips (All, Apps, Files, Commands, Windows) narrow the source.
   fuzzy/frecency list. Apps always indexed; files and windows toggleable.
 - **Query power**: `>` commands, `o:<path>` browse, `r:<regex>`, arithmetic,
   path navigation with constraints.
-- **Theming**: KDL hex tokens (no CSS/fetch); nine presets, per-token overrides,
-  aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); font/size.
+- **Theming**: KDL hex tokens (no CSS/fetch); ten presets, per-token overrides,
+  aliases (`select`, `hover`/`surface`, `fg`, `muted`, `faint`); bundled
+  JetBrains Mono typeface by default (`font "default"` restores the system UI
+  font), font-size in px.
 - **Action menu, category chips, calculator, monitor-aware**, lockfiles hidden.
 
 ## Build
@@ -163,8 +162,9 @@ full file: `contrib/config.kdl`.
 ```kdl
 theme {
   name "catppuccin"            // presets: awari (default) · ash · ember · verdant
-                               //          paper · mono · tokyonight · catppuccin · gruvbox
-  // font "Inter"             // system family; "default"/"" = GPUI system UI font
+                               //          paper · mono · nord · tokyonight · catppuccin · gruvbox
+  // font "Inter"             // default is the bundled JetBrains Mono; any fontdb family
+  //                          // override; "default"/"" = GPUI system UI font
   // font-size 14             // px, clamped to 8..=64
   accent      "#cba6f7"       // = select
   accent-dim  "#cba6f733"

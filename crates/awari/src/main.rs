@@ -7,6 +7,7 @@ mod child;
 mod config;
 mod desktop;
 mod files;
+mod fonts;
 mod icons;
 mod lock;
 mod log;
@@ -93,7 +94,7 @@ fn gui_main(args: &[String]) {
     };
 
     application().run(move |cx| {
-        // gpui_base::init(cx);
+        crate::fonts::register(cx);
         app::Daemon::start(
             cx,
             match backend {

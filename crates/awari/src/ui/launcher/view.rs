@@ -1609,9 +1609,9 @@ impl Render for Launcher {
                                                 .when_some(t.font.clone(), |el, f| {
                                                     el.font_family(f)
                                                 })
-                                                .text_size(px(24.))
-                                                .line_height(px(24.))
-                                                .font_weight(FontWeight::BOLD)
+                                                .text_size(px(20.))
+                                                .line_height(px(20.))
+                                                .font_weight(FontWeight::NORMAL)
                                                 .text_color(t.fg())
                                                 .overflow_hidden()
                                                 .child(self.query_element())

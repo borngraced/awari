@@ -28,8 +28,9 @@ impl Color {
 
 /// Concept tokens (`--accent`, `--panel`, …). Unknown KDL keys are ignored.
 ///
-/// `font` is a system family name resolved through fontdb (empty = GPUI's
-/// `.SystemUIFont` default); `font_size` overrides the rem size in px.
+/// `font` is a system family name resolved through fontdb; every preset
+/// defaults to the bundled JetBrains Mono (`font "default"`/empty restores
+/// GPUI's `.SystemUIFont`); `font_size` overrides the rem size in px.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub accent: Color,
@@ -106,7 +107,7 @@ impl Theme {
             text_dim: Color::rgb(0x8c899b),
             text_faint: Color::rgb(0x57545f),
             scrim: Color::rgba(0x0a0a0be6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -123,7 +124,7 @@ impl Theme {
             text_dim: Color::rgb(0x8a8890),
             text_faint: Color::rgb(0x625f68),
             scrim: Color::rgba(0x0e0e0fe6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -140,7 +141,7 @@ impl Theme {
             text_dim: Color::rgb(0xa3927f),
             text_faint: Color::rgb(0x6f5f4f),
             scrim: Color::rgba(0x0d0a08e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -157,7 +158,7 @@ impl Theme {
             text_dim: Color::rgb(0x8ea38c),
             text_faint: Color::rgb(0x5f7060),
             scrim: Color::rgba(0x090c08e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -174,7 +175,7 @@ impl Theme {
             text_dim: Color::rgb(0x7c766a),
             text_faint: Color::rgb(0xa39d8f),
             scrim: Color::rgba(0x000000e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -191,7 +192,7 @@ impl Theme {
             text_dim: Color::rgb(0x7a7a7a),
             text_faint: Color::rgb(0x4d4d4d),
             scrim: Color::rgba(0x000000e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -208,7 +209,7 @@ impl Theme {
             text_dim: Color::rgb(0xa9b1d6),
             text_faint: Color::rgb(0x565f89),
             scrim: Color::rgba(0x0f0f14e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -225,7 +226,7 @@ impl Theme {
             text_dim: Color::rgb(0xa6adc8),
             text_faint: Color::rgb(0x9399b2),
             scrim: Color::rgba(0x08080ce6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -242,7 +243,24 @@ impl Theme {
             text_dim: Color::rgb(0xa89984),
             text_faint: Color::rgb(0x928374),
             scrim: Color::rgba(0x141617e6),
-            font: None,
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
+            font_size: None,
+        }
+    }
+
+    pub fn nord() -> Self {
+        Self {
+            accent: Color::rgb(0x88c0d0),
+            accent_dim: Color::rgba(0x88c0d033),
+            bg: Color::rgb(0x2e3440),
+            panel: Color::rgb(0x3b4252),
+            raise: Color::rgb(0x434c5e),
+            border: Color::rgb(0x4c566a),
+            text: Color::rgb(0xd8dee9),
+            text_dim: Color::rgb(0xa1acbf),
+            text_faint: Color::rgb(0x616e88),
+            scrim: Color::rgba(0x14181fe6),
+            font: Some(Arc::from(crate::fonts::JETBRAINS_MONO)),
             font_size: None,
         }
     }
@@ -255,6 +273,7 @@ impl Theme {
             "verdant" => Some(Self::verdant()),
             "paper" => Some(Self::paper()),
             "mono" => Some(Self::mono()),
+            "nord" => Some(Self::nord()),
             "tokyonight" | "tokyo-night" | "tokyo_night" => Some(Self::tokyonight()),
             "catppuccin" | "catppuccin-mocha" | "mocha" => Some(Self::catppuccin()),
             "gruvbox" => Some(Self::gruvbox()),
@@ -296,6 +315,10 @@ mod tests {
     #[test]
     fn presets_resolve_and_default_is_awari() {
         assert_eq!(Theme::default(), Theme::awari());
+        assert_eq!(
+            Theme::default().font.as_deref(),
+            Some(crate::fonts::JETBRAINS_MONO),
+        );
         for name in [
             "awari",
             "ash",
@@ -303,6 +326,7 @@ mod tests {
             "verdant",
             "paper",
             "mono",
+            "nord",
             "tokyonight",
             "catppuccin",
             "gruvbox",
