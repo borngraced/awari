@@ -1,5 +1,5 @@
 use gpui::SharedString;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -263,24 +263,11 @@ pub fn score_app_window(
         win_scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     }
 
-    let visible_app_ids: HashSet<&str> = win_scored
-        .iter()
-        .filter_map(|&(_, ix)| windows[ix].app_id_lc.as_deref())
-        .collect();
-
     let mut app_scored: Vec<(i64, &DesktopApp)> = if files_only || windows_only {
         Vec::new()
     } else {
         apps.iter()
             .filter_map(|app| {
-                if !apps_only {
-                    let ident_hits_window = |probe: &str| visible_app_ids.contains(&probe);
-                    if ident_hits_window(&app.name_lc)
-                        || ident_hits_window(app.app_id_lc.as_deref().unwrap_or(""))
-                    {
-                        return None;
-                    }
-                }
                 let s = if empty {
                     1
                 } else {

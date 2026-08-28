@@ -85,7 +85,7 @@ fn fuzzy_typo_still_matches() {
 }
 
 #[test]
-fn running_window_suppresses_app_row() {
+fn running_app_and_window_both_show() {
     let apps = vec![app("Firefox", Some("firefox"))];
     let out = rows(
         "",
@@ -99,12 +99,16 @@ fn running_window_suppresses_app_row() {
         &[],
         &[],
     );
-    assert_eq!(out.len(), 1);
-    assert!(matches!(out[0].kind, RowKind::Window { .. }));
+    assert!(out.len() >= 2, "app and window both appear, got {}", out.len());
+    assert!(matches!(out[0].kind, RowKind::App { .. }), "app is first");
+    assert!(
+        out.iter().any(|r| matches!(r.kind, RowKind::Window { .. })),
+        "window also appears"
+    );
 }
 
 #[test]
-fn window_row_survives_file_cap_pressure() {
+fn app_and_window_survive_file_cap_pressure() {
     let apps = vec![app("Alacritty", Some("alacritty"))];
     let files: Vec<FileHit> = (0..50)
         .map(|i| FileHit {
@@ -123,8 +127,18 @@ fn window_row_survives_file_cap_pressure() {
         &files,
         &[],
     );
-    assert!(matches!(out[0].kind, RowKind::Window { .. }));
-    assert!(out.iter().any(|r| matches!(r.kind, RowKind::Window { .. })));
+    assert!(matches!(out[0].kind, RowKind::App { .. }), "app is first");
+    assert!(
+        out.iter().any(|r| matches!(r.kind, RowKind::Window { .. })),
+        "window survives file pressure"
+    );
+    let window_idx = out
+        .iter()
+        .position(|r| matches!(r.kind, RowKind::Window { .. }))
+        .unwrap();
+    if let Some(fi) = out.iter().position(|r| matches!(r.kind, RowKind::File { .. })) {
+        assert!(window_idx < fi, "window precedes files");
+    }
 }
 
 #[test]
@@ -444,5 +458,65 @@ fn reveal_delete_is_a_query_change() {
     assert_eq!(
         reveal_action(true, false, false),
         RevealAction::Hold
+    );
+}
+
+#[test]
+fn alacritty_appears_when_running() {
+    let apps = vec![app("Alacritty", Some("Alacritty"))];
+    let windows = vec![WindowEntry {
+        id: 1,
+        title: "alacritty".into(),
+        app_id: Some("Alacritty".into()),
+        app_id_lc: Some("alacritty".into()),
+    }];
+    let rows = filter_rows(FilterParams {
+        query: "alacritty",
+        apps: &apps,
+        windows: &windows,
+        files: &[],
+        recents: &[],
+        app_usage: &Default::default(),
+        app_icons: &Default::default(),
+        category: Category::All,
+        file_max: 30,
+        total_max: 30,
+        cached_app_rows: None,
+        cached_win_rows: None,
+        prefix: None,
+        calc: None,
+    });
+    assert!(!rows.is_empty(), "alacritty should appear in results");
+    assert!(
+        rows[0].label.to_lowercase().contains("alacritty"),
+        "expected alacritty first, got: {:?}",
+        rows.iter().map(|r| &r.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn alacritty_appears_when_not_running() {
+    let apps = vec![app("Alacritty", Some("Alacritty"))];
+    let rows = filter_rows(FilterParams {
+        query: "alacritty",
+        apps: &apps,
+        windows: &[],
+        files: &[],
+        recents: &[],
+        app_usage: &Default::default(),
+        app_icons: &Default::default(),
+        category: Category::All,
+        file_max: 30,
+        total_max: 30,
+        cached_app_rows: None,
+        cached_win_rows: None,
+        prefix: None,
+        calc: None,
+    });
+    assert!(!rows.is_empty(), "alacritty should appear in results");
+    assert!(
+        rows[0].label.to_lowercase().contains("alacritty"),
+        "expected alacritty first, got: {:?}",
+        rows.iter().map(|r| &r.label).collect::<Vec<_>>()
     );
 }
