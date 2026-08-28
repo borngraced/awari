@@ -8,7 +8,7 @@ use gpui::{SpringConfig, prelude::*};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::icon_cache::{BoundedImageCache, ICON_GPU_RETENTION};
 use super::scoring::*;
@@ -17,6 +17,45 @@ use super::{
     GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H, QUERY_DEBOUNCE,
     RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H,
 };
+
+/// Cap the visible inline text (typed query + ghost) so it never runs past the
+/// search bar. The typed query keeps the tail nearest the caret; the ghost
+/// keeps its head. Dropped text is marked with an ellipsis. Render-only —
+/// the stored `query` is never truncated.
+const MAX_INLINE_CHARS: usize = 42;
+const MAX_GHOST_CHARS: usize = 26;
+
+#[derive(Clone, Copy)]
+enum BadgeAction {
+    Fill,
+    Open,
+}
+
+/// Cap a typed-query line for display, keeping the prefix tail and suffix
+/// head across at most `budget` visible chars, with flags for the `…` markers.
+pub(super) fn cap_display<'a>(
+    prefix: &'a str,
+    suffix: &'a str,
+    budget: usize,
+) -> (String, String, bool, bool) {
+    let pchars = prefix.chars().count();
+    let schars = suffix.chars().count();
+    let p_keep = pchars.min(budget.saturating_sub(1));
+    let s_keep = schars.min(budget.saturating_sub(p_keep + 1));
+    let head_dots = pchars > p_keep;
+    let tail_dots = schars > s_keep;
+    let prefix = if head_dots {
+        prefix.chars().skip(pchars - p_keep).collect::<String>()
+    } else {
+        prefix.to_string()
+    };
+    let suffix = if tail_dots {
+        suffix.chars().take(s_keep).collect::<String>()
+    } else {
+        suffix.to_string()
+    };
+    (prefix, suffix, head_dots, tail_dots)
+}
 
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
@@ -123,7 +162,6 @@ pub struct Launcher {
     caret_on: bool,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
-    open_started: Option<Instant>,
     pub(crate) closing: bool,
     /// Hovered source-list row (empty-state menu), tracked separately from the
     /// keyboard selection so mouse hover can highlight without stealing focus.
@@ -183,7 +221,6 @@ impl Launcher {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        
         Self {
             shell,
             icon_cache: BoundedImageCache::new(ICON_GPU_RETENTION, cx),
@@ -192,7 +229,6 @@ impl Launcher {
             caret_on: true,
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
-            open_started: None,
             closing: false,
             hovered_source: None,
             last_select: None,
@@ -480,10 +516,6 @@ impl Launcher {
         self.blink_gen.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn arm_open_timer(&mut self, started: Instant) {
-        self.open_started = Some(started);
-    }
-
     /// Apply a keystroke to the query/cursor; returns the new query when it changed.
     fn edit(&mut self, k: &gpui::Keystroke) -> Option<String> {
         let key = k.key.to_ascii_lowercase();
@@ -578,30 +610,14 @@ impl Launcher {
         }
 
         let token_len = command_token_len(q);
-        let (prefix, suffix) = q.split_at(c);
-        let p_split = prefix.len().min(token_len);
-        let (p_accent, p_norm) = prefix.split_at(p_split);
 
-        // Accepted-completion highlight wins over command-mode coloring only
-        // when they can't both apply (command mode never ghosts).
         let accepted_off = self
             .accepted
             .as_ref()
             .filter(|(aq, _)| aq == q && c == q.len() && token_len == 0)
             .map(|(_, off)| *off);
-        let s_accent_len = if token_len > 0 {
-            token_len.saturating_sub(c)
-        } else if let Some(off) = accepted_off {
-            (c - off).min(suffix.len())
-        } else {
-            0
-        };
-        let (s_accent, s_norm) = suffix.split_at(s_accent_len);
-        // Ghost preview hides once its own accept is on screen. A valid
-        // calculator result ghosts as ` = <result>` appended to the typed
-        // query (the "what my input becomes" model); otherwise the top row's
-        // completion suffix is used.
-        let ghost = if token_len == 0 && c == q.len() && accepted_off.is_none() {
+
+        let ghost_raw = if token_len == 0 && c == q.len() && accepted_off.is_none() {
             if let Some(result) = &self.view.calc {
                 Some(format!(" = {}", result))
             } else if self.fit_expanded {
@@ -615,11 +631,41 @@ impl Launcher {
         } else {
             None
         };
+
+        let (prefix, suffix) = q.split_at(c);
+        let gv = ghost_raw
+            .as_ref()
+            .map_or(0, |g| g.chars().count().min(MAX_GHOST_CHARS));
+        let typed_budget = MAX_INLINE_CHARS.saturating_sub(gv);
+        let (p_disp, s_disp, head_dots, tail_dots) = cap_display(prefix, suffix, typed_budget);
+
+        let p_split = p_disp.len().min(token_len);
+        let (p_accent, p_norm) = p_disp.split_at(p_split);
+        let s_accent_len = if token_len > 0 {
+            token_len.saturating_sub(c)
+        } else if let Some(off) = accepted_off {
+            (c - off).min(s_disp.len())
+        } else {
+            0
+        };
+        let (s_accent, s_norm) = s_disp.split_at(s_accent_len);
+        let ghost = ghost_raw.map(|g| {
+            let gc = g.chars().count();
+            if gc > MAX_GHOST_CHARS {
+                let shown = g.chars().take(MAX_GHOST_CHARS).collect::<String>();
+                format!("{shown}\u{2026}")
+            } else {
+                g
+            }
+        });
         div()
             .flex()
             .flex_nowrap()
             .items_center()
             .flex_none()
+            .when(head_dots, |el| {
+                el.child(div().text_color(t.faint()).child("\u{2026}"))
+            })
             .when(!p_accent.is_empty(), |el| {
                 el.child(div().text_color(t.accent()).child(p_accent.to_string()))
             })
@@ -633,10 +679,114 @@ impl Launcher {
             .when(!s_norm.is_empty(), |el| {
                 el.child(div().child(s_norm.to_string()))
             })
+            .when(tail_dots, |el| {
+                el.child(div().text_color(t.faint()).child("\u{2026}"))
+            })
             .when_some(ghost, |el, g| {
                 el.child(div().text_color(t.faint()).child(g))
             })
             .into_any_element()
+    }
+
+    /// Hint pill beside the inline completion: "tab" (click to fill) before
+    /// acceptance, "open" (press Enter) after. Hidden when irrelevant.
+    fn completion_badge(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.view.theme.clone();
+        let q = &self.view.query;
+        let c = self.cursor.min(q.len());
+        let token_len = command_token_len(q);
+        let accepted_off = self
+            .accepted
+            .as_ref()
+            .filter(|(aq, _)| aq == q && c == q.len() && token_len == 0);
+        let ghost_offered = token_len == 0
+            && c == q.len()
+            && accepted_off.is_none()
+            && if let Some(result) = &self.view.calc {
+                !result.is_empty()
+            } else {
+                self.fit_expanded
+                    && self
+                        .view
+                        .rows
+                        .first()
+                        .is_some_and(|r| ghost_suffix(q, &r.label).is_some())
+            };
+        let (label, action): (SharedString, BadgeAction) = if accepted_off.is_some() {
+            ("open".into(), BadgeAction::Open)
+        } else if ghost_offered {
+            ("tab".into(), BadgeAction::Fill)
+        } else {
+            return div().into_any_element();
+        };
+        div()
+            .id("completion-badge")
+            .cursor_pointer()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(6.))
+            .bg(t.hover())
+            .border_1()
+            .border_color(t.border())
+            .text_size(px(11.))
+            .line_height(px(14.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(t.muted())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _ev, cx| {
+                    cx.stop_propagation();
+                    this.activate_badge(action, cx);
+                }),
+            )
+            .child(label)
+            .into_any_element()
+    }
+
+    /// Badge click: Fill accepts the offered completion, Open runs the row.
+    fn activate_badge(&mut self, action: BadgeAction, cx: &mut Context<Self>) {
+        match action {
+            BadgeAction::Fill => self.accept_inline_completion(cx),
+            BadgeAction::Open => {
+                let index = self.view.selected;
+                self.flush_query_post(cx);
+                post(self, cx, LauncherCmd::Activate { index });
+            }
+        }
+    }
+
+    /// Accept the current inline completion. Shared by Tab and the badge.
+    fn accept_inline_completion(&mut self, cx: &mut Context<Self>) {
+        if self.view.selected == 0
+            && let Some(result) = self.view.calc.clone()
+        {
+            self.cursor = result.len();
+            self.accepted = None;
+            self.view.query = result.clone();
+            self.on_query_typed(cx);
+            post(self, cx, LauncherCmd::SetQuery { query: result });
+            return;
+        }
+        match tab_completion(&self.view.query, &self.view.rows, self.view.selected) {
+            Some(TabOutcome::Inline {
+                completed,
+                accepted_off,
+            }) => {
+                self.cursor = completed.len();
+                self.accepted = Some((completed.clone(), accepted_off));
+                self.view.query = completed.clone();
+                self.on_query_typed(cx);
+                post(self, cx, LauncherCmd::SetQuery { query: completed });
+            }
+            Some(TabOutcome::Row(completion)) => {
+                self.cursor = completion.len();
+                self.accepted = None;
+                self.view.query = completion.clone();
+                self.on_query_typed(cx);
+                post(self, cx, LauncherCmd::SetQuery { query: completion });
+            }
+            None => {}
+        }
     }
 }
 
@@ -1009,11 +1159,6 @@ impl Render for Launcher {
         let target = if open { 1.0f32 } else { 0.0 };
         let closing_anim = self.closing;
 
-        if let Some(t0) = self.open_started.take() {
-            let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-            post(self, cx, LauncherCmd::OpenToRender { ms });
-        }
-
         let t = self.view.theme.clone();
         if let Some(size) = t.font_size {
             window.set_rem_size(px(size as f32));
@@ -1347,39 +1492,16 @@ impl Render for Launcher {
                 }
                 if key == "tab" {
                     cx.stop_propagation();
-                    // A valid calculator result: Tab accepts it as the new
-                    // input (so the user can keep computing, e.g. `4 * 3`).
-                    // Only when the top slot is active — if the user has
-                    // arrowed into the list, Tab completes the selected row.
-                    if this.view.selected == 0
-                        && let Some(result) = this.view.calc.clone()
+                    if this.accepted.as_ref().is_some_and(|(aq, _)| {
+                        aq == &this.view.query
+                            && this.cursor >= this.view.query.len()
+                            && command_token_len(&this.view.query) == 0
+                    }) && this.view.rows.len() > 1
                     {
-                        this.cursor = result.len();
-                        this.accepted = None;
-                        this.view.query = result.clone();
-                        this.on_query_typed(cx);
-                        post(this, cx, LauncherCmd::SetQuery { query: result });
-                        return;
-                    }
-                    match tab_completion(&this.view.query, &this.view.rows, this.view.selected) {
-                        Some(TabOutcome::Inline {
-                            completed,
-                            accepted_off,
-                        }) => {
-                            this.cursor = completed.len();
-                            this.accepted = Some((completed.clone(), accepted_off));
-                            this.view.query = completed.clone();
-                            this.on_query_typed(cx);
-                            post(this, cx, LauncherCmd::SetQuery { query: completed });
-                        }
-                        Some(TabOutcome::Row(completion)) => {
-                            this.cursor = completion.len();
-                            this.accepted = None;
-                            this.view.query = completion.clone();
-                            this.on_query_typed(cx);
-                            post(this, cx, LauncherCmd::SetQuery { query: completion });
-                        }
-                        None => {}
+                        let next = (this.view.selected + 1) % this.view.rows.len();
+                        post(this, cx, LauncherCmd::Select { index: next });
+                    } else {
+                        this.accept_inline_completion(cx);
                     }
                     return;
                 }
@@ -1493,6 +1615,7 @@ impl Render for Launcher {
                                                 .text_color(t.fg())
                                                 .overflow_hidden()
                                                 .child(self.query_element())
+                                                .child(self.completion_badge(cx))
                                                 .child(div().flex_1().min_w_0())
                                                 .when(expanded, |el| {
                                                     el.when_some(

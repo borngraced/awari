@@ -250,8 +250,8 @@ fn application_dirs() -> Vec<PathBuf> {
     } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     for d in data_dirs.split(':').filter(|d| !d.is_empty()) {
         let p = PathBuf::from(d).join("applications");
         if !dirs.contains(&p) {

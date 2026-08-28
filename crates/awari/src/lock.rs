@@ -3,7 +3,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 use thiserror::Error;
@@ -13,14 +12,6 @@ use awari_ipc::{ClientReply, ClientRequest, SOCKET_NAME};
 pub struct IpcServer {
     pub listener: UnixListener,
     _lock: std::fs::File,
-}
-
-#[derive(Default)]
-pub struct Stats {
-    pub launcher_open_to_first_commit_ms: Option<u64>,
-    /// Last overlay RSS reported by the GUI. `dump-stats` prefers this over
-    /// the shell process RSS.
-    pub gui_rss_bytes: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -98,7 +89,6 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
 
 pub fn spawn_accept(
     listener: UnixListener,
-    stats: Arc<Mutex<Stats>>,
 ) -> std::sync::mpsc::Receiver<ClientRequest> {
     let (tx, rx) = std::sync::mpsc::channel();
     thread::Builder::new()
@@ -111,7 +101,7 @@ pub fn spawn_accept(
                     tracing::warn!("ipc peer uid mismatch");
                     continue;
                 }
-                if let Err(e) = handle_client(stream, &stats, &tx) {
+                if let Err(e) = handle_client(stream, &tx) {
                     tracing::debug!(%e, "ipc client");
                 }
             }
@@ -122,7 +112,6 @@ pub fn spawn_accept(
 
 fn handle_client(
     stream: UnixStream,
-    stats: &Arc<Mutex<Stats>>,
     cmds: &std::sync::mpsc::Sender<ClientRequest>,
 ) -> Result<(), LockError> {
     let mut reader = BufReader::new(&stream);
@@ -131,22 +120,6 @@ fn handle_client(
     let req: ClientRequest = serde_json::from_str(line.trim())?;
     let reply = match req {
         ClientRequest::Ping => ClientReply::Ok,
-        ClientRequest::DumpStats => {
-            let s = stats.lock().expect("stats");
-            ClientReply::Stats {
-                launcher_open_to_first_commit_ms: s.launcher_open_to_first_commit_ms,
-                rss_bytes: s.gui_rss_bytes.unwrap_or_else(rss_bytes),
-            }
-        }
-        ClientRequest::ReportStats {
-            launcher_open_to_first_commit_ms,
-            rss_bytes,
-        } => {
-            let mut s = stats.lock().expect("stats");
-            s.launcher_open_to_first_commit_ms = launcher_open_to_first_commit_ms;
-            s.gui_rss_bytes = Some(rss_bytes);
-            ClientReply::Ok
-        }
         ClientRequest::ToggleLauncher
         | ClientRequest::OpenLauncher
         | ClientRequest::CloseLauncher
@@ -162,15 +135,4 @@ fn handle_client(
     stream.write_all(out.as_bytes())?;
     stream.flush()?;
     Ok(())
-}
-
-pub fn rss_bytes() -> u64 {
-    if let Ok(s) = std::fs::read_to_string("/proc/self/statm")
-        && let Some(pages) = s.split_whitespace().nth(1)
-        && let Ok(n) = pages.parse::<u64>()
-    {
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
-        return n * page;
-    }
-    0
 }

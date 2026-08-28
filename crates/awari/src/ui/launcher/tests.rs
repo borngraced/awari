@@ -99,7 +99,11 @@ fn running_app_and_window_both_show() {
         &[],
         &[],
     );
-    assert!(out.len() >= 2, "app and window both appear, got {}", out.len());
+    assert!(
+        out.len() >= 2,
+        "app and window both appear, got {}",
+        out.len()
+    );
     assert!(matches!(out[0].kind, RowKind::App { .. }), "app is first");
     assert!(
         out.iter().any(|r| matches!(r.kind, RowKind::Window { .. })),
@@ -136,7 +140,10 @@ fn app_and_window_survive_file_cap_pressure() {
         .iter()
         .position(|r| matches!(r.kind, RowKind::Window { .. }))
         .unwrap();
-    if let Some(fi) = out.iter().position(|r| matches!(r.kind, RowKind::File { .. })) {
+    if let Some(fi) = out
+        .iter()
+        .position(|r| matches!(r.kind, RowKind::File { .. }))
+    {
         assert!(window_idx < fi, "window precedes files");
     }
 }
@@ -399,22 +406,10 @@ fn icon_letter_falls_back_to_digit_then_hash() {
 
 #[test]
 fn reveal_waits_for_query_pause() {
-    assert_eq!(
-        reveal_action(true, true, false),
-        RevealAction::Debounce
-    );
-    assert_eq!(
-        reveal_action(true, false, true),
-        RevealAction::ShowNow
-    );
-    assert_eq!(
-        reveal_action(true, false, false),
-        RevealAction::Hold
-    );
-    assert_eq!(
-        reveal_action(false, true, false),
-        RevealAction::Collapse
-    );
+    assert_eq!(reveal_action(true, true, false), RevealAction::Debounce);
+    assert_eq!(reveal_action(true, false, true), RevealAction::ShowNow);
+    assert_eq!(reveal_action(true, false, false), RevealAction::Hold);
+    assert_eq!(reveal_action(false, true, false), RevealAction::Collapse);
     assert!(!wants_results("", Category::All, false));
     assert!(wants_results("a", Category::All, false));
     assert!(wants_results("", Category::Apps, false));
@@ -447,18 +442,9 @@ fn stale_echo_does_not_rewind_query() {
 fn reveal_delete_is_a_query_change() {
     // Backspace/delete are local edits. Daemon-driven query changes Debounce;
     // emptying the box Collapses.
-    assert_eq!(
-        reveal_action(true, true, false),
-        RevealAction::Debounce
-    );
-    assert_eq!(
-        reveal_action(false, true, false),
-        RevealAction::Collapse
-    );
-    assert_eq!(
-        reveal_action(true, false, false),
-        RevealAction::Hold
-    );
+    assert_eq!(reveal_action(true, true, false), RevealAction::Debounce);
+    assert_eq!(reveal_action(false, true, false), RevealAction::Collapse);
+    assert_eq!(reveal_action(true, false, false), RevealAction::Hold);
 }
 
 #[test]
@@ -519,4 +505,36 @@ fn alacritty_appears_when_not_running() {
         "expected alacritty first, got: {:?}",
         rows.iter().map(|r| &r.label).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn cap_display_short_line_is_untouched() {
+    let (p, s, head, tail) = super::view::cap_display("docs", "", 42);
+    assert_eq!((p.as_str(), s.as_str()), ("docs", ""));
+    assert!(!head && !tail);
+}
+
+#[test]
+fn cap_display_long_prefix_keeps_tail_nearest_caret() {
+    let (p, s, head, tail) =
+        super::view::cap_display("abcdefghijklmnopqrstuvwxyz0123456789", "", 10);
+    assert_eq!(p, "123456789");
+    assert!(s.is_empty());
+    assert!(head && !tail);
+}
+
+#[test]
+fn cap_display_keeps_suffix_head_up_to_remaining_budget() {
+    let (p, s, head, tail) = super::view::cap_display("abcd", "efghijklmnopqrstuvwxyz", 12);
+    assert_eq!(p, "abcd");
+    assert_eq!(s, "efghijk");
+    assert!(!head && tail);
+}
+
+#[test]
+fn cap_display_prioritizes_prefix_tail_when_both_long() {
+    let (p, s, head, tail) = super::view::cap_display("aaaaabbbbb", "cccccddddd", 7);
+    assert_eq!(p, "abbbbb");
+    assert_eq!(s, "");
+    assert!(head && tail);
 }

@@ -479,7 +479,10 @@ impl Dispatch<WlOutput, ()> for WlrState {
                 info.geometry = Some((x, y));
             }
             wl_output::Event::Mode {
-                flags, width, height, ..
+                flags,
+                width,
+                height,
+                ..
             } => {
                 let bits = match flags {
                     wl::WEnum::Value(m) => u32::from(m),

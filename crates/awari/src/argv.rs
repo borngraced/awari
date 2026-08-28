@@ -5,7 +5,6 @@ use awari_ipc::{ClientReply, ClientRequest};
 pub fn client_main(arg: &str) -> i32 {
     let req = match arg {
         "ping" => ClientRequest::Ping,
-        "dump-stats" => ClientRequest::DumpStats,
         "toggle-launcher" => ClientRequest::ToggleLauncher,
         "open-launcher" => ClientRequest::OpenLauncher,
         "close-launcher" => ClientRequest::CloseLauncher,
@@ -19,10 +18,6 @@ pub fn client_main(arg: &str) -> i32 {
         Ok(ClientReply::Err(e)) => {
             eprintln!("{e}");
             1
-        }
-        Ok(other) => {
-            println!("{}", serde_json::to_string(&other).unwrap());
-            0
         }
         Err(e) => {
             eprintln!("{e}");

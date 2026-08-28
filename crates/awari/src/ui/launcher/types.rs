@@ -57,9 +57,6 @@ pub enum LauncherCmd {
     SetCategory {
         category: Category,
     },
-    OpenToRender {
-        ms: u64,
-    },
     SavePosition {
         x: f32,
         y: f32,
@@ -159,4 +156,3 @@ pub struct FilterParams<'a> {
     pub prefix: Option<&'a str>,
     pub calc: Option<String>,
 }
-

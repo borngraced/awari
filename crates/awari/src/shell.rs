@@ -26,8 +26,7 @@ use tracing_subscriber::EnvFilter;
 /// `mode` selects keep-alive (`GpuMode::KeepAlive`) or drop (`GpuMode::Drop`)
 /// for the launcher GUI.
 pub fn run(mode: GpuMode) {
-    let filter = EnvFilter::try_from_env("AWARI_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("AWARI_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
     let child_log_fd = init_log_pipe(filter);
 
@@ -41,8 +40,7 @@ pub fn run(mode: GpuMode) {
             std::process::exit(1);
         }
     };
-    let stats = Arc::new(Mutex::new(lock::Stats::default()));
-    let ipc_rx = lock::spawn_accept(server.listener, stats.clone());
+    let ipc_rx = lock::spawn_accept(server.listener);
 
     #[cfg(unix)]
     block_signal(libc::SIGTERM);
@@ -101,7 +99,7 @@ pub fn run(mode: GpuMode) {
             // background click) keeps the daemon's `visible` flag truthful.
             ClientRequest::LauncherShown => visible.store(true, Ordering::Relaxed),
             ClientRequest::LauncherHidden => visible.store(false, Ordering::Relaxed),
-            _ => {}
+            ClientRequest::Ping => {}
         }
     }
 }

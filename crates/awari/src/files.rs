@@ -1176,11 +1176,6 @@ mod tests {
             &opts,
             &mut caches,
         );
-        eprintln!(
-            "TRANSIENT browse(base)={} term('aw')={}",
-            browse.len(),
-            term.len()
-        );
         let _ = std::fs::remove_dir_all(&base);
         assert!(
             !browse.is_empty() || !term.is_empty(),
@@ -1307,80 +1302,5 @@ mod tests {
         // `g` from `.tar.gz`) must still score as a real match, never None.
         // Our previous linear-gap scorer returned None here and dropped the file.
         assert!(subsequence_score("golang", "goland-2026.2.0.1.tar.gz").is_some());
-    }
-
-    /// Temporary diagnostic: hammer the worker with distinct plain queries and
-    /// print RSS at checkpoints. Run with:
-    ///   cargo test -p awari --release rss_files -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn rss_files_plain_queries() {
-        use std::time::Duration;
-        fn rss_kb() -> i64 {
-            std::fs::read_to_string("/proc/self/statm")
-                .ok()
-                .and_then(|s| {
-                    s.split_whitespace()
-                        .nth(1)
-                        .and_then(|v| v.parse::<i64>().ok())
-                })
-                .map(|p| p * 4)
-                .unwrap_or(0)
-        }
-        let root = std::path::Path::new("/tmp/opencode/rssfix");
-        for d in ["a", "b", "c", "d"] {
-            let dir = root.join(d);
-            std::fs::create_dir_all(&dir).unwrap();
-            for i in 0..300u32 {
-                let _ = std::fs::write(dir.join(format!("file_{d}_{i}.txt")), "x");
-            }
-        }
-        let (mut files, rx) = Files::spawn(
-            vec![root.to_path_buf()],
-            FilesOptions {
-                index_lockfiles: false,
-                regex: false,
-            },
-        );
-        let drain = std::thread::spawn(move || for _ in rx {});
-        // Let the picker finish its initial walk so the scan itself isn't
-        // conflated with per-query growth.
-        files.query("warm");
-        std::thread::sleep(Duration::from_millis(1500));
-        let base = rss_kb();
-        eprintln!("base rss = {base} KB");
-        for i in 0..2000u64 {
-            files.query(&format!("zz{}x{}", i % 977, i));
-            if i % 400 == 399 {
-                std::thread::sleep(Duration::from_millis(120));
-                eprintln!("after {} queries: rss = {} KB", i + 1, rss_kb());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-        let end = rss_kb();
-        eprintln!("end rss = {end} KB (delta {} KB)", end - base);
-        // Phase 2: cycle MORE distinct path dirs than TRANSIENT_DIR_CAP (8),
-        // forcing constant picker eviction + re-walk churn.
-        let pbase = rss_kb();
-        eprintln!("path-phase base rss = {pbase} KB");
-        for i in 0..600u64 {
-            let d = i % 16;
-            files.query(&format!("/tmp/opencode/rssfix/dir{d}/x{}", i % 13));
-            if i % 150 == 149 {
-                std::thread::sleep(Duration::from_millis(120));
-                eprintln!("after {} path queries: rss = {} KB", i + 1, rss_kb());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-        eprintln!(
-            "after path phase: rss = {} KB (delta {} KB)",
-            rss_kb(),
-            rss_kb() - pbase
-        );
-        files.clear();
-        std::thread::sleep(Duration::from_millis(500));
-        eprintln!("after clear: rss = {} KB", rss_kb());
-        drop(files);
-        drain.join().ok();
     }
 }

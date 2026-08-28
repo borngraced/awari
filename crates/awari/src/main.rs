@@ -16,13 +16,10 @@ mod shell;
 mod surfaces;
 mod ui;
 
-use std::sync::{Arc, Mutex};
-
 use awari_compositor::{Backend, connect};
 use gpui_platform::application;
 
 use crate::app::{GpuMode, StartState};
-use crate::lock::Stats;
 use crate::surfaces::SurfaceRole;
 
 /// True if `flag` appears anywhere in `args`. Flags may precede or follow the
@@ -97,7 +94,6 @@ fn gui_main(args: &[String]) {
 
     application().run(move |cx| {
         // gpui_base::init(cx);
-        eprintln!("[boot] pre-gpui rss={}MiB", app::boot_rss_mib());
         app::Daemon::start(
             cx,
             match backend {
@@ -105,7 +101,6 @@ fn gui_main(args: &[String]) {
                 Backend::Noop => None,
             },
             inbox,
-            Arc::new(Mutex::new(Stats::default())),
             cfg,
             start_state,
             gpu_mode,

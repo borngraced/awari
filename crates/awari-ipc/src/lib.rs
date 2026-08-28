@@ -22,24 +22,13 @@ pub enum ClientRequest {
     /// (e.g. dismissed via Escape/click inside the GUI). Keeps the daemon's
     /// `visible` flag truthful even when the close was not daemon-initiated.
     LauncherHidden,
-    /// Overlay latency and RSS. The GUI process owns these numbers; the daemon
-    /// stores the last report so `dump-stats` is not stuck on shell RSS.
-    ReportStats {
-        launcher_open_to_first_commit_ms: Option<u64>,
-        rss_bytes: u64,
-    },
     Ping,
-    DumpStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClientReply {
     Ok,
     Err(String),
-    Stats {
-        launcher_open_to_first_commit_ms: Option<u64>,
-        rss_bytes: u64,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,18 +136,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_launcher_and_stats() {
+    fn roundtrip_launcher() {
         for req in [
             ClientRequest::ToggleLauncher,
             ClientRequest::OpenLauncher,
             ClientRequest::CloseLauncher,
-            ClientRequest::DumpStats,
             ClientRequest::LauncherShown,
             ClientRequest::LauncherHidden,
-            ClientRequest::ReportStats {
-                launcher_open_to_first_commit_ms: Some(12),
-                rss_bytes: 1,
-            },
         ] {
             let s = serde_json::to_string(&req).unwrap();
             assert_eq!(serde_json::from_str::<ClientRequest>(&s).unwrap(), req);

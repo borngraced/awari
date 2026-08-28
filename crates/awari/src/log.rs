@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use awari_ipc::runtime_dir;
-use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
 
 const LOG_CAP: u64 = 1024 * 1024;
 const LOG_COMPACT_HEADROOM: u64 = 1024 * 1024;
@@ -71,9 +71,7 @@ fn log_reader(read_fd: RawFd, path: PathBuf) {
         .ok();
     let mut buf = [0u8; 8192];
     loop {
-        let n = unsafe {
-            libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-        };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
         match n {
             -1 => break,
             0 => break,
@@ -102,7 +100,9 @@ fn log_reader(read_fd: RawFd, path: PathBuf) {
             }
         }
     }
-    unsafe { libc::close(read_fd); }
+    unsafe {
+        libc::close(read_fd);
+    }
 }
 
 /// Rewrite `path` to keep at most `cap` bytes, advancing past the first
