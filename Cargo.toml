@@ -20,14 +20,15 @@ thiserror = "2"
 tracing = "0.1"
 
 # GPUI is built from the vendored, patched zed tree under .third_party/zed.
-# The only local change is patches/gpui-set-visible.patch, which adds
-# Window::set_keyboard_interactivity for layer-shell surfaces (the launcher
-# takes Exclusive focus while open, None when dismissed). Upstream has no
-# equivalent yet; see gpui-ce PR #87. The patched tree is committed directly.
-# Vendored, patched zed GPUI committed under .third_party/zed (see
-# patches/gpui-set-visible.patch for the only local change: it adds
-# Window::set_keyboard_interactivity for layer-shell). The patched tree is
-# committed directly, so a fresh clone builds with no separate remote.
+# Two local changes sit on top of upstream:
+#   - patches/gpui-set-visible.patch adds Window::set_keyboard_interactivity for
+#     layer-shell surfaces (the launcher takes Exclusive focus while open, None
+#     when dismissed). Upstream has no equivalent yet; see gpui-ce PR #87.
+#   - crates/gpui_wgpu: the Linux GPU instance asks the Vulkan loader to skip
+#     software/translated ICDs (VK_LOADER_DRIVERS_DISABLE) and builds Vulkan-only,
+#     with a full-instance fallback. This mirrors upstream issue zed#63327.
+# The patched tree is committed directly, so a fresh clone builds with no
+# separate remote.
 [patch."https://github.com/zed-industries/zed"]
 gpui = { version = "=0.2.2", path = ".third_party/zed/crates/gpui" }
 gpui_platform = { version = "=0.1.0", path = ".third_party/zed/crates/gpui_platform" }
@@ -45,7 +46,7 @@ sum_tree = { version = "=0.1.0", path = ".third_party/zed/crates/sum_tree" }
 
 [profile.release]
 opt-level = 3       # Optimize for runtime speed; launcher latency matters more than binary size
-lto = true          # Link-Time Optimization (removes dead code across crates)
-codegen-units = 1   # Reduces parallel compilation to maximize LTO optimization
-strip = true        # Automatically strips symbols and debug info
-panic = "abort"     # Removes stack unwinding plumbing (saves significant space)
+lto = true   
+codegen-units = 1 
+strip = true     
+panic = "abort"

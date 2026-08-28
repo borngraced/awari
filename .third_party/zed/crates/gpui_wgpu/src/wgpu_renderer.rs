@@ -302,19 +302,12 @@ impl WgpuRenderer {
             None => match WgpuContext::new(instance, &surface, compositor_gpu) {
                 Ok(context) => (ctx_ref.insert(context), surface),
                 Err(lean_error) => {
-                    // The lean instance (Vulkan-only, ICD-filtered) found no usable
-                    // adapter — e.g. a machine with no Vulkan driver or a driver the
-                    // filter does not recognize. Retry with the full instance so
-                    // those systems keep the previous behaviour.
-                    //
-                    // The lean probe surface is dropped first: only one surface may
-                    // reference the window handle at a time, and reusing it across
-                    // instances is compositor-sensitive (and would mismatch the full
-                    // instance's device during configuration).
                     log::warn!(
                         "Lean GPU context creation failed ({lean_error}); retrying with a \
                          full (unfiltered Vulkan + GL) instance"
                     );
+                    // Drop the lean probe surface so the full instance can open
+                    // the same window handle (one compositor surface per window).
                     drop(surface);
                     WgpuContext::restore_full_icd_selection();
                     let full_instance =
