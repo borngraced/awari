@@ -1037,7 +1037,7 @@ impl Launcher {
                     .child(
                         div()
                             .text_size(px(16.))
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(if selected { t.fg() } else { t.muted() })
                             .truncate()
                             .child(highlighted_name(&row.label, q, t)),
