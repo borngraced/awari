@@ -77,6 +77,16 @@ const SOFTWARE_RENDERER_HINTS: &[&str] = &[
     "swiftshader",
 ];
 
+/// PCI vendor IDs mapped to the Vulkan ICD manifests that serve them. Mesa
+/// drivers ship per-arch manifest names (`.<arch>.json`), NVIDIA ships a flat
+/// `nvidia_icd.json`; candidates are probed against the loader search paths.
+#[cfg(target_os = "linux")]
+const VENDOR_ICD_CANDIDATES: &[(u32, &[&str])] = &[
+    (0x1002, &["radeon_icd"]),
+    (0x10de, &["nvidia_icd", "nouveau_icd"]),
+    (0x8086, &["intel_icd"]),
+];
+
 const DRIVER_OVERRIDE_VARS: &[&str] = &[
     "VK_ICD_FILENAMES",
     "VK_DRIVER_FILES",
@@ -369,18 +379,125 @@ impl WgpuContext {
             return;
         }
         let deny_list = Self::software_driver_deny_list();
-        // SAFETY: GPU startup is on the main thread; the loader reads this
+        // SAFETY: GPU startup is on the main thread; the loader reads these
         // during the vkCreateInstance that follows.
         unsafe { std::env::set_var("VK_LOADER_DRIVERS_DISABLE", &deny_list) };
+
+        // The loader dlopens every manifest ICD even when `..._DISABLE`
+        // inhibits them, so a disabled software ICD still maps and touches its
+        // dependencies (lavapipe links libLLVM). `..._SELECT` prevents the
+        // dlopen entirely and keeps only the drivers serving the DRM render
+        // nodes actually present; unknown setups fall back to the deny list.
+        if let Some(select) = Self::hardware_driver_select() {
+            // SAFETY: same startup path as the set_var above.
+            unsafe { std::env::set_var("VK_LOADER_DRIVERS_SELECT", &select) };
+            log::debug!("Vulkan loader restricted to hardware ICDs ({select})");
+        }
+
         ICD_FILTER_APPLIED.store(true, Ordering::Relaxed);
         log::debug!("Vulkan loader will skip software ICDs ({deny_list})");
+    }
+
+    /// Comma-separated `VK_LOADER_DRIVERS_SELECT` value listing the ICD
+    /// manifests that match the GPUs attached to the system, or `None` when no
+    /// known GPU vendor can be resolved.
+    #[cfg(target_os = "linux")]
+    fn hardware_driver_select() -> Option<String> {
+        let arch = std::env::consts::ARCH;
+        let manifests = Self::hardware_vendor_ids()
+            .iter()
+            .filter_map(|vendor_id| Self::installed_manifest_for_vendor(*vendor_id, arch))
+            .collect::<std::collections::BTreeSet<_>>();
+        if manifests.is_empty() {
+            return None;
+        }
+        Some(manifests.into_iter().collect::<Vec<_>>().join(","))
+    }
+
+    /// PCI vendor IDs of the DRM render nodes visible under `/sys/class/drm`.
+    #[cfg(target_os = "linux")]
+    fn hardware_vendor_ids() -> Vec<u32> {
+        let mut vendors = std::collections::BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            if !file_name.to_string_lossy().starts_with("renderD") {
+                continue;
+            }
+            let vendor_path = entry.path().join("device/vendor");
+            let Ok(content) = std::fs::read_to_string(&vendor_path) else {
+                continue;
+            };
+            if let Ok(vendor) = u32::from_str_radix(content.trim().trim_start_matches("0x"), 16) {
+                vendors.insert(vendor);
+            }
+        }
+        vendors.into_iter().collect()
+    }
+
+    /// The manifest file names that could serve `vendor_id`, arch-specific
+    /// first and plain (used by third-party drivers) second.
+    #[cfg(target_os = "linux")]
+    fn manifest_names_for_vendor(vendor_id: u32, arch: &str) -> Vec<String> {
+        let Some((_, manifest_bases)) = VENDOR_ICD_CANDIDATES
+            .iter()
+            .find(|(candidate_vendor, _)| *candidate_vendor == vendor_id)
+        else {
+            return Vec::new();
+        };
+        manifest_bases
+            .iter()
+            .flat_map(|manifest_base| {
+                [
+                    format!("{manifest_base}.{arch}.json"),
+                    format!("{manifest_base}.json"),
+                ]
+            })
+            .collect()
+    }
+
+    /// The first manifest name for `vendor_id` that exists in a Vulkan loader
+    /// search directory, or `None` if none are installed.
+    #[cfg(target_os = "linux")]
+    fn installed_manifest_for_vendor(vendor_id: u32, arch: &str) -> Option<String> {
+        let dirs = Self::icd_search_dirs();
+        Self::manifest_names_for_vendor(vendor_id, arch)
+            .into_iter()
+            .find(|manifest_name| dirs.iter().any(|dir| dir.join(manifest_name).is_file()))
+    }
+
+    /// The directories the Vulkan loader searches for ICD manifests, in order.
+    #[cfg(target_os = "linux")]
+    fn icd_search_dirs() -> Vec<std::path::PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+            dirs.push(std::path::PathBuf::from(xdg_data_home).join("vulkan/icd.d"));
+        } else if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(std::path::PathBuf::from(home).join(".local/share/vulkan/icd.d"));
+        }
+        if let Some(xdg_data_dirs) = std::env::var_os("XDG_DATA_DIRS") {
+            for dir in std::env::split_paths(&xdg_data_dirs) {
+                dirs.push(dir.join("vulkan/icd.d"));
+            }
+        }
+        dirs.extend([
+            std::path::PathBuf::from("/etc/vulkan/icd.d"),
+            std::path::PathBuf::from("/usr/local/share/vulkan/icd.d"),
+            std::path::PathBuf::from("/usr/share/vulkan/icd.d"),
+        ]);
+        dirs
     }
 
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn restore_full_icd_selection() {
         if ICD_FILTER_APPLIED.swap(false, Ordering::Relaxed) {
             // SAFETY: same startup thread, immediately before the fallback instance.
-            unsafe { std::env::remove_var("VK_LOADER_DRIVERS_DISABLE") };
+            unsafe {
+                std::env::remove_var("VK_LOADER_DRIVERS_DISABLE");
+                std::env::remove_var("VK_LOADER_DRIVERS_SELECT");
+            }
         }
     }
 
@@ -722,5 +839,21 @@ mod tests {
         ] {
             assert!(!is_denied(name), "{name} must stay enabled");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn manifest_names_cover_known_vendors() {
+        assert_eq!(
+            WgpuContext::manifest_names_for_vendor(0x8086, "x86_64").join(","),
+            "intel_icd.x86_64.json,intel_icd.json"
+        );
+
+        assert_eq!(
+            WgpuContext::manifest_names_for_vendor(0x10de, "x86_64").join(","),
+            "nvidia_icd.x86_64.json,nvidia_icd.json,nouveau_icd.x86_64.json,nouveau_icd.json"
+        );
+
+        assert!(WgpuContext::manifest_names_for_vendor(0x1234, "x86_64").is_empty());
     }
 }
