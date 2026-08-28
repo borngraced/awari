@@ -2,7 +2,7 @@
 > Remove this line to confirm you've reviewed this PR before submitting.
 
 <p align="center">
-  <img src="crates/awari/assets/awari-icon.svg" width="120" alt="Àwárí logo">
+  <img src="crates/awari/assets/awa-logo.svg" width="240" alt="Àwárí logo">
 </p>
 
 # Àwárí
