@@ -263,7 +263,6 @@ impl Theme {
     }
 }
 
-/// `#RGB`, `#RRGGBB`, `#RRGGBBAA`. No `url()`, no named CSS colors.
 pub fn parse_hex(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('#');
     match s.len() {

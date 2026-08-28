@@ -14,24 +14,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Resident set size in MiB (Linux /proc/self/status), for boot tracing.
-pub(crate) fn boot_rss_mib() -> usize {
-    if let Ok(s) = fs::read_to_string("/proc/self/status") {
-        for line in s.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                if let Some(kb) = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|v| v.parse::<usize>().ok())
-                {
-                    return kb / 1024;
-                }
-            }
-        }
-    }
-    0
-}
+use awari_compositor::{
+    Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
+};
+use awari_ipc::{ClientRequest, notify};
+use gpui::layer_shell::LayerShellNotSupportedError;
+use gpui::{
+    App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode, Task,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
+    size,
+};
 
+const LAUNCHER_CLOSE_GRACE_MS: u64 = 200;
 /// Dev-only probe: when `AWARI_PROBE_QUERIES` points at a text file, consume
 /// one query line per launcher open and run it, so memory growth from
 /// sequential searches can be measured without manual typing. No-op in normal
@@ -40,6 +34,28 @@ static PROBE_CONSUMED: AtomicUsize = AtomicUsize::new(0);
 /// Set once every line of the probe query file has been applied, so a captured
 /// session can quit cleanly at the right moment (for heap profiling).
 static PROBE_EXHAUSTED: AtomicBool = AtomicBool::new(false);
+
+/// Holds the daemon entity so GPUI does not drop it with no windows open.
+struct Keep(#[allow(dead_code)] Entity<Daemon>);
+impl Global for Keep {}
+
+/// Resident set size in MiB (Linux /proc/self/status), for boot tracing.
+pub(crate) fn boot_rss_mib() -> usize {
+    if let Ok(s) = fs::read_to_string("/proc/self/status") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:")
+                && let Some(kb) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+            {
+                return kb / 1024;
+            }
+        }
+    }
+    0
+}
+
 fn apply_probe_query(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
     let Some(path) = std::env::var_os("AWARI_PROBE_QUERIES") else {
         return;
@@ -57,7 +73,13 @@ fn apply_probe_query(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
         PROBE_EXHAUSTED.store(true, Ordering::Relaxed);
         return;
     };
-    daemon.apply_launcher_cmd(LauncherCmd::SetQuery { query: (*query).into() }, cx);
+
+    daemon.apply_launcher_cmd(
+        LauncherCmd::SetQuery {
+            query: (*query).into(),
+        },
+        cx,
+    );
 }
 
 /// Dev-only probe: when `AWARI_PROBE_CATEGORY=apps|files|windows` is set, each
@@ -76,25 +98,6 @@ fn apply_probe_category(daemon: &mut Daemon, cx: &mut Context<Daemon>) {
     };
     daemon.apply_launcher_cmd(LauncherCmd::SetCategory { category }, cx);
 }
-
-use awari_compositor::{
-    Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
-};
-use awari_ipc::{ClientRequest, notify};
-use gpui::layer_shell::LayerShellNotSupportedError;
-use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, DisplayId, Entity, Global, QuitMode, Task,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
-    size,
-};
-
-/// Delay after a dismiss before the surface is torn down, long enough to cover
-/// the fade-out animation so we never cut it short.
-const LAUNCHER_CLOSE_GRACE_MS: u64 = 200;
-
-/// Holds the daemon entity so GPUI does not drop it with no windows open.
-struct Keep(#[allow(dead_code)] Entity<Daemon>);
-impl Global for Keep {}
 
 /// Whether the GPU overlay process stays in memory between dismisses
 /// (`KeepAlive`) or exits on dismiss to free the GPU process (`Drop`).
@@ -212,7 +215,7 @@ impl Daemon {
         gpu_mode: GpuMode,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
-        eprintln!("[boot] daemon-start rss={}MiB", boot_rss_mib());
+        tracing::info!(rss_mib = boot_rss_mib(), "boot: daemon-start");
         let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, stats, cfg));
         // Prewarm: build the overlay now (wgpu device, shaders, fonts) so
         // the first Super press costs a frame instead of full stack init.
@@ -273,7 +276,7 @@ impl Daemon {
         stats: Arc<Mutex<Stats>>,
         cfg: Config,
     ) -> Self {
-        eprintln!("[boot] pre-files rss={}MiB", boot_rss_mib());
+        tracing::info!(rss_mib = boot_rss_mib(), "boot: pre-files");
         let (files_tx, files_rx) = if cfg.sources.files {
             let (tx, rx) = crate::files::Files::spawn(
                 cfg.files.resolved_roots(),
@@ -286,7 +289,7 @@ impl Daemon {
         } else {
             (None, None)
         };
-        eprintln!("[boot] post-files rss={}MiB", boot_rss_mib());
+        tracing::info!(rss_mib = boot_rss_mib(), "boot: post-files");
         let (apps_tx, apps_rx) = std::sync::mpsc::channel::<Vec<DesktopApp>>();
         let mut daemon = Self {
             compositor,
@@ -321,15 +324,18 @@ impl Daemon {
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
         };
+
         spawn_compositor_pump(cx, inbox);
         if let Some(files_rx) = files_rx {
             spawn_files_pump(cx, files_rx);
         }
+
         spawn_apps_pump(cx, apps_rx);
-        eprintln!("[boot] daemon-new-done rss={}MiB", boot_rss_mib());
+        spawn_mem_heartbeat(cx);
+        tracing::info!(rss_mib = boot_rss_mib(), "boot: daemon-new-done");
         thread::spawn(|| {
             thread::sleep(Duration::from_secs(2));
-            eprintln!("[boot] settled-2s rss={}MiB", boot_rss_mib());
+            tracing::info!(rss_mib = boot_rss_mib(), "boot: settled-2s");
         });
         // Scan `.desktop` files off the bootstrap path so the overlay prewarm
         // (wgpu device, shaders, fonts) runs first; apps swap in when ready.
@@ -489,8 +495,12 @@ impl Daemon {
                 self.appwin_cache = None;
                 (None, None)
             };
-            let rows_vec =
-                self.filtered_rows(cached_app.as_deref(), cached_win.as_deref(), prefix, calc.clone());
+            let rows_vec = self.filtered_rows(
+                cached_app.as_deref(),
+                cached_win.as_deref(),
+                prefix,
+                calc.clone(),
+            );
             let rows: Arc<[launcher::LauncherRow]> = Arc::from(rows_vec);
             self.last_rows = Some(rows.clone());
             self.last_rows_key = Some(RowsKey {
@@ -681,7 +691,12 @@ impl Daemon {
                     launcher_open_to_first_commit_ms: Some(ms),
                     rss_bytes: rss,
                 });
-                tracing::info!(ms, "launcher open → first render");
+                tracing::info!(
+                    ms,
+                    rss_mib = rss / (1024 * 1024),
+                    rows = self.last_rows.as_ref().map(|r| r.len()).unwrap_or(0),
+                    "launcher open → first render"
+                );
                 if !self.keep_alive
                     && let Some(cold) = cold_start_ms()
                 {
@@ -697,14 +712,18 @@ impl Daemon {
     }
 
     fn set_launcher_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        tracing::debug!(open, launcher_open = self.launcher_open, "set_launcher_open");
+        tracing::debug!(
+            open,
+            launcher_open = self.launcher_open,
+            "set_launcher_open"
+        );
         // Bumped on every transition; deferred window work from a previous
         // generation is dropped so a stale hide cannot clobber a fresh open
         // (destroy-on-close masked this by killing the handle instead).
         self.launcher_gen += 1;
         if open {
             self.launcher_open = true;
-            eprintln!("[boot] launcher-open rss={}MiB", boot_rss_mib());
+            tracing::info!(rss_mib = boot_rss_mib(), "boot: launcher-open");
             // Tell the daemon the overlay is now actually visible, so its
             // `visible` flag stays truthful for the next toggle decision.
             notify(ClientRequest::LauncherShown);
@@ -723,7 +742,7 @@ impl Daemon {
             apply_probe_category(self, cx);
             let started = Instant::now();
             self.ensure_launcher_display(cx);
-            eprintln!("[boot] post-ensure-launcher rss={}MiB", boot_rss_mib());
+            tracing::info!(rss_mib = boot_rss_mib(), "boot: post-ensure-launcher");
             if let Some(h) = self.launcher {
                 let generation = self.launcher_gen;
                 let shell = cx.entity().downgrade();
@@ -826,49 +845,45 @@ impl Daemon {
                     {
                         cx.quit();
                     } else if let Some(h) = d.launcher {
-                        let _ = h.update(cx, |l, window, _cx| {
+                        let _ = h.update(cx, |l, window, cx| {
                             l.closing = false;
-                            // After the fade completes the surface is hidden, so
-                            // drop gpui's append-only sprite atlas (icons + text
-                            // glyphs) too. This returns RSS to the launch baseline
-                            // on exit instead of leaving the last session's atlas
-                            // resident until the next open.
                             window.clear_sprite_atlas();
-                            // Stop presenting the hidden overlay entirely: drop the
-                            // wgpu surface/swapchain/pipelines and reset the GPU
-                            // atlas while keeping the shared device live. The next
-                            // open rebuilds the surface on its first drawn frame.
+                            // Paint one final empty/transparent frame so the
+                            // compositor stops showing the last launcher frame
+                            // (the ghost left after an accept), then drop the
+                            // GPU surface only after that frame is presented.
                             //
-                            // Deliberately no cx.notify(): the overlay is hidden, so
-                            // nothing needs repainting, and a redraw here would make
-                            // the draw path rebuild the surface immediately, undoing
-                            // the idle release. The reopen draw recovers on its own.
-                            window.release_gpu_for_idle();
+                            // on_next_frame closures run at the START of the
+                            // frame they book, before draw(), so a single hop
+                            // would release the surface first and the empty
+                            // frame's draw would be absorbed as an idle redraw.
+                            // Two hops present the transparent frame (notify +
+                            // frame N draw), then release on frame N+1.
+                            cx.notify();
+                            window.on_next_frame(|window, _app| {
+                                window.on_next_frame(|window, _app| {
+                                    window.release_gpu_for_idle();
+                                    let rss_mib = crate::lock::rss_bytes() / (1024 * 1024);
+                                    tracing::info!(rss_mib, "idle: released gpu+atlas");
+                                });
+                            });
                         });
-                        // Dev-only memory attribution: report the live size of the
-                        // main candidate caches at idle and (optionally) prune them,
-                        // controlled by AWARI_PRUNE={rows,files,view,none}.
-                        if std::env::var("AWARI_PROBE_QUERIES").is_ok() {
-                            let rows_bytes = d
-                                .last_rows
-                                .as_ref()
-                                .map(|r| std::mem::size_of_val(&**r))
-                                .unwrap_or(0);
-                            let hits_bytes = d.file_hits.len();
-                            tracing::info!(
-                                rows_bytes,
-                                hits_bytes,
-                                "idle: candidate cache sizes"
-                            );
-                        }
-                        if std::env::var("AWARI_PRUNE").as_deref() == Ok("rows") {
-                            d.last_rows = None;
-                            d.appwin_cache = None;
-                            d.file_hits.clear();
-                        }
-                        if std::env::var("AWARI_TRIM").is_ok() {
-                            unsafe { libc::malloc_trim(0) };
-                        }
+                        // Idle memory reclaim: drop the launcher's candidate
+                        // caches and release the hit-buffer capacity so each
+                        // session starts from a clean slate instead of carrying
+                        // the previous session's peak. They rebuild on the next
+                        // open (an empty-query browse re-filters, which is cheap).
+                        d.last_rows = None;
+                        d.appwin_cache = None;
+                        d.file_hits.clear();
+                        d.file_hits.shrink_to_fit();
+                        // Hand freed pages back to the OS. The matcher / picker
+                        // buffers and driver staging churn glibc arenas, keeping
+                        // RSS at the session peak even after the Arc drops are
+                        // done; the overlay is hidden, so a trim here is a cheap
+                        // syscall with no repaint cost. Retained root indexes and
+                        // LMDB frecency maps stay warm by design.
+                        unsafe { libc::malloc_trim(0) };
                     }
                 });
             }
@@ -898,6 +913,11 @@ impl Daemon {
                     };
                     self.launcher_category = category;
                     self.launcher_selected = 0;
+                    tracing::info!(
+                        rss_mib = crate::lock::rss_bytes() / (1024 * 1024),
+                        ?category,
+                        "launcher: source change"
+                    );
                     self.sync_launcher(cx);
                 } else {
                     self.activate_launcher_row(cx);
@@ -1136,19 +1156,26 @@ impl Daemon {
             *self.app_usage.entry(name.to_string()).or_insert(0) += 1;
             self.save_usage();
         }
+
         if let launcher::RowKind::Command { command } = &kind {
-            crate::files::run_command(command);
+            crate::files::run_script(&format!("{command} ; exec \"$SHELL\""));
             self.dismiss_launcher(cx);
+
             return;
         }
+
+        // TODO: explain
         self.dismiss_launcher(cx);
+
         if let launcher::RowKind::File { path } = kind {
             if let Some(files) = &self.files_tx {
                 files.record_open(&path);
             }
+
             crate::files::activate(&path);
             return;
         }
+
         let compositor = self.compositor.clone();
         cx.defer(move |_cx| match kind {
             launcher::RowKind::App { exec, .. } => {
@@ -1173,20 +1200,24 @@ impl Daemon {
 fn spawn_compositor_pump(cx: &mut Context<Daemon>, inbox: Arc<CompositorInbox>) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     let wake = inbox.take_wake();
+
     thread::Builder::new()
         .name("awari-compositor-pump".into())
         .spawn(move || {
             let Some(wake) = wake else { return };
+
             while wake.recv().is_ok() {
                 let _ = tx.unbounded_send(inbox.drain());
             }
         })
         .ok();
+
     cx.spawn(async move |this, cx| {
         use futures::StreamExt;
         while let Some(msgs) = rx.next().await {
             let _ = this.update(cx, |d, cx| {
                 let changed = d.apply_compositor(msgs);
+
                 if changed && d.launcher_open {
                     d.sync_launcher(cx);
                     cx.notify();
@@ -1209,14 +1240,17 @@ fn spawn_files_pump(cx: &mut Context<Daemon>, rx: Receiver<(u64, Vec<FileHit>)>)
             }
         })
         .ok();
+
     cx.spawn(async move |this, cx| {
         use futures::StreamExt;
+
         while let Some((seq, hits)) = fut_rx.next().await {
             let _ = this.update(cx, |d, cx| {
                 // Drop answers that no longer match the newest query.
                 if seq == d.files_seq {
                     d.file_hits = hits;
                     d.file_hits_gen += 1;
+
                     if d.launcher_open {
                         d.sync_launcher(cx);
                         cx.notify();
@@ -1240,6 +1274,7 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
             }
         })
         .ok();
+
     cx.spawn(async move |this, cx| {
         use futures::StreamExt;
         while let Some(apps) = fut_rx.next().await {
@@ -1263,12 +1298,46 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
                             .or_insert_with(|| v.to_string());
                     }
                 }
+
                 d.app_icons = icons;
                 d.apps = apps;
                 d.source_gen += 1;
+
                 if d.launcher_open {
                     d.sync_launcher(cx);
                 }
+            });
+        }
+    })
+    .detach();
+}
+
+/// Periodic in-process memory heartbeat (RSS read via /proc/self inside the
+/// GUI process, so no external pid sampling). Enabled with AWARI_MEM_TRACE=1
+/// so the awari.log shows the overlay's own footprint over time during a real
+/// user session.
+fn spawn_mem_heartbeat(cx: &mut Context<Daemon>) {
+    if std::env::var("AWARI_MEM_TRACE").is_err() {
+        return;
+    }
+
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |d, _cx| {
+                let rss_mib = crate::lock::rss_bytes() / (1024 * 1024);
+                tracing::info!(
+                    rss_mib,
+                    last_rows = d.last_rows.as_ref().map(|r| r.len()).unwrap_or(0),
+                    file_hits = d.file_hits.len(),
+                    apps = d.apps.len(),
+                    cache = d
+                        .appwin_cache
+                        .as_ref()
+                        .map(|c| { c.app_rows.len() + c.win_rows.len() })
+                        .unwrap_or(0),
+                    "heartbeat"
+                );
             });
         }
     })
@@ -1291,6 +1360,7 @@ fn cold_start_ms() -> Option<u64> {
     } else {
         proc_start_ns()?
     };
+
     let ms = now_ns.saturating_sub(start_ns) / 1_000_000;
     Some(ms as u64)
 }
@@ -1357,11 +1427,13 @@ extern "C" fn on_signal(sig: i32) {
 fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) {
     use std::os::unix::io::FromRawFd;
     let mut fds = [0i32; 2];
+
     unsafe {
         if libc::pipe(fds.as_mut_ptr()) != 0 {
             return;
         }
     }
+
     let (read_fd, write_fd) = (fds[0], fds[1]);
     SIGNAL_WRITE_FD.store(write_fd, std::sync::atomic::Ordering::Relaxed);
     let _ = std::thread::Builder::new()
@@ -1370,6 +1442,7 @@ fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) 
             use std::io::Read;
             let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
             let mut buf = [0u8; 1];
+
             while reader.read(&mut buf).is_ok() {
                 tracing::debug!(byte = buf[0], "self-pipe byte received");
                 let sig = match buf[0] {
@@ -1377,11 +1450,13 @@ fn install_signal_handlers(tx: futures::channel::mpsc::UnboundedSender<Signal>) 
                     b'C' => Signal::Close,
                     _ => Signal::Quit,
                 };
+
                 if tx.unbounded_send(sig).is_err() {
                     break;
                 }
             }
         });
+
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = on_signal as *const () as usize;

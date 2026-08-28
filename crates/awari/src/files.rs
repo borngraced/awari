@@ -14,8 +14,8 @@ use std::time::Duration;
 use regex::Regex;
 
 use fff_search::{
-    ContentCacheBudget, FFFMode, FilePicker, FilePickerOptions, FrecencyTracker, FuzzySearchOptions,
-    PaginationArgs, QueryParser, SharedFilePicker, SharedFrecency,
+    ContentCacheBudget, FFFMode, FilePicker, FilePickerOptions, FrecencyTracker,
+    FuzzySearchOptions, PaginationArgs, QueryParser, SharedFilePicker, SharedFrecency,
 };
 
 use awari_ipc::state_dir;
@@ -204,14 +204,12 @@ impl Files {
                 }
             }
         }
-        if let Some(frec) = best {
-            if let Ok(mut g) = frec.write() {
-                if let Some(tracker) = g.as_mut() {
-                    if let Err(e) = tracker.track_access(path) {
-                        tracing::debug!(?e, "frecency track_access failed");
-                    }
-                }
-            }
+        if let Some(frec) = best
+            && let Ok(mut g) = frec.write()
+            && let Some(tracker) = g.as_mut()
+            && let Err(e) = tracker.track_access(path)
+        {
+            tracing::debug!(?e, "frecency track_access failed");
         }
     }
 }
@@ -321,6 +319,9 @@ fn picker_loop(
             tracing::debug!("clearing transient file caches on dismiss");
             transient.clear();
             transient_order.clear();
+            // Drop the compiled regex cache too, so a session's worst pattern
+            // doesn't pin its regex engine buffers for the daemon's lifetime.
+            regex_caches = RegexCaches::default();
             // Freed pages otherwise linger in glibc arenas; hand them back so
             // RSS actually falls after a heavy session instead of plateauing
             // at the peak.
@@ -484,13 +485,13 @@ fn fzy_char_eq(c: char, p: char, case_sensitive: bool) -> bool {
     if case_sensitive {
         c == p
     } else {
-        c.to_ascii_lowercase() == p.to_ascii_lowercase()
+        c.eq_ignore_ascii_case(&p)
     }
 }
 
 /// Best subsequence score of `needle` within `haystack`, or `None` if `needle`
 /// is not a subsequence of `haystack`. Case-insensitive unless `needle` contains
-    /// an ASCII uppercase letter (smart-case), matching skim behavior.
+/// an ASCII uppercase letter (smart-case), matching skim behavior.
 pub fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
     let needle: Vec<char> = needle.chars().collect();
     subsequence_score_chars(&needle, haystack)
@@ -530,12 +531,10 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
                 }
                 ci += 1;
             }
-            match found {
-                Some(pos) => {
-                    first_match[i] = pos;
-                    ci = pos + 1;
-                }
-                None => return None,
+            {
+                let pos = found?;
+                first_match[i] = pos;
+                ci = pos + 1;
             }
         }
     }
@@ -563,9 +562,10 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
 
     // Row 0: no pattern consumed yet. P[0][j] = GAP_EXTEND (a skipped prefix);
     // M[0][j] stays NEG_INF (a match can't end before the pattern starts).
-    for j in 0..cols {
-        p[j] = FZY_GAP_EXTEND;
+    for i in p.iter_mut().take(cols) {
+        *i = FZY_GAP_EXTEND;
     }
+
     // Reset the starting cell of every pattern row so the DP never reads stale
     // state from a previous reuse of the buffers.
     for (i, &start) in first_match.iter().enumerate() {
@@ -612,6 +612,7 @@ fn subsequence_score_chars(needle: &[char], haystack: &str) -> Option<i32> {
                 } else {
                     prev_skip
                 };
+
                 if score_match >= score_skip {
                     m[idx_cur] = score_match + match_val;
                 } else {
@@ -651,9 +652,11 @@ fn is_lockfile(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
+
     if name.ends_with(".lock") {
         return true;
     }
+
     matches!(
         name,
         "Cargo.lock"
@@ -751,6 +754,7 @@ fn search_all(
         } else {
             term
         };
+
         merged.push(search_one(
             shared,
             parser,
@@ -759,8 +763,8 @@ fn search_all(
             opts.index_lockfiles,
         ));
     }
-    let cap = MAX_FILE_RESULTS;
-    merge_scored(merged, cap)
+
+    merge_scored(merged, MAX_FILE_RESULTS)
 }
 
 /// Merge per-root scored hits into one globally score-ordered list. Each root's
@@ -791,14 +795,13 @@ fn search_one(
     };
     let query = parser.parse(fff_query);
     let needle_chars: Vec<char> = fff_query.to_lowercase().chars().collect();
-    let fff_limit = MAX_FILE_RESULTS;
     let results = p.fuzzy_search(
         &query,
         None,
         FuzzySearchOptions {
             pagination: PaginationArgs {
                 offset: 0,
-                limit: fff_limit,
+                limit: MAX_FILE_RESULTS,
             },
             ..Default::default()
         },
@@ -811,9 +814,14 @@ fn search_one(
         return results
             .items
             .iter()
-            .map(|item| (0i32, FileHit {
-                path: Arc::from(item.absolute_path(p, &base)),
-            }))
+            .map(|item| {
+                (
+                    0i32,
+                    FileHit {
+                        path: Arc::from(item.absolute_path(p, &base)),
+                    },
+                )
+            })
             .filter(|(_, h)| {
                 (index_lockfiles || !is_lockfile(&h.path)) && re.is_match(&h.path.to_string_lossy())
             })
@@ -849,15 +857,18 @@ fn search_one(
             Some((score, h))
         })
         .collect();
+
     let k = PER_ROOT_ROWS;
     if scored.len() > k {
         scored.select_nth_unstable_by_key(k, |a| std::cmp::Reverse(a.0));
         scored.truncate(k);
     }
+
     scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     if scored.len() > k {
         scored.truncate(k);
     }
+
     scored
 }
 
@@ -958,11 +969,12 @@ fn terminal_args(term: &str, script: &str) -> Vec<String> {
 
 /// Spawn `script` inside the user's terminal emulator. The child is reaped on
 /// a background thread (like `activate`) so the UI thread never blocks.
-fn run_script(script: &str) {
+pub(crate) fn run_script(script: &str) {
     let Some(term) = resolve_terminal() else {
         tracing::warn!("no terminal emulator found; set $TERMINAL");
         return;
     };
+
     match Command::new(&term)
         .args(terminal_args(&term, script))
         .stdin(Stdio::null())
@@ -990,12 +1002,6 @@ pub fn run_in_terminal(dir: &Path) {
     run_script(&format!("cd {dir:?} && exec {shell}"));
 }
 
-/// Open a terminal, run `command`, then drop to an interactive shell so the
-/// user can inspect the output.
-pub fn run_command(command: &str) {
-    run_script(&format!("{command} ; exec \"$SHELL\""));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,9 +1009,14 @@ mod tests {
     fn hits(names: &[&str]) -> Vec<(i32, FileHit)> {
         names
             .iter()
-            .map(|n| (0i32, FileHit {
-                path: Arc::from(PathBuf::from(n)),
-            }))
+            .map(|n| {
+                (
+                    0i32,
+                    FileHit {
+                        path: Arc::from(PathBuf::from(n)),
+                    },
+                )
+            })
             .collect()
     }
 
@@ -1020,16 +1031,33 @@ mod tests {
     fn merge_scored_orders_by_score_across_roots() {
         // A lower-scored hit in an earlier root must not beat a higher-scored
         // hit in a later root (the old round-robin merge did exactly that).
-        let merged = vec![
-            hits(&["a1", "a2", "a3"]),
-            hits(&["b1"]),
-        ];
+        let merged = vec![hits(&["a1", "a2", "a3"]), hits(&["b1"])];
         // Re-score so b1 outranks a2/a3: give a1..a3 decreasing, b1 high.
         let merged = vec![
-            vec![(5, FileHit { path: Arc::from(PathBuf::from("a1")) })],
-            vec![(3, FileHit { path: Arc::from(PathBuf::from("a2")) })],
-            vec![(1, FileHit { path: Arc::from(PathBuf::from("a3")) })],
-            vec![(4, FileHit { path: Arc::from(PathBuf::from("b1")) })],
+            vec![(
+                5,
+                FileHit {
+                    path: Arc::from(PathBuf::from("a1")),
+                },
+            )],
+            vec![(
+                3,
+                FileHit {
+                    path: Arc::from(PathBuf::from("a2")),
+                },
+            )],
+            vec![(
+                1,
+                FileHit {
+                    path: Arc::from(PathBuf::from("a3")),
+                },
+            )],
+            vec![(
+                4,
+                FileHit {
+                    path: Arc::from(PathBuf::from("b1")),
+                },
+            )],
         ];
         let out = merge_scored(merged, 4);
         let names: Vec<_> = out.iter().map(|h| h.path.to_str().unwrap()).collect();
@@ -1096,8 +1124,7 @@ mod tests {
     #[test]
     fn transient_path_search_returns_hits() {
         use std::collections::VecDeque;
-        let base =
-            std::env::temp_dir().join(format!("awari_transient_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("awari_transient_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("aw_foo.rs"), b"x").unwrap();
         std::fs::write(base.join("bar.txt"), b"y").unwrap();
@@ -1109,7 +1136,10 @@ mod tests {
         let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
         let mut transient_order: VecDeque<PathBuf> = VecDeque::new();
         let parser = QueryParser::<fff_search::FileSearchConfig>::default();
-        let mut caches = RegexCaches { main: None, term: None };
+        let mut caches = RegexCaches {
+            main: None,
+            term: None,
+        };
         let opts = FilesOptions {
             index_lockfiles: false,
             regex: false,
@@ -1268,10 +1298,7 @@ mod tests {
         // because the spray pays GAP_START per gap.
         let spray = subsequence_score("golang", "G..o..l..a..n..g").unwrap();
         let goland = subsequence_score("golang", "goland-2026.2.0.1.tar.gz").unwrap();
-        assert!(
-            goland > spray,
-            "goland({goland}) must beat spray({spray})"
-        );
+        assert!(goland > spray, "goland({goland}) must beat spray({spray})");
     }
 
     #[test]

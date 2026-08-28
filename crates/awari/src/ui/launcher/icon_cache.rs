@@ -6,9 +6,10 @@ use futures::FutureExt;
 
 use gpui::{
     App, AppContext, Asset, AssetLogger, DevicePixels, Entity, ImageAssetLoader, ImageCache,
-    ImageCacheError, ImageCacheItem, RenderImage, Resource, Size, SvgRenderer, SvgSize, Window, hash,
+    ImageCacheError, ImageCacheItem, RenderImage, Resource, Size, SvgRenderer, SvgSize, Window,
+    hash,
 };
-use image::{imageops, Frame, ImageBuffer, Rgba};
+use image::{Frame, ImageBuffer, Rgba, imageops};
 
 /// Maximum number of icon textures retained in the launcher's per-panel image
 /// cache. Launcher icon lists are bounded (at most a few hundred installed apps,
@@ -37,9 +38,14 @@ pub(crate) const ICON_TEXTURE_MAX: u32 = 160;
 /// path never panics and never registers a full-resolution image in gpui's
 /// sprite atlas.
 fn placeholder_image() -> Arc<RenderImage> {
-    Arc::new(RenderImage::new(vec![Frame::new(
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(1, 1, Rgba([0, 0, 0, 0])),
-    )]))
+    Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::<
+        Rgba<u8>,
+        Vec<u8>,
+    >::from_pixel(
+        1,
+        1,
+        Rgba([0, 0, 0, 0]),
+    ))]))
 }
 
 /// Shrink raster `bytes` to at most `max` pixels on the longest side on the
@@ -55,7 +61,8 @@ fn decode_raster(bytes: &[u8], max: u32) -> Option<Arc<RenderImage>> {
     let scale = max as f32 / width.max(height) as f32;
     let new_width = (width as f32 * scale).max(1.0) as u32;
     let new_height = (height as f32 * scale).max(1.0) as u32;
-    let mut resized = imageops::resize(&rgba, new_width, new_height, imageops::FilterType::Triangle);
+    let mut resized =
+        imageops::resize(&rgba, new_width, new_height, imageops::FilterType::Triangle);
     // gpui's `RenderImage` stores pixels in BGRA order; `image` decodes RGBA.
     for pixel in resized.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
@@ -207,9 +214,7 @@ impl ImageCache for BoundedImageCache {
                 let path = path.clone();
                 let renderer = renderer.clone();
                 cx.background_executor()
-                    .spawn(async move {
-                        load_icon_from_path(&path, &renderer, ICON_TEXTURE_MAX)
-                    })
+                    .spawn(async move { load_icon_from_path(&path, &renderer, ICON_TEXTURE_MAX) })
                     .shared()
             }
             _ => {
@@ -220,7 +225,8 @@ impl ImageCache for BoundedImageCache {
 
         self.evict_gpu_beyond(cx);
 
-        self.cache.insert(key, ImageCacheItem::Loading(task.clone()));
+        self.cache
+            .insert(key, ImageCacheItem::Loading(task.clone()));
         self.mark_used(key);
 
         let entity = window.current_view();

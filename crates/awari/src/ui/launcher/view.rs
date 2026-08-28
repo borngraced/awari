@@ -1,10 +1,10 @@
-use gpui::prelude::*;
 use gpui::{
-    AnimationExt, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Render,
-    ScrollStrategy, SharedString, SpringAnimation, Styled, StyledImage, StyledText, Task,
+    AnimationExt, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight,
+    HighlightStyle, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels,
+    Render, ScrollStrategy, SharedString, SpringAnimation, Styled, StyledImage, StyledText, Task,
     UniformListScrollHandle, WeakEntity, Window, div, img, px, uniform_list,
 };
+use gpui::{SpringConfig, prelude::*};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,9 +14,10 @@ use super::icon_cache::{BoundedImageCache, ICON_GPU_RETENTION};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H,
-    QUERY_DEBOUNCE, RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H, motion_spring,
+    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H, QUERY_DEBOUNCE,
+    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H,
 };
+
 use crate::app::Daemon;
 use crate::surfaces::LAUNCHER_NAMESPACE;
 use crate::ui::icon::Icon;
@@ -33,8 +34,7 @@ pub struct LauncherView {
     pub files_enabled: bool,
     pub windows_enabled: bool,
     /// A valid calculator result for the current query, if any. When set the
-    /// launcher shows it as an inline ghost (` = <result>`) instead of a list
-    /// row, and Enter copies it / Tab accepts it as the new input.
+    /// launcher shows it as an inline ghost (` = <result>`).
     pub calc: Option<String>,
     /// Panel position offset from default center-top position.
     pub panel_offset_x: f32,
@@ -51,20 +51,12 @@ pub(crate) enum RevealAction {
     Hold,
 }
 
+#[inline(always)]
 pub(crate) fn wants_results(query: &str, category: Category, has_calc: bool) -> bool {
     !has_calc && (!query.trim().is_empty() || category != Category::All)
 }
 
-/// The empty-state source menu (Apps / Files / Windows) is visible only at the
-/// top level with no query and no calculator result. Visibility tracks the
-/// query instantly: shown the moment it empties, hidden the instant a char is
-/// typed — there is no debounce on the hide path.
-pub(crate) fn source_menu_visible(query_empty: bool, category: Category, has_calc: bool) -> bool {
-    query_empty && category == Category::All && !has_calc
-}
-
-/// Results stay hidden while the query is changing. A pause reveals them
-/// (and grows the panel) once. Category clicks show immediately.
+#[inline(always)]
 pub(crate) fn reveal_action(
     wants: bool,
     daemon_query: bool,
@@ -83,6 +75,7 @@ pub(crate) fn reveal_action(
 
 /// A snapshot whose query does not match the live buffer is an in-flight
 /// echo from an earlier keystroke and must not rewind the input.
+#[inline(always)]
 pub(crate) fn stale_query_snapshot(local_dirty: bool, local_q: &str, snap_q: &str) -> bool {
     local_dirty && local_q != snap_q
 }
@@ -190,7 +183,8 @@ impl Launcher {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let this = Self {
+        
+        Self {
             shell,
             icon_cache: BoundedImageCache::new(ICON_GPU_RETENTION, cx),
             view: LauncherView::closed(theme),
@@ -218,8 +212,7 @@ impl Launcher {
             query_gen: 0,
             local_query_dirty: false,
             open_gen: 0,
-        };
-        this
+        }
     }
 
     /// Release every cached icon texture so a hidden, resident overlay holds
@@ -361,12 +354,14 @@ impl Launcher {
         }
     }
 
+    #[inline(always)]
     fn hide_results(&mut self) {
         self.reveal_gen = self.reveal_gen.wrapping_add(1);
         self.height_debounce.take();
         self.fit_expanded = false;
     }
 
+    #[inline(always)]
     fn show_results_now(&mut self) {
         self.reveal_gen = self.reveal_gen.wrapping_add(1);
         self.height_debounce.take();
@@ -549,10 +544,12 @@ impl Launcher {
                 if ch.is_empty() || ch.chars().any(|b| b.is_control()) {
                     return None;
                 }
+
                 self.view.query.insert_str(c, ch);
                 c += ch.len();
             }
         }
+
         self.cursor = c;
         Some(self.view.query.clone())
     }
@@ -568,6 +565,7 @@ impl Launcher {
             .rounded(px(1.))
             .bg(t.accent())
             .when(!self.caret_on, |el| el.opacity(0.0));
+
         if q.is_empty() {
             return div()
                 .flex()
@@ -578,10 +576,12 @@ impl Launcher {
                 .child(div().text_color(t.muted()).child("Awari search"))
                 .into_any_element();
         }
+
         let token_len = command_token_len(q);
         let (prefix, suffix) = q.split_at(c);
         let p_split = prefix.len().min(token_len);
         let (p_accent, p_norm) = prefix.split_at(p_split);
+
         // Accepted-completion highlight wins over command-mode coloring only
         // when they can't both apply (command mode never ghosts).
         let accepted_off = self
@@ -918,6 +918,7 @@ impl Launcher {
         ];
         let sel = self.view.selected;
         let hover = self.hovered_source;
+
         div().id("source-list").flex_col().gap(px(2.)).children(
             cats.iter()
                 .enumerate()
@@ -941,6 +942,7 @@ impl Launcher {
                                 } else if l.hovered_source == Some(i) {
                                     l.hovered_source = None;
                                 }
+
                                 cx.notify();
                             });
                         })
@@ -973,6 +975,15 @@ impl Launcher {
     }
 }
 
+fn motion_spring(duration_ms: u32) -> SpringConfig {
+    if duration_ms == 0 {
+        return SpringConfig::new(20_000.0, 282.0, 1.0);
+    }
+    let t = (duration_ms as f32 / 1000.0).clamp(0.04, 1.0);
+    let omega = 4.2 / t;
+    SpringConfig::new(omega * omega, 2.0 * omega, 1.0)
+}
+
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animating = self.view.open || self.closing;
@@ -996,6 +1007,7 @@ impl Render for Launcher {
         }
 
         let target = if open { 1.0f32 } else { 0.0 };
+        let closing_anim = self.closing;
 
         if let Some(t0) = self.open_started.take() {
             let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1016,7 +1028,7 @@ impl Render for Launcher {
         // an overlay below the search bar and must never resize/reposition the
         // input box or the window — visibility tracks the query instantly
         // (shown the moment it empties, hidden the instant a char is typed).
-        let source_list = source_menu_visible(q_empty, cat, self.view.calc.is_some());
+        let source_list = q_empty && cat == Category::All && !self.view.calc.is_some();
         let expanded = self.fit_expanded;
         let max_panel_h: f32 = 500.0;
         let search_bar_h: f32 = SEARCH_H;
@@ -1024,19 +1036,6 @@ impl Render for Launcher {
         // launch-results contributes p(8)+p(8)+mb(8) = 24px of vertical space
         // around the list that the panel height must include.
         let results_pad: f32 = 14.0;
-
-        // Visible row count is a fixed *capacity* derived from the panel height,
-        // not a snapshot of the current result count. This is what prevents both
-        // failure modes: too few rows (capacity smaller than the live count →
-        // forced scroll) and the empty gap (capacity larger than the live count
-        // → panel reserves space for rows that don't exist). The live count only
-        // ever *reduces* the visible rows below capacity, never grows them.
-        //
-        // The list viewport is sized to EXACTLY `fit_rows * ROW_H` (no extra
-        // breath): with one result the panel hugs that single row, and at
-        // capacity the last row's bottom aligns with the viewport bottom so it
-        // is never clipped. The trailing padding around the list is the
-        // `results_pad` already accounted for in `panel_h`.
         let list_area = max_panel_h - search_bar_h - chips_h - results_pad;
         let list_capacity = (list_area / ROW_H).max(1.0) as usize;
         let grid_capacity_items =
@@ -1104,8 +1103,7 @@ impl Render for Launcher {
                         cx.processor(move |this, range: Range<usize>, _, cx| {
                             range
                                 .map(|row_i| {
-                                    let mut row =
-                                        div().flex().flex_row().gap(px(10.)).w_full();
+                                    let mut row = div().flex().flex_row().gap(px(10.)).w_full();
                                     for col in 0..GRID_COLS {
                                         let i = row_i * GRID_COLS + col;
                                         row = row.child(this.tile(i, &t_grid, cx));
@@ -1405,113 +1403,123 @@ impl Render for Launcher {
                         |el, h| el.h(px(h)),
                     )
                     .child(
-                        div()
-                            .image_cache(self.icon_cache.clone())
-                            .child(
-                                div()
-                            .id("launcher-panel")
-                            .relative()
-                            .w(px(panel_w))
-                            .max_w_full()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .rounded(px(16.))
-                            .border_1()
-                            .border_color(t.border())
-                            .bg(t.panel())
-                            .text_color(t.fg())
-                            .shadow_lg()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                            )
-                            .child(
-                                div()
-                                    .id("search-bar")
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .px(px(16.))
-                                    .py(px(12.))
-                                    .cursor_grab()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            let x: f32 = ev.position.x.into();
-                                            let y: f32 = ev.position.y.into();
-                                            this.dragging = Some((x, y));
-                                            cx.notify();
-                                        }),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            if this.dragging.take().is_some() {
-                                                post(
-                                                    this,
-                                                    cx,
-                                                    LauncherCmd::SavePosition {
-                                                        x: this.panel_offset_x,
-                                                        y: this.panel_offset_y,
-                                                    },
-                                                );
-                                            }
-                                        }),
-                                    )
-                                    .on_mouse_up_out(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            if this.dragging.take().is_some() {
-                                                post(
-                                                    this,
-                                                    cx,
-                                                    LauncherCmd::SavePosition {
-                                                        x: this.panel_offset_x,
-                                                        y: this.panel_offset_y,
-                                                    },
-                                                );
-                                            }
-                                        }),
-                                    )
-                                    .child(Icon::Search.element_px(t.muted(), 25.0))
-                                    .child(
-                                        div()
-                                            .id("query-wrap")
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .when_some(t.font.clone(), |el, f| el.font_family(f))
-                                            .text_size(px(24.))
-                                            .line_height(px(24.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(t.fg())
-                                            .overflow_hidden()
-                                            .child(self.query_element())
-                                            .child(div().flex_1().min_w_0())
-                                            .when(expanded, |el| {
-                                                el.when_some(self.view.rows.first(), |el, row| {
-                                                    el.child(first_result_icon(row, &t))
-                                                })
+                        div().image_cache(self.icon_cache.clone()).child(
+                            div()
+                                .id("launcher-panel")
+                                .relative()
+                                .w(px(panel_w))
+                                .max_w_full()
+                                .h_full()
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .rounded(px(16.))
+                                .border_1()
+                                .border_color(t.border())
+                                .bg(t.panel())
+                                .text_color(t.fg())
+                                .shadow_lg()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                )
+                                .child(
+                                    div()
+                                        .id("search-bar")
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(px(10.))
+                                        .px(px(16.))
+                                        .py(px(12.))
+                                        .cursor_grab()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    let x: f32 = ev.position.x.into();
+                                                    let y: f32 = ev.position.y.into();
+                                                    this.dragging = Some((x, y));
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        )
+                                        .on_mouse_up(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                if this.dragging.take().is_some() {
+                                                    post(
+                                                        this,
+                                                        cx,
+                                                        LauncherCmd::SavePosition {
+                                                            x: this.panel_offset_x,
+                                                            y: this.panel_offset_y,
+                                                        },
+                                                    );
+                                                }
                                             }),
-                                    ),
-                            )
-                            .when(expanded || source_list, |el| el.child(results_body))
-                            .with_spring(
-                                ("launcher-panel", open_gen),
-                                SpringAnimation::new(motion).to(target).from(0.0),
-                                move |el, p| {
-                                    el.opacity(p)
-                                        .scale(SCALE_MIN + p * (1.0 - SCALE_MIN))
-                                        .mt(px((p - 1.0) * 12.0))
-                                },
-                            ),
-                    )),
+                                        )
+                                        .on_mouse_up_out(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                if this.dragging.take().is_some() {
+                                                    post(
+                                                        this,
+                                                        cx,
+                                                        LauncherCmd::SavePosition {
+                                                            x: this.panel_offset_x,
+                                                            y: this.panel_offset_y,
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                        )
+                                        .child(Icon::Search.element_px(t.muted(), 25.0))
+                                        .child(
+                                            div()
+                                                .id("query-wrap")
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .when_some(t.font.clone(), |el, f| {
+                                                    el.font_family(f)
+                                                })
+                                                .text_size(px(24.))
+                                                .line_height(px(24.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(t.fg())
+                                                .overflow_hidden()
+                                                .child(self.query_element())
+                                                .child(div().flex_1().min_w_0())
+                                                .when(expanded, |el| {
+                                                    el.when_some(
+                                                        self.view.rows.first(),
+                                                        |el, row| {
+                                                            el.child(first_result_icon(row, &t))
+                                                        },
+                                                    )
+                                                }),
+                                        ),
+                                )
+                                .when(expanded || source_list, |el| el.child(results_body))
+                                .with_spring(
+                                    ("launcher-panel", open_gen),
+                                    SpringAnimation::new(motion).to(target).from(0.0),
+                                    move |el, p| {
+                                        if closing_anim {
+                                            el.opacity(p)
+                                        } else {
+                                            el.opacity(p)
+                                                .scale(SCALE_MIN + p * (1.0 - SCALE_MIN))
+                                                .mt(px((p - 1.0) * 12.0))
+                                        }
+                                    },
+                                ),
+                        ),
+                    ),
             )
     }
 }

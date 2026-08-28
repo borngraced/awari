@@ -1,4 +1,4 @@
-//! Zed Lucide icons. GPUI tints the SVG alpha mask with `text_color`.
+//! Awa icons. GPUI tints the SVG alpha mask with `text_color`.
 
 use gpui::{Rgba, Styled, px, svg};
 
@@ -15,17 +15,6 @@ pub enum Icon {
 }
 
 impl Icon {
-    #[allow(dead_code)]
-    pub fn path(self) -> &'static str {
-        match self {
-            Self::AppWindow => "icons/app_window.svg",
-            Self::LayoutGrid => "icons/layout_grid.svg",
-            Self::File => "icons/file.svg",
-            Self::Command => "icons/command.svg",
-            Self::Search => "icons/search.svg",
-        }
-    }
-
     fn bytes(self) -> &'static [u8] {
         match self {
             Self::AppWindow => include_bytes!("../../assets/icons/app_window.svg"),
@@ -34,11 +23,6 @@ impl Icon {
             Self::Command => include_bytes!("../../assets/icons/command.svg"),
             Self::Search => include_bytes!("../../assets/icons/search.svg"),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn element(self, color: Rgba) -> gpui::Svg {
-        self.element_px(color, ICON_PX)
     }
 
     pub fn element_px(self, color: Rgba, size: f32) -> gpui::Svg {
@@ -64,7 +48,7 @@ mod tests {
             Icon::Search,
         ] {
             let bytes = icon.bytes();
-            assert!(bytes.starts_with(b"<svg"), "{}", icon.path());
+            assert!(bytes.starts_with(b"<svg"), "{:?}", icon);
         }
     }
 }

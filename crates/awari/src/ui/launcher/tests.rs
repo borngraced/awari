@@ -6,6 +6,10 @@ use crate::ui::launcher::view::icon_letter;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+fn source_menu_visible(q_empty: bool, cat: Category, calc: bool) -> bool {
+    q_empty && cat == Category::All && !calc
+}
+
 fn app(name: &str, app_id: Option<&str>) -> DesktopApp {
     DesktopApp {
         name: name.into(),
