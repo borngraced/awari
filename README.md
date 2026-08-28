@@ -4,7 +4,7 @@
 
 # Àwárí
 
-Awari is a Wayland launcher. The name means *discovery* in Yoruba. Built with
+Awari is a Wayland launcher. Built with
 [GPUI](https://github.com/zed-industries/zed) and
 [fff search](https://github.com/dmtrKovalenko/fff).
 
@@ -18,12 +18,8 @@ on-demand mode to free up every megabyte of RAM.
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/desktop-awari.png" width="380" alt="Àwárí on a desktop"></td>
-    <td><img src="docs/screenshots/desktop-awari-goland.png" width="380" alt="Àwárí over GoLand"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/desktop-awari-rv32.png" width="380" alt="Àwárí desktop view"></td>
-    <td><img src="docs/screenshots/desktop-paper-rv32.png" width="380" alt="Àwárí with the Paper theme"></td>
+    <td><img src="docs/screenshots/awari.png" width="380" alt="Àwárí launcher"></td>
+    <td><img src="docs/screenshots/awari-alacritty.png" width="380" alt="Àwárí over Alacritty"></td>
   </tr>
 </table>
 
@@ -33,12 +29,14 @@ on-demand mode to free up every megabyte of RAM.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/theme-verdant.png" width="360"><br><sub>Verdant</sub></td>
-    <td align="center"><img src="docs/screenshots/theme-ember.png" width="360"><br><sub>Ember</sub></td>
+    <td align="center"><img src="docs/screenshots/verdant.png" width="360"><br><sub>Verdant</sub></td>
+    <td align="center"><img src="docs/screenshots/ember.png" width="360"><br><sub>Ember</sub></td>
+    <td align="center"><img src="docs/screenshots/paper.png" width="360"><br><sub>Paper</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/theme-paper.png" width="360"><br><sub>Paper</sub></td>
-    <td align="center"><img src="docs/screenshots/theme-tokyonight.png" width="360"><br><sub>Tokyo Night</sub></td>
+    <td align="center"><img src="docs/screenshots/tokyonight.png" width="360"><br><sub>Tokyo Night</sub></td>
+    <td align="center"><img src="docs/screenshots/mono.png" width="360"><br><sub>Mono</sub></td>
+    <td align="center"><img src="docs/screenshots/nord.png" width="360"><br><sub>Nord</sub></td>
   </tr>
 </table>
 
@@ -46,8 +44,8 @@ on-demand mode to free up every megabyte of RAM.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/view-paper-apps.png" width="360"><br><sub>Apps category</sub></td>
-    <td align="center"><img src="docs/screenshots/view-paper-alt-enter.png" width="360"><br><sub>Alt+Enter action menu</sub></td>
+    <td align="center"><img src="docs/screenshots/awari-apps.png" width="360"><br><sub>Apps category</sub></td>
+    <td align="center"><img src="docs/screenshots/awari-files.png" width="360"><br><sub>Files category</sub></td>
   </tr>
 </table>
 
