@@ -482,6 +482,7 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
     } else {
         // Apps are the primary action: rank above files and windows.
         push_capped(&mut out, ranked_cap, app_rows);
+        push_capped(&mut out, ranked_cap, win_rows);
         if !empty {
             push_capped(
                 &mut out,
@@ -489,7 +490,6 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
                 files.iter().take(file_max).map(file_row),
             );
         }
-        push_capped(&mut out, ranked_cap, win_rows);
     }
     out
 }

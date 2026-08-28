@@ -104,6 +104,30 @@ fn running_window_suppresses_app_row() {
 }
 
 #[test]
+fn window_row_survives_file_cap_pressure() {
+    let apps = vec![app("Alacritty", Some("alacritty"))];
+    let files: Vec<FileHit> = (0..50)
+        .map(|i| FileHit {
+            path: Arc::from(PathBuf::from(format!("/cfg/alacritty{i}.toml"))),
+        })
+        .collect();
+    let out = rows(
+        "alacritty",
+        &apps,
+        &[WindowEntry {
+            id: 7,
+            title: "Alacritty — Terminal".into(),
+            app_id: Some("alacritty".into()),
+            app_id_lc: Some("alacritty".into()),
+        }],
+        &files,
+        &[],
+    );
+    assert!(matches!(out[0].kind, RowKind::Window { .. }));
+    assert!(out.iter().any(|r| matches!(r.kind, RowKind::Window { .. })));
+}
+
+#[test]
 fn empty_query_orders_apps_by_recency() {
     let apps = vec![app("Alpha", None), app("Beta", None), app("Gamma", None)];
     let out = rows("", &apps, &[], &[], &["Gamma".into()]);
