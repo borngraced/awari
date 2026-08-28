@@ -33,6 +33,17 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn main() {
+    // glibc's per-thread malloc arenas keep the high-water pages from the
+    // file-search scan buffers; fff-search worker threads ramp RSS per
+    // keystroke and malloc_trim at idle only trims the main arena. Capping
+    // arena count makes the scan threads share cushions that return to the
+    // OS on free. The env var on the daemon-spawned GUI child does the same
+    // at exec; this covers a directly-launched `awari gui`. No-op on musl.
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+
     let args: Vec<String> = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();

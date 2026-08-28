@@ -172,6 +172,14 @@ pub(crate) fn start_child(
 
     cmd.arg("gui");
 
+    // glibc spawns a per-thread arena per scan worker; the per-keystroke
+    // scan buffers churn those arenas and the freed pages never return,
+    // so RSS ratchets up while typing. Capping arenas makes the scan
+    // threads share two arenas whose high-water returns on free. The env
+    // is read by glibc before the child's first malloc (more reliable than
+    // a runtime mallopt), and is a harmless no-op on non-glibc libcs.
+    cmd.env("MALLOC_ARENA_MAX", "2");
+
     if keep_alive {
         cmd.arg("--hidden");
     } else {

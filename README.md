@@ -19,8 +19,6 @@ on-demand mode to free up every megabyte of RAM.
 
 The name Awari is Yoruba for "discovery."
 
-![Àwárí launcher overview](docs/overview.png)
-
 ## Screenshots
 
 <table>
