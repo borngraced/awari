@@ -48,5 +48,5 @@ sum_tree = { version = "=0.1.0", path = ".third_party/zed/crates/sum_tree" }
 opt-level = 3       # Optimize for runtime speed; launcher latency matters more than binary size
 lto = true   
 codegen-units = 1 
-strip = true     
+strip = true
 panic = "abort"
