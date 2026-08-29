@@ -24,3 +24,9 @@ image = "0.25.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# Manual file-worker latency/RSS probes (`awari probe-files` / `probe-typing`,
+# see src/files/probe.rs). Kept out of the default build and the #[test] tree so
+# profiling internals can't drift into CI; build with `--features probe`.
+[features]
+probe = []

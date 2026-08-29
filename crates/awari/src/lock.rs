@@ -124,7 +124,8 @@ fn handle_client(
         | ClientRequest::OpenLauncher
         | ClientRequest::CloseLauncher
         | ClientRequest::LauncherShown
-        | ClientRequest::LauncherHidden => {
+        | ClientRequest::LauncherHidden
+        | ClientRequest::Restart => {
             let _ = cmds.send(req);
             ClientReply::Ok
         }

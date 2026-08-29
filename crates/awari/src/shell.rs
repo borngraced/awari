@@ -23,6 +23,14 @@ use crate::log::init_log_pipe;
 use awari_ipc::ClientRequest;
 use tracing_subscriber::EnvFilter;
 
+/// Set on a daemon re-spawned by `awari restart`, so the fresh process retries
+/// the single-instance lock while the old one is still releasing it instead of
+/// failing fast with "already running".
+const RESTART_ENV: &str = "AWARI_RESTART";
+/// Upper bound on restart lock retry: 50 × 100 ms = 5 s of waiting for the
+/// predecessor to release the flock before declaring failure.
+const RESTART_LOCK_RETRY_TRIES: u32 = 50;
+
 /// `mode` selects keep-alive (`GpuMode::KeepAlive`) or drop (`GpuMode::Drop`)
 /// for the launcher GUI.
 pub fn run(mode: GpuMode) {
@@ -33,7 +41,9 @@ pub fn run(mode: GpuMode) {
     let cfg = config::load();
     let keep_alive = matches!(mode, GpuMode::KeepAlive) && cfg.keep_alive;
 
-    let server = match lock::acquire() {
+    // The replacement spawned by `awari restart` can outlive our exit momentarily;
+    // give it a five-second window to grab the flock before declaring "already running".
+    let server = match acquire_with_retry() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("awari: {e}");
@@ -59,6 +69,7 @@ pub fn run(mode: GpuMode) {
 
     tracing::info!(
         mode = if keep_alive { "keep-alive" } else { "drop" },
+        restart = std::env::var_os(RESTART_ENV).is_some(),
         "awari shell daemon (gpu-free)"
     );
 
@@ -99,7 +110,76 @@ pub fn run(mode: GpuMode) {
             // background click) keeps the daemon's `visible` flag truthful.
             ClientRequest::LauncherShown => visible.store(true, Ordering::Relaxed),
             ClientRequest::LauncherHidden => visible.store(false, Ordering::Relaxed),
+            ClientRequest::Restart => {
+                // Reply first (accept thread), then swap the process: kill the
+                // GUI, re-exec ourselves detached, and exit to release the flock.
+                let child = child.clone();
+                std::thread::Builder::new()
+                    .name("awari-restart".into())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        restart_daemon(&child);
+                    })
+                    .expect("restart thread");
+            }
             ClientRequest::Ping => {}
         }
     }
+}
+
+/// `lock::acquire` with a bounded retry window, active only on a daemon that
+/// was just re-spawned by `awari restart` (its predecessor has not exited yet
+/// and still holds the single-instance flock).
+/// Acquire the flock. Under [`RESTART_ENV`] the predecessor still holds the
+/// lock while it exits, so retry — but bounded by [`RESTART_LOCK_RETRY_TRIES`]
+/// × 100 ms. An unbounded wait would spin forever holding nothing if the
+/// predecessor wedged (deadlocked in exit, stuck on a signal).
+fn acquire_with_retry() -> Result<lock::IpcServer, lock::LockError> {
+    let mut tries = if std::env::var_os(RESTART_ENV).is_some() {
+        RESTART_LOCK_RETRY_TRIES
+    } else {
+        0
+    };
+    loop {
+        match lock::acquire() {
+            Ok(server) => return Ok(server),
+            Err(lock::LockError::AlreadyRunning) if tries > 0 => {
+                tries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Stop the GUI child, spawn a clean copy of this daemon (same argv, plus the
+/// [`RESTART_ENV`] marker so it retries the lock), then exit. The new process
+/// re-reads `config.kdl` in both the shell and the GUI it spawns, so config
+/// edits land without restarting the compositor session.
+///
+/// Failure-safe ordering: the replacement is spawned *before* the old GUI is
+/// torn down. If the exe can't be resolved or the spawn fails, the daemon
+/// keeps running untouched (GUI alive, lock held, still accepting IPC), so a
+/// failed restart can never leave a GUI-less daemon or no daemon at all.
+fn restart_daemon(child: &Arc<Mutex<Option<Child>>>) {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::error!("restart: resolve current exe; keeping this daemon running");
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    for arg in std::env::args_os().skip(1) {
+        cmd.arg(arg);
+    }
+    if let Err(e) = cmd
+        .env(RESTART_ENV, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        tracing::error!(%e, "restart: spawn replacement failed; keeping this daemon running");
+        return;
+    }
+    tracing::info!("awari restart: stopping gui and exiting daemon");
+    stop_child(child);
+    std::process::exit(0);
 }

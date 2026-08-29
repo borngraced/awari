@@ -302,9 +302,7 @@ impl Launcher {
             self.local_query_dirty = false;
         }
 
-        if category_changed {
-            self.action_menu = None;
-        } else if self.view.selected != incoming.selected {
+        if category_changed || self.view.selected != incoming.selected {
             self.action_menu = None;
         }
 
@@ -471,6 +469,13 @@ impl Launcher {
         self.accepted = None;
         self.stop_blink();
         cx.notify();
+    }
+
+    /// Drop gpui's per-glyph raster-bounds records. These describe every raster
+    /// size/location ever measured and otherwise live in the heap for the whole
+    /// process; they rebuild trivially from the next open's first render.
+    pub(crate) fn clear_text_cache(&mut self, cx: &mut Context<Self>) {
+        cx.text_system().clear_raster_bounds();
     }
 
     /// Run the caret timer only while the overlay is open. The task parks in

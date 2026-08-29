@@ -79,6 +79,21 @@ Query modes:
 
 Category chips (All, Apps, Files, Commands, Windows) narrow the source.
 
+### Commands
+
+The same binary doubles as its own daemon control. Run from a shell or bind
+any of them to a key:
+
+- `awari toggle-launcher` — show/hide the overlay.
+- `awari open-launcher` / `awari close-launcher` — explicit open or close.
+- `awari restart` — stop the GUI and re-exec the shell daemon so a changed
+  `config.kdl` takes effect (the hidden overlay is re-spawned too). If no
+  daemon is running (e.g. drop mode), it simply starts one.
+- `awari ping` — exits 0 when the daemon is up; useful for health checks.
+
+Config is read at daemon start — there is no hot reload — so edits (including
+`keep-alive`) apply on the next `awari restart` or daemon start.
+
 ## Features
 
 - **Lightweight**: GPU-free background daemon; overlay kept alive hidden for

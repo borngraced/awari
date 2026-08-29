@@ -6,6 +6,8 @@ mod action;
 mod fzy;
 mod path;
 mod picker;
+#[cfg(feature = "probe")]
+pub mod probe;
 mod regex;
 
 pub use action::{activate, reveal, run_in_terminal};

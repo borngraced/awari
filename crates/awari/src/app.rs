@@ -704,6 +704,11 @@ impl Daemon {
                 // Drop stale closes: a newer open must not be hidden by us.
                 l.begin_close(cx);
                 l.clear_icon_cache(cx);
+                // The launcher is the only text consumer while the shell runs;
+                // drop gpui's per-(glyph, font, size) raster-bounds records so
+                // they don't sit in the retained heap for the life of the daemon.
+                // They repopulate trivially on the next open.
+                l.clear_text_cache(cx);
                 window.set_input_region(Some(&[]));
                 window.set_keyboard_interactivity(gpui::layer_shell::KeyboardInteractivity::None);
                 cx.notify();
@@ -1055,24 +1060,39 @@ impl Daemon {
             return;
         }
 
-        let compositor = self.compositor.clone();
-        cx.defer(move |_cx| match kind {
+        // App spawns inline: `spawn_detached` is a detached fork (~ms) that
+        // never touches this surface or the shell state, so deferring it only
+        // adds a composite cycle to Enter -> launch.
+        //
+        // Window focus MUST stay deferred (behind `dismiss_launcher`'s own
+        // deferred teardown above): the overlay's Exclusive keyboard grab is
+        // only released by that deferred close (set_input_region([]) +
+        // set_keyboard_interactivity(None), registered before this point).
+        // FocusWindow running in the same synchronous frame would hit a
+        // surface still holding the seat — a wlroots-style compositor keeps
+        // routing keys to the overlay and the focused window never receives
+        // them (or the focus request is ignored). FIFO defer order guarantees
+        // the grab frees first, as the original behavior did.
+        match kind {
             launcher::RowKind::App { exec, .. } => {
                 if let Err(e) = spawn_detached(&exec) {
                     tracing::warn!(%e, "failed to launch app");
                 }
             }
             launcher::RowKind::Window { id } => {
-                let Some(compositor) = compositor else {
-                    return;
-                };
-                if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
-                    tracing::warn!(%e, "failed to focus window");
-                }
+                let compositor = self.compositor.clone();
+                cx.defer(move |_cx| {
+                    let Some(compositor) = compositor else {
+                        return;
+                    };
+                    if let Err(e) = compositor.apply(CompositorCommand::FocusWindow { id }) {
+                        tracing::warn!(%e, "failed to focus window");
+                    }
+                });
             }
             launcher::RowKind::File { .. } => unreachable!("handled above"),
             launcher::RowKind::Command { .. } => {}
-        });
+        }
     }
 }
 

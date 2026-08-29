@@ -5,15 +5,11 @@
 
 use std::borrow::Cow;
 
-/// Family name of the bundled font, matching the theme presets' default.
 pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
 const JETBRAINS_MONO_REGULAR: &[u8] =
     include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf");
 
-/// Register the bundled fonts with the text system. Called before any window
-/// opens; a failure only loses the bundled face (system fonts still render),
-/// so it is non-fatal.
 pub fn register(cx: &gpui::App) {
     let fonts = vec![Cow::Borrowed(JETBRAINS_MONO_REGULAR)];
     if let Err(e) = cx.text_system().add_fonts(fonts) {

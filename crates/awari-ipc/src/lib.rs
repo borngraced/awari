@@ -22,6 +22,8 @@ pub enum ClientRequest {
     /// (e.g. dismissed via Escape/click inside the GUI). Keeps the daemon's
     /// `visible` flag truthful even when the close was not daemon-initiated.
     LauncherHidden,
+    /// Stop the GUI and re-exec the daemon so a fresh `config.kdl` is loaded.
+    Restart,
     Ping,
 }
 
@@ -143,6 +145,7 @@ mod tests {
             ClientRequest::CloseLauncher,
             ClientRequest::LauncherShown,
             ClientRequest::LauncherHidden,
+            ClientRequest::Restart,
         ] {
             let s = serde_json::to_string(&req).unwrap();
             assert_eq!(serde_json::from_str::<ClientRequest>(&s).unwrap(), req);

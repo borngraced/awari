@@ -197,7 +197,7 @@ fn is_lockfile(path: &std::path::Path) -> bool {
     )
 }
 
-fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> ((u64, String), usize) {
+pub(super) fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> ((u64, String), usize) {
     let mut latest = first;
     let mut count = 1;
     loop {
@@ -212,7 +212,7 @@ fn coalesce(qrx: &Receiver<(u64, String)>, first: (u64, String)) -> ((u64, Strin
     }
 }
 
-fn search_all(
+pub(super) fn search_all(
     pickers: &[SharedFilePicker],
     transient: &mut HashMap<PathBuf, SharedFilePicker>,
     transient_order: &mut VecDeque<PathBuf>,
@@ -300,7 +300,7 @@ fn merge_scored(merged: Vec<Vec<(i32, FileHit)>>, cap: usize) -> Vec<FileHit> {
     all.into_iter().map(|(_, h)| h).collect()
 }
 
-fn search_one(
+pub(super) fn search_one(
     shared: &SharedFilePicker,
     parser: &QueryParser<fff_search::FileSearchConfig>,
     fff_query: &str,
