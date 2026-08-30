@@ -1130,13 +1130,25 @@ impl Launcher {
     }
 }
 
-fn motion_spring(duration_ms: u32) -> SpringConfig {
+fn motion_spring(duration_ms: u32, damping_ratio: f32) -> SpringConfig {
     if duration_ms == 0 {
-        return SpringConfig::new(20_000.0, 282.0, 1.0);
+        return SpringConfig::new(1e6, 2e6, 1.0);
     }
     let t = (duration_ms as f32 / 1000.0).clamp(0.04, 1.0);
     let omega = 4.2 / t;
-    SpringConfig::new(omega * omega, 2.0 * omega, 1.0)
+    SpringConfig::new(omega * omega, 2.0 * damping_ratio * omega, 1.0)
+}
+
+fn panel_height_spring(duration_ms: u32) -> SpringConfig {
+    motion_spring(duration_ms, 0.8)
+}
+
+fn overlay_spring(duration_ms: u32) -> SpringConfig {
+    motion_spring(duration_ms, 0.75)
+}
+
+fn menu_spring(duration_ms: u32) -> SpringConfig {
+    motion_spring(duration_ms, 0.7)
 }
 
 impl Render for Launcher {
@@ -1162,7 +1174,6 @@ impl Render for Launcher {
         }
 
         let target = if open { 1.0f32 } else { 0.0 };
-        let closing_anim = self.closing;
 
         let t = self.view.theme.clone();
         if let Some(size) = t.font_size {
@@ -1214,8 +1225,12 @@ impl Render for Launcher {
         } else {
             search_bar_h
         };
-        let motion = motion_spring(self.view.motion_ms);
+        let height_spring = panel_height_spring(self.view.motion_ms);
+        let overlay = overlay_spring(self.view.motion_ms);
+        let menu_anim = menu_spring(self.view.motion_ms);
         let open_gen = self.open_gen;
+        let closing_anim = self.closing;
+        let menu_target = if closing_anim { 0.0 } else { 1.0 };
 
         let mut results = div()
             .id("launch-results")
@@ -1342,7 +1357,7 @@ impl Render for Launcher {
                 }))
                 .with_spring(
                     "action-menu",
-                    SpringAnimation::new(motion).to(1.0).from(0.0),
+                    SpringAnimation::new(menu_anim).to(menu_target).from(0.0),
                     |el, v| el.opacity(v).mt(px((1.0 - v) * 6.0)),
                 )
         });
@@ -1526,7 +1541,7 @@ impl Render for Launcher {
                     .ml(px(offset_x))
                     .with_spring(
                         ("launcher-panel-h", open_gen),
-                        SpringAnimation::new(motion).to(panel_h).from(SEARCH_H),
+                        SpringAnimation::new(height_spring).to(panel_h).from(SEARCH_H),
                         |el, h| el.h(px(h)),
                     )
                     .child(
@@ -1635,15 +1650,11 @@ impl Render for Launcher {
                                 .when(expanded || source_list, |el| el.child(results_body))
                                 .with_spring(
                                     ("launcher-panel", open_gen),
-                                    SpringAnimation::new(motion).to(target).from(0.0),
+                                    SpringAnimation::new(overlay).to(target).from(0.0),
                                     move |el, p| {
-                                        if closing_anim {
-                                            el.opacity(p)
-                                        } else {
-                                            el.opacity(p)
-                                                .scale(SCALE_MIN + p * (1.0 - SCALE_MIN))
-                                                .mt(px((p - 1.0) * 12.0))
-                                        }
+                                        el.opacity(p)
+                                            .scale(SCALE_MIN + p * (1.0 - SCALE_MIN))
+                                            .mt(px((p - 1.0) * 12.0))
                                     },
                                 ),
                         ),
