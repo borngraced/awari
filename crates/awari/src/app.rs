@@ -1,8 +1,6 @@
-//! Overlay launcher daemon. No bar. Process stays alive with no windows.
-
 use crate::config::Config;
-use crate::desktop::DesktopApp;
-use crate::files::FileHit;
+use crate::desktop::{DesktopApp, scan_applications};
+use crate::files::{FileHit, Files, FilesOptions};
 use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 
 use awari_compositor::{
@@ -43,19 +41,11 @@ pub struct Daemon {
     /// doesn't advertise foreign-toplevel; apps/files/commands still work.
     compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
-    /// Deferred teardown of the launcher surface after a dismiss. The surface is
-    /// kept alive through the fade-out, then hidden in keep-alive mode (or the
-    /// GUI quits in drop mode); a reopen during the grace period drops this task
-    /// and reuses the still-live surface.
     pending_close: Option<Task<()>>,
     /// When true the GUI stays in memory (hidden) between dismisses for instant
     /// re-opens; when false it quits on dismiss to free the GPU process.
     keep_alive: bool,
     quit_after_close: bool,
-    /// Display the launcher is currently shown on. `None` means "let the
-    /// compositor decide" (historically: all outputs). Recomputed on each open
-    /// from the focused window's output so the launcher follows the monitor
-    /// you're working on.
     launcher_display: Option<DisplayId>,
     launcher_open: bool,
     launcher_query: String,
@@ -65,32 +55,18 @@ pub struct Daemon {
     /// generation are dropped so a stale hide cannot clobber a fresh open.
     launcher_gen: u64,
     apps: Vec<DesktopApp>,
-    /// Lowercased `app_id` (StartupWMClass) → the real `Icon=` name from the
-    /// matching `.desktop` entry, built at scan time. Consulted when resolving
-    /// window-row icons so foreign-toplevel windows reuse the app's themed icon
-    /// instead of falling back to a letter tile.
     app_icons: HashMap<String, String>,
     cfg: Config,
     /// Desktop names by last activation, most recent first.
     recents: Vec<String>,
-    /// Past launcher queries, most recent first (Shift+Up/Down recall).
     query_history: Vec<String>,
-    /// Position within `query_history` while recalling, or `None` for the
-    /// live (currently typed) query.
     history_cursor: Option<usize>,
-    /// Query that was on screen before we entered history recall, restored
-    /// when the user steps back past the newest entry.
     history_live: Option<String>,
-    /// Launch counts per app name; boosts repeated picks in ranking.
     app_usage: HashMap<String, u64>,
     files_tx: Option<crate::files::Files>,
     files_seq: u64,
     file_hits_gen: u64,
     file_hits: Vec<FileHit>,
-    /// Cached window list, rebuilt only when niri reports a change (not on
-    /// every keystroke), so `filtered_rows` can borrow it without re-cloning
-    /// every title/app_id per character typed. `app_id_lc` is precomputed so
-    /// matching allocates nothing.
     windows_list: Vec<launcher::WindowEntry>,
     /// Bumped whenever the app or window list changes, so cached launcher
     /// rows can be invalidated without re-filtering on every highlight move.
@@ -142,8 +118,8 @@ impl Daemon {
         gpu_mode: GpuMode,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
-        let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, cfg));
 
+        let daemon = cx.new(|cx| Self::new(cx, compositor, inbox, cfg));
         daemon.update(cx, |d, cx| {
             d.keep_alive = matches!(gpu_mode, GpuMode::KeepAlive);
 
@@ -151,13 +127,16 @@ impl Daemon {
                 d.set_launcher_open(true, cx);
             }
         });
+
         #[cfg(unix)]
         {
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<Signal>();
             install_signal_handlers(tx);
+
             let entity = daemon.downgrade();
             cx.spawn(async move |cx| {
                 use futures::StreamExt;
+
                 while let Some(sig) = rx.next().await {
                     tracing::debug!(?sig, "signal received in gui");
                     if let Some(d) = entity.upgrade() {
@@ -194,9 +173,9 @@ impl Daemon {
         cfg: Config,
     ) -> Self {
         let (files_tx, files_rx) = if cfg.sources.files {
-            let (tx, rx) = crate::files::Files::spawn(
+            let (tx, rx) = Files::spawn(
                 cfg.files.resolved_roots(),
-                crate::files::FilesOptions {
+                FilesOptions {
                     index_lockfiles: cfg.files.index_lockfiles,
                     regex: cfg.files.regex,
                     fff: cfg.fff,
@@ -252,9 +231,10 @@ impl Daemon {
         thread::Builder::new()
             .name("awari-apps-scan".into())
             .spawn(move || {
-                let _ = apps_tx.send(crate::desktop::scan_applications());
+                let _ = apps_tx.send(scan_applications());
             })
             .ok();
+
         daemon.load_history();
         daemon.load_usage();
         daemon.load_position();
@@ -544,9 +524,6 @@ impl Daemon {
         Some(best.id())
     }
 
-    /// Ensure the launcher overlay exists and is on the monitor of the
-    /// focused window. Recreates the surface only when the desired display has
-    /// changed, so simply re-opening on the same monitor is a no-op.
     fn ensure_launcher_display(&mut self, cx: &mut Context<Self>) {
         let desired = self.launcher_target_display(cx);
         if self.launcher.is_some() && self.launcher_display == desired {
@@ -615,8 +592,6 @@ impl Daemon {
         if open {
             self.launcher_open = true;
 
-            // Tell the daemon the overlay is now actually visible, so its
-            // `visible` flag stays truthful for the next toggle decision.
             notify(ClientRequest::LauncherShown);
 
             // Cancel any in-flight teardown so a reopen during the fade reuses
@@ -627,9 +602,11 @@ impl Daemon {
             self.launcher_category = launcher::Category::All;
             self.file_hits.clear();
             self.file_hits_gen += 1;
+
             if let Some(ft) = &mut self.files_tx {
                 self.files_seq = ft.invalidate();
             }
+
             self.ensure_launcher_display(cx);
             if let Some(h) = self.launcher {
                 let generation = self.launcher_gen;
@@ -639,12 +616,10 @@ impl Daemon {
                     if current != Some(generation) {
                         return;
                     }
+
                     let _ = h.update(cx, |l, window, _| {
                         l.closing = false;
 
-                        // Reset gpui's sprite atlas (icons + text glyphs) on every
-                        // open so its append-only texture pages don't accumulate
-                        // across sessions while the overlay window stays alive.
                         window.clear_sprite_atlas();
                         window.set_keyboard_interactivity(
                             gpui::layer_shell::KeyboardInteractivity::Exclusive,
@@ -663,15 +638,9 @@ impl Daemon {
         self.save_position();
         self.launcher_open = false;
 
-        // Tell the daemon the overlay is now actually hidden. This is what keeps
-        // the daemon's `visible` flag in sync when the dismiss is triggered
-        // in-GUI (Escape / background click) rather than by a toggle command;
-        // without it the next toggle sends "close" to an already-hidden overlay.
         notify(ClientRequest::LauncherHidden);
 
-        // Return file-search RAM to a near-baseline "sleeping" footprint:
-        // drop the per-directory scratch indexes and rebuild the root
-        // indexes from scratch. The next open re-indexes on demand.
+        // Return file-search RAM to a near-baseline "sleeping" footprint
         if let Some(ft) = &self.files_tx {
             ft.clear();
         }
@@ -695,36 +664,34 @@ impl Daemon {
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
+
         cx.defer(move |cx| {
             let current = shell.upgrade().map(|d| d.read(cx).launcher_gen);
             if current != Some(generation) {
                 return;
             }
+
             let _ = h.update(cx, |l, window, cx| {
-                // Drop stale closes: a newer open must not be hidden by us.
                 l.begin_close(cx);
                 l.clear_icon_cache(cx);
-                // The launcher is the only text consumer while the shell runs;
-                // drop gpui's per-(glyph, font, size) raster-bounds records so
-                // they don't sit in the retained heap for the life of the daemon.
-                // They repopulate trivially on the next open.
                 l.clear_text_cache(cx);
                 window.set_input_region(Some(&[]));
                 window.set_keyboard_interactivity(gpui::layer_shell::KeyboardInteractivity::None);
                 cx.notify();
             });
         });
+
         let close_task = cx.spawn(async move |this, cx| {
-            // Grace covers the full fade (theme `motion.duration-ms`) so the
-            // drop-mode quit lands after the animation, not mid-fade.
             let grace_ms = if cfg_motion_ms == 0 {
                 50
             } else {
                 LAUNCHER_CLOSE_GRACE_MS.max(cfg_motion_ms)
             };
+
             cx.background_executor()
                 .timer(Duration::from_millis(grace_ms))
                 .await;
+
             if let Some(daemon) = this.upgrade() {
                 daemon.update(cx, |d, cx| {
                     if d.launcher_open {
@@ -766,12 +733,6 @@ impl Daemon {
                         d.file_hits.clear();
                         d.file_hits.shrink_to_fit();
 
-                        // Hand freed pages back to the OS. The matcher / picker
-                        // buffers and driver staging churn glibc arenas, keeping
-                        // RSS at the session peak even after the Arc drops are
-                        // done; the overlay is hidden, so a trim here is a cheap
-                        // syscall with no repaint cost. Retained root indexes and
-                        // LMDB frecency maps stay warm by design.
                         unsafe { libc::malloc_trim(0) };
                     }
                 });
@@ -783,14 +744,11 @@ impl Daemon {
     fn launcher_key(&mut self, key: &str, _ch: Option<&str>, shift: bool, cx: &mut Context<Self>) {
         let key = key.to_ascii_lowercase();
 
-        // Shift+Up/Down recall past queries without disturbing the live one.
         if shift && matches!(key.as_str(), "up" | "arrowup" | "down" | "arrowdown") {
             self.history_step(key == "down" || key == "arrowdown", cx);
             return;
         }
 
-        // The empty-state source menu (Apps / Files / Windows) navigates a
-        // separate 3-row selection instead of the result list.
         let source_active = self.launcher_query.trim().is_empty()
             && self.launcher_category == launcher::Category::All;
         match key.as_str() {
@@ -835,6 +793,7 @@ impl Daemon {
         if self.query_history.is_empty() {
             return;
         }
+
         let len = self.query_history.len();
         let next = match self.history_cursor {
             None => {
@@ -900,12 +859,10 @@ impl Daemon {
         }
     }
 
-    /// Persist `query_history` to `history` (newline-separated).
     fn save_history(&self) {
         Self::write_state("history", &self.query_history.join("\n"));
     }
 
-    /// Load app launch counts from `$XDG_STATE_HOME/awari/usage`.
     fn load_usage(&mut self) {
         if let Some(s) = Self::read_state("usage") {
             for line in s.lines() {
@@ -918,7 +875,6 @@ impl Daemon {
         }
     }
 
-    /// Persist `app_usage` to `usage` as `name\tcount` lines.
     fn save_usage(&self) {
         let body: Vec<String> = self
             .app_usage
@@ -928,7 +884,6 @@ impl Daemon {
         Self::write_state("usage", &body.join("\n"));
     }
 
-    /// Load panel position offset from `$XDG_STATE_HOME/awari/position`.
     fn load_position(&mut self) {
         if let Some(s) = Self::read_state("position") {
             let parts: Vec<&str> = s.split_whitespace().collect();
@@ -941,7 +896,6 @@ impl Daemon {
         }
     }
 
-    /// Persist panel position offset to `position` as `x y`.
     fn save_position(&self) {
         Self::write_state(
             "position",
@@ -956,9 +910,6 @@ impl Daemon {
             if !self.launcher_query.trim().is_empty() {
                 self.files_seq = ft.query(&self.launcher_query);
             } else if self.launcher_category == launcher::Category::Files {
-                // Empty query in the Files category is a browse: fff-search
-                // returns frecency-ranked files, so the list shows "recent and
-                // frequent" without typing.
                 self.files_seq = ft.query("");
             } else {
                 self.files_seq = ft.invalidate();
@@ -981,8 +932,6 @@ impl Daemon {
         };
         let kind = row.kind.clone();
 
-        // Enter runs the kind's default action (index 0 of `actions()`), which
-        // is `Open` for apps/files/windows and `Run` for commands.
         let default = kind
             .actions()
             .into_iter()
@@ -1178,24 +1127,14 @@ fn spawn_apps_pump(cx: &mut Context<Daemon>, rx: Receiver<Vec<DesktopApp>>) {
         use futures::StreamExt;
         while let Some(apps) = fut_rx.next().await {
             let _ = this.update(cx, |d, cx| {
-                let mut icons: HashMap<String, String> = apps
-                    .iter()
-                    .filter_map(|a| {
-                        a.app_id_lc
-                            .as_ref()
-                            .zip(a.icon.as_ref())
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                    })
-                    .collect();
-
-                // Also map the display name so apps whose app_id equals their
-                // name (and thus have no StartupWMClass) still resolve a window
-                // icon. app_id_lc wins ties via `or_insert`.
+                let mut icons: HashMap<String, String> = HashMap::new();
                 for a in &apps {
-                    if let Some(v) = a.icon.as_deref() {
-                        icons
-                            .entry(a.name_lc.clone())
-                            .or_insert_with(|| v.to_string());
+                    if let Some(v) = a.icon.as_ref() {
+                        let v = v.to_string();
+                        if let Some(k) = a.app_id_lc.as_ref() {
+                            icons.entry(k.clone()).or_insert(v.clone());
+                        }
+                        icons.entry(a.name_lc.clone()).or_insert(v);
                     }
                 }
 
