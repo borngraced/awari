@@ -265,6 +265,15 @@ fn parse_top_level(tokens: &[String], cfg: &mut Config) {
                 i += 2;
                 continue;
             }
+            "clipboard_max" | "clipboard-max" if depth == 0 => {
+                if i + 1 < tokens.len()
+                    && let Ok(n) = tokens[i + 1].parse::<usize>()
+                {
+                    cfg.clipboard_max = n.max(1);
+                }
+                i += 2;
+                continue;
+            }
             _ => {}
         }
         i += 1;
@@ -333,6 +342,8 @@ fn looks_like_key(s: &str) -> bool {
             | "regex"
             | "max-results"
             | "max_results"
+            | "clipboard-max"
+            | "clipboard_max"
     )
 }
 

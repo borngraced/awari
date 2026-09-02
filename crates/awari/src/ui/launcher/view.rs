@@ -80,6 +80,11 @@ pub struct LauncherView {
     pub panel_offset_y: f32,
     /// Open/close and height spring settle time (`motion.duration-ms`).
     pub motion_ms: u32,
+    /// Clipboard items shown in the clipboard section when the query is
+    /// empty. Most recent last.
+    pub clipboard_history: Vec<String>,
+    /// Max clipboard items to display.
+    pub clipboard_max: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +150,8 @@ impl LauncherView {
             panel_offset_x: 0.0,
             panel_offset_y: 0.0,
             motion_ms: 140,
+            clipboard_history: Vec::new(),
+            clipboard_max: 10,
         }
     }
 }
@@ -1125,8 +1132,72 @@ impl Launcher {
                                 .child(subtitles[i]),
                         )
                 })
-                .collect::<Vec<_>>(),
-        )
+                 .collect::<Vec<_>>(),
+         )
+     }
+
+    fn clipboard_section(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let history = &self.view.clipboard_history;
+        div()
+            .id("clipboard-section")
+            .flex_col()
+            .gap(px(4.))
+            .pt(px(8.))
+            .pb(px(6.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(t.muted())
+                    .child("Clipboard"),
+            )
+            .children(
+                history
+                    .iter()
+                    .rev()
+                    .take(self.view.clipboard_max)
+                    .map(|text| {
+                        let display_label = text.clone();
+                        let copy_label = text.clone();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .rounded(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.))
+                                    .text_color(t.fg())
+                                    .truncate()
+                                    .child(display_label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(t.accent())
+                                    .px(px(6.))
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |l, _, _, cx| {
+                                            post(
+                                                l,
+                                                cx,
+                                                LauncherCmd::CopyClipboard {
+                                                    text: copy_label.clone(),
+                                                },
+                                            );
+                                        }),
+                                    )
+                                    .child("Copy"),
+                            )
+                    })
+                    .collect::<Vec<_>>(),
+            )
     }
 }
 
@@ -1239,13 +1310,16 @@ impl Render for Launcher {
             .flex_1()
             .min_w_0()
             .min_h_0();
-        if source_list {
-            results = results
-                .px(px(8.))
-                .pt(px(8.))
-                .pb(px(6.))
-                .w_full()
-                .child(self.source_list_el(&t, cx));
+         if source_list {
+             results = results
+                 .px(px(8.))
+                 .pt(px(8.))
+                 .pb(px(6.))
+                 .w_full()
+                 .child(self.source_list_el(&t, cx))
+                 .when(!self.view.clipboard_history.is_empty(), |el| {
+                     el.child(self.clipboard_section(&t, cx))
+                 });
         } else {
             results = results.px(px(8.)).pt(px(8.)).pb(px(6.)).w_full();
             if self.view.rows.is_empty() {

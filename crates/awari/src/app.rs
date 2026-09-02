@@ -3,9 +3,7 @@ use crate::desktop::{DesktopApp, scan_applications};
 use crate::files::{FileHit, Files, FilesOptions};
 use crate::ui::launcher::{self, Launcher, LauncherCmd, LauncherView};
 
-use awari_compositor::{
-    Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached,
-};
+use awari_compositor::{ClipboardEvent, ClipboardInbox, Compositor, CompositorCommand, CompositorInbox, CompositorMsg, spawn_detached};
 use awari_ipc::{ClientRequest, notify};
 use gpui::layer_shell::LayerShellNotSupportedError;
 use gpui::{
@@ -60,6 +58,9 @@ pub struct Daemon {
     /// Desktop names by last activation, most recent first.
     recents: Vec<String>,
     query_history: Vec<String>,
+    /// Clipboard items watched via wlr-data-control, oldest first (the view
+    /// tails the list so the most recent is shown last).
+    clipboard_history: Vec<String>,
     history_cursor: Option<usize>,
     history_live: Option<String>,
     app_usage: HashMap<String, u64>,
@@ -203,6 +204,7 @@ impl Daemon {
             cfg,
             recents: Vec::new(),
             query_history: Vec::new(),
+            clipboard_history: Vec::new(),
             history_cursor: None,
             history_live: None,
             app_usage: HashMap::new(),
@@ -226,6 +228,10 @@ impl Daemon {
 
         spawn_apps_pump(cx, apps_rx);
 
+        if let Some(clipboard_inbox) = awari_compositor::spawn_clipboard_watcher() {
+            spawn_clipboard_pump(cx, clipboard_inbox);
+        }
+
         // Scan `.desktop` files off the bootstrap path so the overlay prewarm
         // (wgpu device, shaders, fonts) runs first; apps swap in when ready.
         thread::Builder::new()
@@ -236,6 +242,7 @@ impl Daemon {
             .ok();
 
         daemon.load_history();
+        daemon.load_clipboard();
         daemon.load_usage();
         daemon.load_position();
         daemon
@@ -424,6 +431,8 @@ impl Daemon {
             panel_offset_x: self.panel_offset_x,
             panel_offset_y: self.panel_offset_y,
             motion_ms: self.cfg.motion.duration_ms,
+            clipboard_history: self.clipboard_history.clone(),
+            clipboard_max: self.cfg.clipboard_max,
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
@@ -569,6 +578,12 @@ impl Daemon {
                     self.refresh_file_hits();
                     self.sync_launcher(cx);
                 }
+            }
+            LauncherCmd::CopyClipboard { text } => {
+                if !text.trim().is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                self.dismiss_launcher(cx);
             }
             LauncherCmd::SavePosition { x, y } => {
                 self.panel_offset_x = x;
@@ -863,6 +878,49 @@ impl Daemon {
         Self::write_state("history", &self.query_history.join("\n"));
     }
 
+    /// Load past clipboard items from `$XDG_STATE_HOME/awari/clipboard`.
+    fn load_clipboard(&mut self) {
+        if let Some(s) = Self::read_state("clipboard") {
+            for line in s.lines() {
+                let text = line.to_string();
+                if !text.trim().is_empty() {
+                    self.clipboard_history.push(text);
+                }
+            }
+            self.trim_clipboard();
+        }
+    }
+
+    fn save_clipboard(&self) {
+        Self::write_state("clipboard", &self.clipboard_history.join("\n"));
+    }
+
+    /// Add a newly copied item, deduping against the most recent entry and
+    /// keeping at most `clipboard_max` items (oldest-first, tail = newest).
+    fn push_clipboard(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(last) = self.clipboard_history.last()
+            && last.as_str() == text
+        {
+            return;
+        }
+        self.clipboard_history.push(text);
+        self.trim_clipboard();
+        self.save_clipboard();
+    }
+
+    /// Cap the history to the configured maximum, dropping the oldest entries.
+    fn trim_clipboard(&mut self) {
+        let max = self.cfg.clipboard_max.max(1);
+        if self.clipboard_history.len() > max {
+            let keep = self.clipboard_history.len() - max;
+            self.clipboard_history.drain(..keep);
+        }
+    }
+
     fn load_usage(&mut self) {
         if let Some(s) = Self::read_state("usage") {
             for line in s.lines() {
@@ -1103,6 +1161,40 @@ fn spawn_files_pump(cx: &mut Context<Daemon>, rx: Receiver<(u64, Vec<FileHit>)>)
                         d.sync_launcher(cx);
                         cx.notify();
                     }
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+/// Streams clipboard-capture events from the wlr-data-control watcher into the
+/// daemon, mirroring the files/compositor pump shape.
+fn spawn_clipboard_pump(cx: &mut Context<Daemon>, inbox: Arc<ClipboardInbox>) {
+    let (tx, mut fut_rx) = futures::channel::mpsc::unbounded();
+    let wake = inbox.take_wake();
+    thread::Builder::new()
+        .name("awari-clipboard-pump".into())
+        .spawn(move || {
+            let Some(wake) = wake else { return };
+            while wake.recv().is_ok() {
+                let _ = tx.unbounded_send(inbox.drain());
+            }
+        })
+        .ok();
+
+    cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        while let Some(events) = fut_rx.next().await {
+            let _ = this.update(cx, |d, cx| {
+                for event in events {
+                    if let ClipboardEvent::Text(text) = event {
+                        d.push_clipboard(text);
+                    }
+                }
+                if d.launcher_open {
+                    d.sync_launcher(cx);
+                    cx.notify();
                 }
             });
         }

@@ -62,6 +62,9 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// Max total rows in the All view (apps + files + windows). Default 30.
     pub max_results: usize,
+    /// Max clipboard items shown in the clipboard section when the
+    /// query is empty. Default 10.
+    pub clipboard_max: usize,
     /// Keep the GPU overlay in memory (hidden when closed) instead of quitting it
     /// on every dismiss. When kept alive, re-opens are instant; when dropped, the
     /// GUI exits on dismiss and only a tiny shell stays up (re-open rebuilds the
@@ -120,6 +123,7 @@ impl Default for Config {
             fff: FffConfig::default(),
             sources: SourcesConfig::default(),
             max_results: 30,
+            clipboard_max: 10,
             keep_alive: true,
         }
     }
@@ -331,5 +335,16 @@ mod tests {
         // A `//` inside a quoted path is data, not a comment.
         let d = parse(r#"files { roots "~/a//b" }"#);
         assert!(d.files.roots.iter().any(|p| p.ends_with("a//b")));
+    }
+
+    #[test]
+    fn clipboard_max_parses_at_top_level() {
+        let c = parse("clipboard-max 15\nmax-results 40");
+        assert_eq!(c.clipboard_max, 15);
+        assert_eq!(c.max_results, 40);
+        let d = parse("clipboard_max 5");
+        assert_eq!(d.clipboard_max, 5);
+        let e = parse("");
+        assert_eq!(e.clipboard_max, 10);
     }
 }

@@ -57,6 +57,9 @@ pub enum LauncherCmd {
     SetCategory {
         category: Category,
     },
+    CopyClipboard {
+        text: String,
+    },
     SavePosition {
         x: f32,
         y: f32,

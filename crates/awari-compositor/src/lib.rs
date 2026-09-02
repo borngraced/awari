@@ -14,6 +14,12 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(target_os = "linux")]
+pub mod clipboard;
+
+#[cfg(target_os = "linux")]
+pub use clipboard::{ClipboardEvent, ClipboardInbox, spawn_clipboard_watcher};
+
 use smithay_client_toolkit::reexports::client as wl;
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{Event as HandleEvent, ZwlrForeignToplevelHandleV1},

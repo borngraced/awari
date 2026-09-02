@@ -550,6 +550,7 @@ dependencies = [
 name = "awari-compositor"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "smithay-client-toolkit",
  "thiserror 2.0.20",
  "tracing",
