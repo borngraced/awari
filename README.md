@@ -164,6 +164,37 @@ exec-once = awari
 bind = SUPER, D, exec, awari toggle-launcher
 ```
 
+**GNOME / KDE / other desktop shells**: run awari
+as a systemd *user* service so it starts with your graphical session. Create the
+unit manually, then register and enable it:
+
+```ini
+# ~/.config/systemd/user/awari.service
+[Unit]
+Description=Awari Wayland launcher
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/awari
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now awari.service
+```
+
+`enable --now` starts it now and on every login. The unit targets
+`graphical-session.target`, which both GNOME and KDE start. awari must run under
+your user session (not root) — it's a Wayland client, so `WAYLAND_DISPLAY` /
+`XDG_RUNTIME_DIR` must be available.
+
 ## Configuration
 
 KDL at [`~/.config/awari/config.kdl`](docs/config.md). Unknown keys ignored; no
