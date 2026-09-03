@@ -26,6 +26,16 @@ impl Category {
             Self::Windows => Icon::WindowFrame,
         }
     }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Apps => "Apps",
+            Self::Files => "Files",
+            Self::Commands => "Commands",
+            Self::Windows => "Windows",
+        }
+    }
 }
 #[derive(Clone)]
 pub enum LauncherCmd {

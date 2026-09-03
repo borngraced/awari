@@ -30,4 +30,3 @@ const SCALE_MIN: f32 = 0.92;
 const SEARCH_H: f32 = 50.0;
 const ICON_LIST: f32 = 30.0;
 const ICON_GRID: f32 = 50.0;
-pub const STRIP_ICON: f32 = 56.0;

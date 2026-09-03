@@ -48,7 +48,6 @@ pub struct Daemon {
     launcher_open: bool,
     launcher_query: String,
     launcher_selected: usize,
-    launcher_menu_armed: bool,
     launcher_category: launcher::Category,
     /// Bumped on every open/close; deferred window updates from a previous
     /// generation are dropped so a stale hide cannot clobber a fresh open.
@@ -199,7 +198,6 @@ impl Daemon {
             launcher_query: String::new(),
             launcher_selected: 0,
             launcher_category: launcher::Category::All,
-            launcher_menu_armed: false,
             launcher_gen: 0,
             apps: Vec::new(),
             app_icons: HashMap::new(),
@@ -435,7 +433,6 @@ impl Daemon {
             motion_ms: self.cfg.motion.duration_ms,
             clipboard_history: self.clipboard_history.clone(),
             clipboard_max: self.cfg.clipboard_max,
-            menu_armed: self.launcher_menu_armed,
         };
         let generation = self.launcher_gen;
         let shell = cx.entity().downgrade();
@@ -576,7 +573,6 @@ impl Daemon {
                 if self.launcher_query != query {
                     self.launcher_query = query;
                     self.launcher_selected = 0;
-                    self.launcher_menu_armed = false;
                     self.history_cursor = None;
                     self.history_live = None;
                     self.refresh_file_hits();
@@ -619,7 +615,6 @@ impl Daemon {
             self.launcher_query.clear();
             self.launcher_selected = 0;
             self.launcher_category = launcher::Category::All;
-            self.launcher_menu_armed = false;
             self.file_hits.clear();
             self.file_hits_gen += 1;
 
@@ -789,7 +784,6 @@ impl Daemon {
             }
             "up" | "arrowup" => {
                 if source_active {
-                    self.launcher_menu_armed = true;
                     self.launcher_selected = self.launcher_selected.saturating_sub(1).min(2);
                 } else {
                     self.launcher_selected = self.launcher_selected.saturating_sub(1);
@@ -798,7 +792,6 @@ impl Daemon {
             }
             "down" | "arrowdown" => {
                 if source_active {
-                    self.launcher_menu_armed = true;
                     self.launcher_selected = (self.launcher_selected + 1).min(2);
                 } else {
                     self.launcher_selected = self.launcher_selected.saturating_add(1);
