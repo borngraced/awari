@@ -14,11 +14,13 @@ use wayland_protocols_wlr::data_control::v1::client::{
         Event as DeviceEvent, ZwlrDataControlDeviceV1,
     },
     zwlr_data_control_manager_v1::{Event as ManagerEvent, ZwlrDataControlManagerV1},
-    zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
+    zwlr_data_control_offer_v1::{
+        Event as OfferEvent, ZwlrDataControlOfferV1,
+    },
 };
 use wl::protocol::wl_registry::{self, WlRegistry};
 use wl::protocol::wl_seat::{self, WlSeat};
-use wl::{Dispatch, Proxy, QueueHandle};
+use wl::{event_created_child, Dispatch, Proxy, QueueHandle};
 
 /// How many clipboard entries the in-memory watcher will buffer before the
 /// daemon drains them. Generous so a burst of copies is not silently dropped.
@@ -234,6 +236,26 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for ClipboardState {
             }
             _ => {}
         }
+    }
+
+    event_created_child!(ClipboardState, ZwlrDataControlDeviceV1, [
+        // The `data_offer` event introduces a `zwlr_data_control_offer_v1`
+        // child that is subsequently referenced by `selection` /
+        // `primary_selection`. Without this specialization wayland-client
+        // panics on the un-handled child creation.
+        0u16 => (ZwlrDataControlOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrDataControlOfferV1, ()> for ClipboardState {
+    fn event(
+        _st: &mut Self,
+        _proxy: &ZwlrDataControlOfferV1,
+        _event: OfferEvent,
+        _data: &(),
+        _conn: &wl::Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 

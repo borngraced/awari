@@ -20,20 +20,10 @@ impl Category {
     pub(crate) fn icon(self) -> Icon {
         match self {
             Self::All => Icon::LayoutGrid,
-            Self::Apps => Icon::AppWindow,
-            Self::Files => Icon::File,
+            Self::Apps => Icon::AppGrid,
+            Self::Files => Icon::Folder,
             Self::Commands => Icon::Command,
-            Self::Windows => Icon::Search,
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Apps => "Apps",
-            Self::Files => "Files",
-            Self::Commands => "Commands",
-            Self::Windows => "Windows",
+            Self::Windows => Icon::WindowFrame,
         }
     }
 }

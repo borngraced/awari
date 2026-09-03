@@ -238,7 +238,7 @@ pub fn score_app_window(
 ) -> (Vec<LauncherRow>, Vec<LauncherRow>) {
     let q = query.trim();
     let empty = q.is_empty();
-    let apps_only = category == Category::Apps;
+    let apps_only = empty && category == Category::Apps;
     let files_only = category == Category::Files;
     let windows_only = category == Category::Windows;
 
@@ -395,7 +395,7 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
 
     // Score folds case internally; keep the raw trimmed query.
     let empty = q.is_empty();
-    let apps_only = category == Category::Apps;
+    let apps_only = empty && category == Category::Apps;
     let files_only = category == Category::Files;
     let windows_only = category == Category::Windows;
     let ranked_cap = if apps_only || files_only || windows_only {

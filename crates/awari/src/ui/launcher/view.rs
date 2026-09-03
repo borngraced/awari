@@ -14,8 +14,8 @@ use super::icon_cache::{BoundedImageCache, ICON_GPU_RETENTION};
 use super::scoring::*;
 use super::types::*;
 use super::{
-    GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H, QUERY_DEBOUNCE,
-    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H,
+    APP_W, GRID_COLS, GRID_ROW_H, ICON_GRID, ICON_LIST, LAUNCHER_W, NO_MATCH_H, QUERY_DEBOUNCE,
+    RESULTS_DEBOUNCE, ROW_H, SCALE_MIN, SEARCH_H, SOURCE_LIST_H, STRIP_ICON,
 };
 
 /// Cap the visible inline text (typed query + ghost) so it never runs past the
@@ -85,6 +85,7 @@ pub struct LauncherView {
     pub clipboard_history: Vec<String>,
     /// Max clipboard items to display.
     pub clipboard_max: usize,
+    pub menu_armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +153,7 @@ impl LauncherView {
             motion_ms: 140,
             clipboard_history: Vec::new(),
             clipboard_max: 10,
+            menu_armed: false,
         }
     }
 }
@@ -1073,68 +1075,98 @@ impl Launcher {
     fn source_list_el(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         let cats = [Category::Apps, Category::Files, Category::Windows];
-        let subtitles = [
-            "Browse installed apps",
-            "Recent and frequent",
-            "Currently open windows",
-        ];
         let sel = self.view.selected;
         let hover = self.hovered_source;
 
-        div().id("source-list").flex_col().gap(px(2.)).children(
-            cats.iter()
-                .enumerate()
-                .map(|(i, &c)| {
-                    let this = this.clone();
-                    let selected = sel == i || hover == Some(i);
-                    div()
-                        .id(("source-row", i as u64))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .h(px(38.))
-                        .px(px(10.))
-                        .py(px(10.))
-                        .rounded(px(8.))
-                        .when(selected, |el| el.bg(t.ghost()))
-                        .on_hover(move |h: &bool, _window, cx: &mut App| {
-                            this.update(cx, |l, cx| {
-                                if *h {
-                                    l.hovered_source = Some(i);
-                                } else if l.hovered_source == Some(i) {
-                                    l.hovered_source = None;
-                                }
+        div()
+            .id("source-list")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(14.))
+            .py(px(14.))
+            .children(
+                cats.iter()
+                    .enumerate()
+                    .map(|(i, &c)| {
+                        let this = this.clone();
+                        let selected = hover == Some(i) || (self.view.menu_armed && sel == i);
+                        let cat = c;
+                        div()
+                            .id(("source-tile", i as u64))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(STRIP_ICON))
+                            .rounded_full()
+                            .bg(if selected { t.select() } else { t.surface() })
+                            .cursor_pointer()
+                            .on_hover(move |h: &bool, _window, cx: &mut App| {
+                                this.update(cx, |l, cx| {
+                                    if *h {
+                                        l.hovered_source = Some(i);
+                                    } else if l.hovered_source == Some(i) {
+                                        l.hovered_source = None;
+                                    }
 
-                                cx.notify();
-                            });
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                post(this, cx, LauncherCmd::SetCategory { category: c });
-                            }),
-                        )
-                        .child(
-                            div()
-                                .w(px(18.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(c.icon().element_px(t.muted(), 17.0)),
-                        )
-                        .child(div().text_size(px(14.)).text_color(t.fg()).child(c.label()))
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(t.muted())
-                                .child(subtitles[i]),
-                        )
-                })
-                 .collect::<Vec<_>>(),
-         )
-     }
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    post(this, cx, LauncherCmd::SetCategory { category: cat });
+                                }),
+                            )
+                            .child(
+                                c.icon().element_px(
+                                    (if selected { t.fg() } else { t.muted() }).opacity(0.7),
+                                    STRIP_ICON * 0.68,
+                                ),
+                            )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+    }
+
+    fn key_help_bar(&self, t: &Theme) -> impl IntoElement {
+        let items: &[(&str, &str)] = &[("↑↓", "move"), ("Enter", "open"), ("Esc", "close")];
+        div()
+            .id("key-help")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .children(items.iter().map(|(keys, label)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(5.))
+                            .bg(t.hover())
+                            .border_1()
+                            .border_color(t.border())
+                            .text_size(px(10.))
+                            .line_height(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.fg())
+                            .child(SharedString::from(*keys)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.muted())
+                            .child(SharedString::from(*label)),
+                    )
+            }))
+    }
 
     fn clipboard_section(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let history = &self.view.clipboard_history;
@@ -1252,10 +1284,14 @@ impl Render for Launcher {
         }
         let font_family = t.font.clone();
         let win_w = f32::from(window.bounds().size.width);
-        let panel_w = LAUNCHER_W.min(win_w * 0.92).max(280.0);
         let q_empty = self.view.query.trim().is_empty();
         let cat = self.view.category;
         let browsing_grid = cat == Category::Apps && q_empty;
+        let panel_w = if browsing_grid {
+            APP_W.min(win_w * 0.92).max(320.0)
+        } else {
+            LAUNCHER_W.min(win_w * 0.92).max(280.0)
+        };
         // Empty-state source menu: only at the top level with no query. It is
         // an overlay below the search bar and must never resize/reposition the
         // input box or the window — visibility tracks the query instantly
@@ -1317,6 +1353,7 @@ impl Render for Launcher {
                  .pb(px(6.))
                  .w_full()
                  .child(self.source_list_el(&t, cx))
+                 .child(self.key_help_bar(&t))
                  .when(!self.view.clipboard_history.is_empty(), |el| {
                      el.child(self.clipboard_section(&t, cx))
                  });
