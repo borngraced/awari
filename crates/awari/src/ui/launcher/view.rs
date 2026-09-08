@@ -999,7 +999,7 @@ impl Launcher {
                 div()
                     .w_full()
                     .text_size(px(13.))
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(if selected { t.fg() } else { t.muted() })
                     .text_center()
                     .truncate()
@@ -1136,7 +1136,6 @@ impl Launcher {
                 .collect::<Vec<_>>(),
         )
     }
-
 
     fn clipboard_section(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let history = &self.view.clipboard_history;
@@ -1316,16 +1315,16 @@ impl Render for Launcher {
             .flex_1()
             .min_w_0()
             .min_h_0();
-         if source_list {
-             results = results
-                 .px(px(8.))
-                 .pt(px(8.))
-                 .pb(px(6.))
-                 .w_full()
-                 .child(self.source_list_el(&t, cx))
-                 .when(!self.view.clipboard_history.is_empty(), |el| {
-                     el.child(self.clipboard_section(&t, cx))
-                 });
+        if source_list {
+            results = results
+                .px(px(8.))
+                .pt(px(8.))
+                .pb(px(6.))
+                .w_full()
+                .child(self.source_list_el(&t, cx))
+                .when(!self.view.clipboard_history.is_empty(), |el| {
+                    el.child(self.clipboard_section(&t, cx))
+                });
         } else {
             results = results.px(px(8.)).pt(px(8.)).pb(px(6.)).w_full();
             if self.view.rows.is_empty() {
@@ -1621,7 +1620,9 @@ impl Render for Launcher {
                     .ml(px(offset_x))
                     .with_spring(
                         ("launcher-panel-h", open_gen),
-                        SpringAnimation::new(height_spring).to(panel_h).from(SEARCH_H),
+                        SpringAnimation::new(height_spring)
+                            .to(panel_h)
+                            .from(SEARCH_H),
                         |el, h| el.h(px(h)),
                     )
                     .child(
@@ -1717,14 +1718,30 @@ impl Render for Launcher {
                                                 .child(self.query_element())
                                                 .child(self.completion_badge(cx))
                                                 .child(div().flex_1().min_w_0())
-                                                .when(expanded, |el| {
-                                                    el.when_some(
-                                                        self.view.rows.first(),
-                                                        |el, row| {
-                                                            el.child(first_result_icon(row, &t))
-                                                        },
-                                                    )
-                                                }),
+                                                .when(
+                                                    expanded
+                                                        && !self.view.query.trim().is_empty(),
+                                                    |el| {
+                                                        el.when_some(
+                                                            self.view.rows.first().filter(
+                                                                |row| {
+                                                                    row.label
+                                                                        .to_lowercase()
+                                                                        .starts_with(
+                                                                            &self
+                                                                                .view
+                                                                                .query
+                                                                                .trim()
+                                                                                .to_lowercase(),
+                                                                        )
+                                                                },
+                                                            ),
+                                                            |el, row| {
+                                                                el.child(first_result_icon(row, &t))
+                                                            },
+                                                        )
+                                                    },
+                                                ),
                                         ),
                                 )
                                 .when(expanded || source_list, |el| el.child(results_body))
