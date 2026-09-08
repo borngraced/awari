@@ -206,7 +206,9 @@ pub fn read_dir_matching(dir: &Path, frag: &str) -> Option<Vec<PathBuf>> {
         let score = if frag_lc.is_empty() {
             Some(0)
         } else {
-            crate::files::subsequence_score(&name_lc, &frag_lc)
+            // subsequence_score(needle, haystack): the typed fragment is the
+            // needle, the entry name the haystack.
+            crate::files::subsequence_score(&frag_lc, &name_lc)
         };
         if let Some(s) = score {
             scored.push((s, p));
@@ -456,7 +458,17 @@ pub fn filter_rows_cached(params: FilterParams) -> Vec<LauncherRow> {
     }
 
     if crate::files::is_path_shaped(q) {
-        return open_path_rows(q, file_max);
+        // Explicit path navigation: the fff merge (per-root hits plus the
+        // transient per-directory picker) ranks files first, then apps and
+        // windows, so the typed path's subtree beats app/window results.
+        push_capped(
+            &mut out,
+            ranked_cap,
+            files.iter().take(file_max).map(file_row),
+        );
+        push_capped(&mut out, ranked_cap, app_rows);
+        push_capped(&mut out, ranked_cap, win_rows);
+        return out;
     }
 
     // Apps are the primary action: rank above files and windows.

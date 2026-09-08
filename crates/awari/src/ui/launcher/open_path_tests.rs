@@ -4,6 +4,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[test]
+fn read_dir_matching_matches_fragment_in_name() {
+    let dir = std::env::temp_dir().join(format!("awari_rdm_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("notes.md"), b"").unwrap();
+    std::fs::write(dir.join("no.txt"), b"").unwrap();
+    std::fs::write(dir.join("zzz"), b"").unwrap();
+
+    let names: Vec<String> = read_dir_matching(&dir, "no")
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "notes.md"), "{names:?}");
+    assert!(names.iter().any(|n| n == "no.txt"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "zzz"), "{names:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn expand_resolves_relative_and_absolute() {
     unsafe { std::env::set_var("HOME", "/home/tester") };
     assert_eq!(
