@@ -342,6 +342,7 @@ pub fn score_app_window(
         let name = SharedString::from(app.name.as_str());
         let kind = RowKind::App {
             name: name.clone(),
+            comment: app.comment.as_deref().map(SharedString::from),
             exec: app.exec.clone(),
         };
         LauncherRow {

@@ -96,6 +96,8 @@ impl RowAction {
 pub enum RowKind {
     App {
         name: SharedString,
+        /// `.desktop` `Comment=`, shown as the subtitle when present.
+        comment: Option<SharedString>,
         exec: Arc<[String]>,
     },
     Window {

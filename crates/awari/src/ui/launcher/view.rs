@@ -939,7 +939,11 @@ fn highlighted_name(label: &str, q: &[char], t: &Theme) -> StyledText {
 pub(crate) fn build_subtitle(kind: &RowKind) -> Option<SharedString> {
     match kind {
         RowKind::File { path } => Some(SharedString::from(path.display().to_string())),
-        RowKind::App { exec, .. } => Some(SharedString::from(exec.join(" "))),
+        RowKind::App { exec, comment, .. } => Some(
+            comment
+                .clone()
+                .unwrap_or_else(|| SharedString::from(exec.join(" "))),
+        ),
         RowKind::Window { .. } => Some(SharedString::from("Window")),
         RowKind::Command { command } => Some(SharedString::from(command.clone())),
     }

@@ -13,6 +13,7 @@ fn source_menu_visible(q_empty: bool, cat: Category, calc: bool) -> bool {
 fn app(name: &str, app_id: Option<&str>) -> DesktopApp {
     DesktopApp {
         name: name.into(),
+        comment: None,
         exec: Arc::from(vec![name.to_lowercase()]),
         app_id: app_id.map(Into::into),
         icon: None,

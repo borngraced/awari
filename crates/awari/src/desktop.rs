@@ -6,6 +6,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesktopApp {
     pub name: String,
+    /// `Comment=` from the entry, shown as the row subtitle when present.
+    pub comment: Option<String>,
     pub exec: Arc<[String]>,
     pub app_id: Option<String>,
     /// Raw `Icon=` value from the entry: an absolute path or a themed name.
@@ -130,6 +132,7 @@ fn split_exec(exec: &str) -> Result<Vec<String>, ExecError> {
 pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
     let mut in_entry = false;
     let mut name = None;
+    let mut comment = None;
     let mut exec = None;
     let mut icon = None;
     let mut terminal = false;
@@ -167,6 +170,7 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
         match k {
             "Type" => ty = Some(v.to_string()),
             "Name" => name = Some(unescape_desktop(v)),
+            "Comment" => comment = Some(unescape_desktop(v)),
             "Exec" => exec = Some(v.to_string()),
             "Icon" => icon = Some(v.to_string()),
             "Terminal" => terminal = v.eq_ignore_ascii_case("true"),
@@ -208,6 +212,7 @@ pub fn parse_desktop_entry(text: &str, path: &Path) -> Option<DesktopApp> {
 
     Some(DesktopApp {
         name,
+        comment,
         exec: Arc::from(argv),
         app_id,
         icon,
@@ -385,12 +390,23 @@ mod tests {
     #[test]
     fn parses_application() {
         let app = parse_desktop_entry(
-            "[Desktop Entry]\nType=Application\nName=Alacritty\nExec=alacritty\n",
+            "[Desktop Entry]\nType=Application\nName=Alacritty\nComment=Terminal emulator\nExec=alacritty\n",
             Path::new("/usr/share/applications/Alacritty.desktop"),
         )
         .unwrap();
         assert_eq!(app.name, "Alacritty");
+        assert_eq!(app.comment.as_deref(), Some("Terminal emulator"));
         assert_eq!(app.exec, Arc::from(vec!["alacritty".to_string()]));
+    }
+
+    #[test]
+    fn missing_comment_is_none() {
+        let app = parse_desktop_entry(
+            "[Desktop Entry]\nType=Application\nName=NoComment\nExec=nc\n",
+            Path::new("/usr/share/applications/NoComment.desktop"),
+        )
+        .unwrap();
+        assert_eq!(app.comment, None);
     }
 
     #[test]

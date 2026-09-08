@@ -85,6 +85,7 @@ fn tab_inline_completes_top_row() {
     let rows = vec![lrow(
         RowKind::App {
             name: "GoLand".into(),
+            comment: None,
             exec: Arc::from(vec![]),
         },
         "GoLand",
@@ -128,6 +129,7 @@ fn tab_falls_back_to_selected_file_path() {
         lrow(
             RowKind::App {
                 name: "Zed".into(),
+                comment: None,
                 exec: Arc::from(vec![]),
             },
             "Zed",
@@ -146,4 +148,26 @@ fn tab_falls_back_to_selected_file_path() {
         Some(TabOutcome::Row(_))
     ));
     assert!(tab_completion("zzz", &rows, 9).is_none());
+}
+
+#[test]
+fn app_subtitle_prefers_comment_over_exec() {
+    let with_comment = RowKind::App {
+        name: "Zed".into(),
+        comment: Some("The editor for what you'll build".into()),
+        exec: Arc::from(vec!["zed".into()]),
+    };
+    assert_eq!(
+        build_subtitle(&with_comment).map(|s| s.to_string()),
+        Some("The editor for what you'll build".to_string())
+    );
+    let without_comment = RowKind::App {
+        name: "Zed".into(),
+        comment: None,
+        exec: Arc::from(vec!["zed".into(), "--foreground".into()]),
+    };
+    assert_eq!(
+        build_subtitle(&without_comment).map(|s| s.to_string()),
+        Some("zed --foreground".to_string())
+    );
 }
