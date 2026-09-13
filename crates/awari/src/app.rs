@@ -20,6 +20,11 @@ use std::time::Duration;
 
 const LAUNCHER_CLOSE_GRACE_MS: u64 = 200;
 
+/// How long the launcher must stay closed before file-search RAM (root
+/// indexes + frecency envs) is released back to the OS. Overridable via
+/// `AWARI_IDLE_RELEASE_MS` (e.g. a very low value to exercise the path).
+const IDLE_RELEASE_MS: u64 = 60_000;
+
 /// Whether the GPU overlay process stays in memory between dismisses
 /// (`KeepAlive`) or exits on dismiss to free the GPU process (`Drop`).
 pub enum GpuMode {
@@ -40,6 +45,10 @@ pub struct Daemon {
     compositor: Option<Arc<dyn Compositor>>,
     launcher: Option<WindowHandle<Launcher>>,
     pending_close: Option<Task<()>>,
+    /// Armed on dismiss; on fire (launcher still closed) releases file-search
+    /// RAM. Cancelled by dropping it on the next open, so a reopen during the
+    /// idle window pays no re-index.
+    idle_release: Option<Task<()>>,
     /// When true the GUI stays in memory (hidden) between dismisses for instant
     /// re-opens; when false it quits on dismiss to free the GPU process.
     keep_alive: bool,
@@ -191,6 +200,7 @@ impl Daemon {
             compositor,
             launcher: None,
             pending_close: None,
+            idle_release: None,
             keep_alive: true,
             quit_after_close: false,
             launcher_display: None,
@@ -612,6 +622,7 @@ impl Daemon {
             // Cancel any in-flight teardown so a reopen during the fade reuses
             // the live surface instead of removing it out from under us.
             self.pending_close = None;
+            self.idle_release = None;
             self.launcher_query.clear();
             self.launcher_selected = 0;
             self.launcher_category = launcher::Category::All;
@@ -754,6 +765,32 @@ impl Daemon {
             }
         });
         self.pending_close = Some(close_task);
+
+        // Hand file-search RAM back once the launcher stays closed a while;
+        // reopening cancels this task so a quick reopen pays no re-index.
+        if self.keep_alive {
+            let idle_ms = std::env::var("AWARI_IDLE_RELEASE_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(IDLE_RELEASE_MS);
+            self.idle_release = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(idle_ms)).await;
+                if let Some(daemon) = this.upgrade() {
+                    daemon.update(cx, |d, _cx| {
+                        if d.launcher_open {
+                            return;
+                        }
+                        if let Some(files) = &mut d.files_tx {
+                            files.release();
+                        }
+                        d.file_hits.clear();
+                        d.file_hits.shrink_to_fit();
+                        unsafe { libc::malloc_trim(0) };
+                        tracing::debug!("file-search state released after idle");
+                    });
+                }
+            }));
+        }
     }
 
     fn launcher_key(&mut self, key: &str, _ch: Option<&str>, shift: bool, cx: &mut Context<Self>) {
@@ -1059,7 +1096,7 @@ impl Daemon {
         self.dismiss_launcher(cx);
 
         if let launcher::RowKind::File { path } = kind {
-            if let Some(files) = &self.files_tx {
+            if let Some(files) = &mut self.files_tx {
                 files.record_open(&path);
             }
 

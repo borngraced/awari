@@ -57,11 +57,22 @@ const QUERY_DEBOUNCE: Duration = Duration::from_millis(20);
 const CTRL_POLL: Duration = Duration::from_millis(100);
 
 /// Behavior flags for the file source.
+#[derive(Clone)]
 pub struct FilesOptions {
     pub index_lockfiles: bool,
     pub regex: bool,
     /// Toggles applied to every fff-search picker (see `config::FffConfig`).
     pub fff: crate::config::FffConfig,
+}
+
+/// Control signal to the file worker thread.
+pub(crate) enum Ctrl {
+    /// Drop per-directory scratch indexes and compiled regex caches; the warm
+    /// root indexes stay so a reopen is fast.
+    Clear,
+    /// Full release: drop root pickers and the daemon-side frecency handles so
+    /// idle RAM returns to baseline. The worker rebuilds on the next query.
+    Release,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,8 +82,9 @@ pub struct FileHit {
 
 pub struct Files {
     tx: Sender<(u64, String)>,
-    ctrl: Sender<()>,
+    ctrl: Sender<Ctrl>,
     seq: u64,
+    roots: Vec<PathBuf>,
     frecencies: Vec<(PathBuf, SharedFrecency)>,
 }
 
@@ -81,12 +93,14 @@ impl Files {
     pub fn spawn(roots: Vec<PathBuf>, opts: FilesOptions) -> (Self, Receiver<(u64, Vec<FileHit>)>) {
         let (qtx, qrx) = std::sync::mpsc::channel::<(u64, String)>();
         let (rtx, rrx) = std::sync::mpsc::channel();
-        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<()>();
-        let (pickers, frecencies) = picker::build_root_pickers(&roots, opts.fff);
-        if !pickers.is_empty() {
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<Ctrl>();
+        let frecencies = picker::build_frecencies(&roots);
+        if !roots.is_empty() {
+            let spawn_roots = roots.clone();
+            let spawn_opts = opts.clone();
             std::thread::Builder::new()
                 .name("awari-files".into())
-                .spawn(move || picker::picker_loop(pickers, qrx, rtx, ctrl_rx, opts))
+                .spawn(move || picker::picker_loop(spawn_roots, qrx, rtx, ctrl_rx, spawn_opts))
                 .expect("files thread");
         }
         (
@@ -94,6 +108,7 @@ impl Files {
                 tx: qtx,
                 ctrl: ctrl_tx,
                 seq: 0,
+                roots,
                 frecencies,
             },
             rrx,
@@ -117,14 +132,25 @@ impl Files {
     /// during path navigation. Root indexes are bounded and kept warm, so idle
     /// RAM stays near baseline without a re-index walk. Call on dismiss.
     pub fn clear(&self) {
-        let _ = self.ctrl.send(());
+        let _ = self.ctrl.send(Ctrl::Clear);
+    }
+
+    /// Full idle release: drop the root pickers (freed by the worker on the
+    /// next poll) and the daemon-side frecency handles so every LMDB env and
+    /// index is unmapped. Next `query` or `record_open` rebuilds from `roots`.
+    pub fn release(&mut self) {
+        let _ = self.ctrl.send(Ctrl::Release);
+        self.frecencies.clear();
     }
 
     /// Record that a file was opened through the launcher, feeding the
     /// "frequent" half of frecency ranking. Maps the path to its owning root
     /// (most specific match) and writes the access into that root's shared
     /// frecency store — the same one the picker reads when scoring.
-    pub fn record_open(&self, path: &Path) {
+    pub fn record_open(&mut self, path: &Path) {
+        if self.frecencies.is_empty() {
+            self.frecencies = picker::build_frecencies(&self.roots);
+        }
         let mut best: Option<&SharedFrecency> = None;
         let mut best_len = 0;
         for (root, frec) in &self.frecencies {

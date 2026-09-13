@@ -15,6 +15,14 @@ pub fn client_main(arg: &str) -> i32 {
             crate::files::probe::typing();
             return 0;
         }
+        "probe-massif" => {
+            crate::files::probe::massif();
+            return 0;
+        }
+        "probe-release" => {
+            crate::files::probe::release();
+            return 0;
+        }
         _ => {}
     }
     let req = match arg {

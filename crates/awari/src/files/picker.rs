@@ -19,7 +19,7 @@ use super::fzy::subsequence_score_chars;
 use super::path::path_query_dir;
 use super::regex::{RegexCaches, regex_hint, resolve_regex};
 use super::{
-    CTRL_POLL, FILE_CACHE_BUDGET, FileHit, FilesOptions, MAX_FILE_RESULTS, PER_ROOT_ROWS,
+    CTRL_POLL, Ctrl, FILE_CACHE_BUDGET, FileHit, FilesOptions, MAX_FILE_RESULTS, PER_ROOT_ROWS,
     QUERY_DEBOUNCE, ROOT_CACHE_BYTES, TRANSIENT_CACHE_BYTES, TRANSIENT_DIR_CAP,
 };
 
@@ -51,17 +51,24 @@ fn open_frecency(root: &std::path::Path) -> SharedFrecency {
     }
 }
 
-/// Build the persistent per-root `FilePicker`s. Called once at startup; the
-/// indexes are kept warm for the daemon's lifetime (bounded by
-/// `ROOT_CACHE_BYTES` and carrying FFF watches + frecency). The matching
-/// `SharedFrecency` clones are returned alongside so the daemon can record
-/// launcher opens (driving the "frequent" half of frecency ranking).
+/// Open the persistent per-root frecency stores (no index walk). Reused to
+/// lazily rebuild the daemon-side handles after `Files::release`.
+pub(super) fn build_frecencies(roots: &[PathBuf]) -> Vec<(PathBuf, SharedFrecency)> {
+    let mut frecencies = Vec::new();
+    for root in roots {
+        frecencies.push((root.clone(), open_frecency(root)));
+    }
+    frecencies
+}
+
+/// Build the persistent per-root `FilePicker`s; the indexes are kept warm
+/// (bounded by `ROOT_CACHE_BYTES`, carrying FFF watches + frecency). Returns
+/// the matching `SharedFrecency` clones so the daemon can record opens.
 pub(super) fn build_root_pickers(
     roots: &[PathBuf],
     fff: crate::config::FffConfig,
 ) -> (Vec<SharedFilePicker>, Vec<(PathBuf, SharedFrecency)>) {
     let mut pickers = Vec::new();
-    let mut frecencies = Vec::new();
 
     for root in roots {
         let shared = SharedFilePicker::default();
@@ -84,25 +91,36 @@ pub(super) fn build_root_pickers(
         );
 
         match res {
-            Ok(()) => {
-                pickers.push(shared);
-                frecencies.push((root.clone(), frecency));
-            }
+            Ok(()) => pickers.push(shared),
             Err(e) => tracing::warn!(%e, root = %root.display(), "file index failed"),
         }
     }
-    (pickers, frecencies)
+    (pickers, build_frecencies(roots))
+}
+
+/// Like `build_root_pickers` but drops the daemon-side frecency handles, so
+/// the worker keeps only the pickers (the envs stay pinned by the pickers'
+/// own clones). Empty roots yield `Some(vec![])`, never `None`; `None` is
+/// reserved for the released state.
+fn build_root_pickers_some(
+    roots: &[PathBuf],
+    fff: crate::config::FffConfig,
+) -> Option<Vec<SharedFilePicker>> {
+    let (pickers, frecencies) = build_root_pickers(roots, fff);
+    drop(frecencies);
+    Some(pickers)
 }
 
 pub(super) fn picker_loop(
-    pickers: Vec<SharedFilePicker>,
+    roots: Vec<PathBuf>,
     qrx: Receiver<(u64, String)>,
     rtx: Sender<(u64, Vec<FileHit>)>,
-    ctrl: Receiver<()>,
+    ctrl: Receiver<Ctrl>,
     opts: FilesOptions,
 ) {
     let mut regex_caches = RegexCaches::default();
-    tracing::info!(roots = pickers.len(), "file index started");
+    let mut pickers = build_root_pickers_some(&roots, opts.fff);
+    tracing::info!(roots = pickers.as_ref().map_or(0, Vec::len), "file index started");
 
     let parser = QueryParser::default();
     let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
@@ -114,23 +132,43 @@ pub(super) fn picker_loop(
         // with live FFF watches + frecency), so the next open is fast and we
         // avoid a full filesystem walk here. Multiple queued clear signals just
         // repeat this cheap transient drop.
-        while ctrl.try_recv().is_ok() {
-            tracing::debug!("clearing transient file caches on dismiss");
+        while let Ok(c) = ctrl.try_recv() {
+            match c {
+                Ctrl::Clear => {}
+                Ctrl::Release => pickers = None,
+            }
+            tracing::debug!("reclaiming file-search caches on dismiss");
             transient.clear();
             transient_order.clear();
             // Drop the compiled regex cache too, so a session's worst pattern
             // doesn't pin its regex engine buffers for the daemon's lifetime.
             regex_caches = RegexCaches::default();
-            // Hand freed pages back to the OS so RSS actually falls after a
-            // heavy session instead of plateauing at the peak.
-            unsafe { libc::malloc_trim(0) };
+            prev_raw.clear();
         }
         // Block for the next query, but wake periodically so a clear signal
         // isn't starved while the launcher is idle.
         let first = match qrx.recv_timeout(CTRL_POLL) {
             Ok(f) => f,
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                // No query will re-pin after an idle release; hand pages back now.
+                if pickers.is_none() {
+                    unsafe { libc::malloc_trim(0) };
+                }
+                continue;
+            }
             Err(RecvTimeoutError::Disconnected) => break,
+        };
+
+        if pickers.is_none() {
+            tracing::debug!("rebuilding file indexes after idle release");
+            pickers = build_root_pickers_some(&roots, opts.fff);
+            transient.clear();
+            transient_order.clear();
+            unsafe { libc::malloc_trim(0) };
+        }
+        let pickers = match &pickers {
+            Some(p) => p.clone(),
+            None => continue,
         };
 
         let (latest, n) = coalesce(&qrx, first);

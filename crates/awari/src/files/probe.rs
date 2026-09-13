@@ -318,3 +318,161 @@ pub fn typing() {
     drop(qtx);
     let _ = worker.join();
 }
+
+/// Minimal retained-heap probe for massif: builds the pickers, warms the
+/// index, runs a few real queries, then exits so massif's final snapshot
+/// attributes everything still allocated (index + result/cache buffers).
+pub fn massif() {
+    let cfg = crate::config::load();
+    let roots = cfg.files.resolved_roots();
+    let (pickers, _) = build_root_pickers(&roots, cfg.fff);
+    let parser = QueryParser::<FileSearchConfig>::default();
+    let opts = FilesOptions {
+        index_lockfiles: cfg.files.index_lockfiles,
+        regex: cfg.files.regex,
+        fff: cfg.fff,
+    };
+    let mut caches = RegexCaches {
+        main: None,
+        term: None,
+    };
+    let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
+    let mut transient_order: VecDeque<PathBuf> = VecDeque::new();
+    for _ in 0..6 {
+        let _ = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            "",
+            &opts,
+            &mut caches,
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+    let _ = search_all(
+        &pickers,
+        &mut transient,
+        &mut transient_order,
+        &parser,
+        "main",
+        &opts,
+        &mut caches,
+    );
+    eprintln!("massif probe warmed; resident={}MiB", proc_rss_kb() / 1024);
+    for q in ["main", "config", "src/app"] {
+        for _ in 0..2 {
+            let _ = search_all(
+                &pickers,
+                &mut transient,
+                &mut transient_order,
+                &parser,
+                q,
+                &opts,
+                &mut caches,
+            );
+        }
+    }
+    eprintln!("massif probe done; resident={}MiB", proc_rss_kb() / 1024);
+}
+
+/// Measures how much resident memory a full release of the root pickers and
+/// frecency stores actually reclaims: build -> warm -> query, snapshot RSS,
+/// then drop every shared handle + trim + settle, snapshot again.
+pub fn release() {
+    let cfg = crate::config::load();
+    let roots = cfg.files.resolved_roots();
+    let parser = QueryParser::<FileSearchConfig>::default();
+    let opts = FilesOptions {
+        index_lockfiles: cfg.files.index_lockfiles,
+        regex: cfg.files.regex,
+        fff: cfg.fff,
+    };
+    let mut caches = RegexCaches {
+        main: None,
+        term: None,
+    };
+    let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
+    let mut transient_order: VecDeque<PathBuf> = VecDeque::new();
+
+    let (pickers, frecencies) = build_root_pickers(&roots, cfg.fff);
+    for _ in 0..6 {
+        let _ = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            "",
+            &opts,
+            &mut caches,
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+    for q in ["main", "config", "src/app"] {
+        for _ in 0..2 {
+            let _ = search_all(
+                &pickers,
+                &mut transient,
+                &mut transient_order,
+                &parser,
+                q,
+                &opts,
+                &mut caches,
+            );
+        }
+    }
+    let warm = proc_rss_kb();
+    eprintln!("warm resident={}MiB", warm / 1024);
+
+    drop(frecencies);
+    drop(pickers);
+    drop(transient);
+    drop(transient_order);
+    drop(caches);
+    drop(parser);
+    unsafe { libc::malloc_trim(0) };
+    thread::sleep(Duration::from_millis(500));
+    let after = proc_rss_kb();
+    eprintln!("after full release resident={}MiB (delta {}MiB)", after / 1024, (warm as i64 - after as i64) / 1024);
+
+    let (pickers, frecencies) = build_root_pickers(&roots, cfg.fff);
+    let parser = QueryParser::<FileSearchConfig>::default();
+    let mut transient: HashMap<PathBuf, SharedFilePicker> = HashMap::new();
+    let mut transient_order: VecDeque<PathBuf> = VecDeque::new();
+    let mut caches = RegexCaches {
+        main: None,
+        term: None,
+    };
+    for _ in 0..6 {
+        let _ = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            "",
+            &opts,
+            &mut caches,
+        );
+        thread::sleep(Duration::from_millis(150));
+    }
+    let mut hit = 0;
+    for _ in 0..3 {
+        let hits = search_all(
+            &pickers,
+            &mut transient,
+            &mut transient_order,
+            &parser,
+            "src/app",
+            &opts,
+            &mut caches,
+        );
+        hit += hits.len();
+    }
+    let rebuilt = proc_rss_kb();
+    eprintln!(
+        "after rebuild+requery resident={}MiB (hits={hit})",
+        rebuilt / 1024
+    );
+    drop(frecencies);
+    drop(pickers);
+}
