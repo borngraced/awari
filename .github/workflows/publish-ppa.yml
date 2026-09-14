@@ -1,0 +1,71 @@
+name: publish-ppa
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ppa:
+    name: ppa
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PPA_NAME: ${{ vars.PPA_NAME || 'borngraced/awari' }}
+
+    steps:
+      - name: Install tools and build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dput \
+            curl ca-certificates git pkg-config gcc make \
+            libwayland-dev libegl-dev libxkbcommon-dev \
+            libssl-dev libfontconfig1-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p awari
+
+      - name: Stage
+        run: |
+          mkdir -p dist/awari
+          cp target/release/awari dist/awari/awari
+          cp LICENSE contrib/awari.service contrib/config.kdl dist/awari/
+
+      - name: Configure Launchpad SSH key
+        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.LAUNCHPAD_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan ppa.launchpadcontent.net >> ~/.ssh/known_hosts
+
+      - name: Configure dput
+        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        run: |
+          slug="${PPA_NAME##*/}"
+          cat >> ~/.dput.cf <<EOF
+          [ppa:${PPA_NAME}]
+          fqdn            = ppa.launchpadcontent.net
+          method          = scp
+          incoming        = ~upload/ppa/${slug}
+          allow_unsigned_uploads = 0
+          EOF
+
+      - name: Submit build
+        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        run: |
+          version="${GITHUB_REF##*/}"
+          version="${version#v}"
+          DIST_DIR="$PWD/dist" DISTRIBUTION="noble" bash ci/publish-ppa.sh "$version"
