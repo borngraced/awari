@@ -12,7 +12,6 @@ Source3:        LICENSE
 
 ExclusiveArch:  x86_64
 
-Requires:       wayland
 Requires:       mesa-libEGL
 Requires:       fontconfig
 Requires:       libxkbcommon
