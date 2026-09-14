@@ -1,0 +1,19 @@
+# Maintainer: Samuel Onoja Taiwo <awari@sot.dev>
+pkgname=awari
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="A fast Wayland launcher for apps, files and windows"
+arch=('x86_64')
+url="https://github.com/borngraced/awari"
+license=('GPL-3.0-or-later')
+depends=('wayland' 'libxkbcommon' 'mesa' 'fontconfig')
+source=('awari' 'awari.service' 'config.kdl' 'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+options=('!debug')
+
+package() {
+  install -Dm755 "$srcdir/awari" "$pkgdir/usr/bin/awari"
+  install -Dm644 "$srcdir/awari.service" "$pkgdir/usr/lib/systemd/user/awari.service"
+  install -Dm644 "$srcdir/config.kdl" "$pkgdir/usr/share/awari/config.kdl"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

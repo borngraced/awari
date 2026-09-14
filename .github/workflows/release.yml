@@ -1,0 +1,140 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            container: ubuntu:24.04
+            install: |
+              apt-get update
+              apt-get install -y --no-install-recommends curl ca-certificates git \
+                xz-utils pkg-config gcc make zlib1g-dev \
+                libwayland-dev libegl-dev libxkbcommon-dev libssl-dev libfontconfig1-dev
+          - name: fedora
+            container: fedora:latest
+            install: |
+              dnf install -y git curl xz gcc make pkgconf-pkg-config \
+                openssl-devel zlib-devel \
+                wayland-devel mesa-libEGL-devel libxkbcommon-devel fontconfig-devel
+          - name: arch
+            container: archlinux:latest
+            install: |
+              pacman -Sy --noconfirm --needed base-devel git curl pkgconf \
+                openssl wayland libxkbcommon mesa fontconfig
+    container:
+      image: ${{ matrix.container }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Install build dependencies
+        run: ${{ matrix.install }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Build release
+        run: cargo build --release -p awari
+
+      - name: Verify binary
+        run: |
+          test -x target/release/awari
+          ls -lh target/release/awari
+
+      - name: Stage
+        run: |
+          mkdir -p dist/awari
+          cp target/release/awari dist/awari/awari
+          cp LICENSE dist/awari/LICENSE
+          cp contrib/awari.service dist/awari/awari.service
+          cp contrib/config.kdl dist/awari/config.kdl
+          (cd dist && tar czf awari-${{ matrix.name }}-x86_64.tar.gz awari)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: awari-${{ matrix.name }}-x86_64
+          path: dist/awari-${{ matrix.name }}-x86_64.tar.gz
+          if-no-files-found: error
+
+  package:
+    name: package-${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            container: ubuntu:24.04
+          - name: fedora
+            container: fedora:latest
+          - name: arch
+            container: archlinux:latest
+    container:
+      image: ${{ matrix.container }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: awari-${{ matrix.name }}-x86_64
+          path: stage
+
+      - name: Extract
+        run: |
+          tar xzf stage/awari-${{ matrix.name }}-x86_64.tar.gz -C stage
+
+      - name: Package
+        run: bash ci/package-${{ matrix.name }}.sh stage/awari
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: awari-${{ matrix.name }}-pkg
+          path: |
+            stage/awari/awari-${{ matrix.name }}-x86_64.tar.gz
+            stage/awari/*.deb
+            stage/awari/*.rpm
+            stage/awari/*.pkg.tar.zst
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*

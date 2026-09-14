@@ -1,4 +1,7 @@
 /target/
+*.deb
+*.rpm
+*.pkg.tar.zst
 .DS_Store
 *.swp
 .idea/
