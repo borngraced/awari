@@ -13,6 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:latest
     timeout-minutes: 60
+    env:
+      COPR_API_LOGIN: ${{ secrets.COPR_API_LOGIN }}
+      COPR_API_USERNAME: ${{ secrets.COPR_API_USERNAME }}
+      COPR_API_TOKEN: ${{ secrets.COPR_API_TOKEN }}
 
     steps:
       - name: Install tools and build deps
@@ -40,17 +44,15 @@ jobs:
           cp LICENSE contrib/awari.service contrib/config.kdl dist/awari/
 
       - name: Configure copr-cli
-        if: ${{ secrets.COPR_API_TOKEN != '' }}
+        if: ${{ env.COPR_API_TOKEN != '' }}
         run: |
           mkdir -p ~/.config/copr
           printf '[copr-cli]\nlogin = %s\nusername = %s\ntoken = %s\ncopr_url = https://copr.fedorainfracloud.org\n' \
-            "${{ secrets.COPR_API_LOGIN }}" \
-            "${{ secrets.COPR_API_USERNAME }}" \
-            "${{ secrets.COPR_API_TOKEN }}" > ~/.config/copr
+            "$COPR_API_LOGIN" "$COPR_API_USERNAME" "$COPR_API_TOKEN" > ~/.config/copr
           chmod 600 ~/.config/copr
 
       - name: Submit build
-        if: ${{ secrets.COPR_API_TOKEN != '' }}
+        if: ${{ env.COPR_API_TOKEN != '' }}
         run: |
           version="${GITHUB_REF##*/}"
           version="${version#v}"

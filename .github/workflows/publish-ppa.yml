@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 60
     env:
       PPA_NAME: ${{ vars.PPA_NAME || 'borngraced/awari' }}
+      LAUNCHPAD_SSH_KEY: ${{ secrets.LAUNCHPAD_SSH_KEY }}
 
     steps:
       - name: Install tools and build deps
@@ -43,16 +44,16 @@ jobs:
           cp LICENSE contrib/awari.service contrib/config.kdl dist/awari/
 
       - name: Configure Launchpad SSH key
-        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.LAUNCHPAD_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "$LAUNCHPAD_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan ppa.launchpadcontent.net >> ~/.ssh/known_hosts
 
       - name: Configure dput
-        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: |
           slug="${PPA_NAME##*/}"
           cat >> ~/.dput.cf <<EOF
@@ -64,7 +65,7 @@ jobs:
           EOF
 
       - name: Submit build
-        if: ${{ secrets.LAUNCHPAD_SSH_KEY != '' }}
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: |
           version="${GITHUB_REF##*/}"
           version="${version#v}"
