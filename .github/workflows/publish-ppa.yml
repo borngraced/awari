@@ -18,6 +18,7 @@ jobs:
 
     steps:
       - name: Install tools and build deps
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends dput \
@@ -29,15 +30,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         uses: Swatinem/rust-cache@v2
 
       - name: Build release
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: cargo build --release -p awari
 
       - name: Stage
+        if: ${{ env.LAUNCHPAD_SSH_KEY != '' }}
         run: |
           mkdir -p dist/awari
           cp target/release/awari dist/awari/awari
