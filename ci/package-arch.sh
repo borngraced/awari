@@ -4,6 +4,10 @@ set -euo pipefail
 dir=${1:?usage: package-arch.sh <staging-dir> [version]}
 ver=${2:-0.1.0}
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case "$dir" in
+  /*) : ;;
+  *) dir="$(cd "$dir" && pwd)" ;;
+esac
 
 if [ "$(id -u)" = 0 ]; then
   # makepkg ships with pacman/base, but fakeroot + debugedit do not.
