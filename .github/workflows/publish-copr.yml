@@ -3,6 +3,7 @@ name: publish-copr
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -52,9 +53,41 @@ jobs:
             "$COPR_API_LOGIN" "$COPR_API_USERNAME" "$COPR_API_TOKEN" > ~/.config/copr
           chmod 600 ~/.config/copr
 
+      - name: Sanitize project repos
+        if: ${{ env.COPR_API_TOKEN != '' }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+
+          payload = {
+              "chroots": ["fedora-43-x86_64", "fedora-44-x86_64", "fedora-rawhide-x86_64"],
+              "description": "Awari is a fast Wayland launcher. Built with GPUI and fff search.",
+              "instructions": "sudo dnf copr enable borngraced/awari\nsudo dnf install awari",
+              "homepage": "https://github.com/borngraced/awari",
+              "contact": "0@sot.dev",
+              "repos": [],
+              "enable_net": False,
+          }
+          req = urllib.request.Request(
+              "https://copr.fedorainfracloud.org/api_3/project/edit/borngraced/awari/",
+              method="PUT",
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          auth = base64.b64encode(
+              (os.environ["COPR_API_LOGIN"] + ":" + os.environ["COPR_API_TOKEN"]).encode()
+          ).decode()
+          req.add_header("Authorization", "Basic " + auth)
+          try:
+              body = urllib.request.urlopen(req).read().decode()[:300]
+              print("project edit:", body)
+          except Exception as exc:
+              print("project edit failed:", exc)
+              raise
+          PY
+
       - name: Submit build
         if: ${{ env.COPR_API_TOKEN != '' }}
         run: |
-          version="${GITHUB_REF##*/}"
-          version="${version#v}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           DIST_DIR="$PWD/dist" bash ci/publish-copr.sh "$version"
