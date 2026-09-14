@@ -134,6 +134,13 @@ awari ping
 
 ## Install
 
+| Distribution | Install |
+| --- | --- |
+| [![Copr](https://copr.fedorainfracloud.org/coprs/borngraced/awari/package/awari/status_image/last_build.png)](https://copr.fedorainfracloud.org/coprs/borngraced/awari/package/awari/) **Fedora** 43 / 44 / rawhide | `sudo dnf copr enable borngraced/awari`<br>`sudo dnf install awari` |
+| **Debian / Ubuntu** | `sudo add-apt-repository ppa:borngraced/awari`<br>`sudo apt install awari`<br><sup>PPA coming soon</sup> |
+| **Arch** | `sudo pacman -U awari-0.1.0-1-x86_64.pkg.tar.zst` |
+| **Any Linux** | Prebuilt `.deb`, `.rpm`, Arch package and raw tarballs on [releases](https://github.com/borngraced/awari/releases) |
+
 `awari` isn't on crates.io because it depends on a vendored, patched GPUI under
 `.third_party/zed` (a local `[patch]` can't be published). Install from git:
 
